@@ -43,3 +43,16 @@ def dedupe_by_call_id(rows: list[dict], last_wins: bool = True) -> list[dict]:
         if last_wins or cid not in out:
             out[cid] = r
     return list(out.values())
+
+
+def append_jsonl(path: str | Path, rows: list[dict]) -> None:
+    """Append rows as JSONL. A torn last line (no trailing newline) gets a newline first, so rows never join it."""
+    p = Path(path)
+    data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows).encode("utf-8")
+    with p.open("a+b") as f:
+        f.seek(0, 2)
+        if f.tell():
+            f.seek(-1, 2)
+            if f.read(1) != b"\n":
+                f.write(b"\n")
+        f.write(data)

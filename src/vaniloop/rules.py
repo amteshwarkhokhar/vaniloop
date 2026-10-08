@@ -67,8 +67,8 @@ _add_units("mass", "g", 1, "gm", "gram", "grams", "gms")
 _add_units("mass", "kg", 1000, "kgs", "kilo", "kilos", "kilogram", "kilograms")
 _add_units("mass", "quintal", 100000, "quintals")
 _add_units("mass", "ton", 1000000, "tons", "tonne", "tonnes")
-_add_units("count", "piece", 1, "pieces", "pc", "pcs", "nos", "number", "numbers", "unit", "units", "set", "sets",
-           "pair", "pairs")
+_add_units("count", "piece", 1, "pieces", "pc", "pcs", "nos", "number", "numbers", "unit", "units", "set", "sets")
+_add_units("count", "pair", 2, "pairs")
 _add_units("count", "dozen", 12, "dozens")
 _add_units("length", "mm", 1, "millimeter", "millimetre")
 _add_units("length", "cm", 10, "centimeter", "centimetre", "centimeters", "centimetres")
@@ -280,12 +280,15 @@ def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
         return Finding(parameter="qty_accuracy", status="Unknown", basis="spoken_proxy",
                        reason=f"cannot parse quantity (buyer '{said}', bot '{kept}')")
     (alo, ahi, ua), (blo, bhi, ub) = pa, pb
+    ua = ua or norm_unit((led.buyer_facts or {}).get("unit"))
+    ub = ub or norm_unit((led.bot_confirmed or {}).get("unit"))
     ga, gb = unit_group(ua), unit_group(ub)
     if ga and gb and ga != gb:
         return Finding(parameter="qty_accuracy", status="Unknown", basis="spoken_proxy",
                        reason=f"units differ in kind (buyer '{ua}', bot '{ub}'); see qty_unit")
-    if ua and ub:  # same group: compare in the base unit
-        alo, ahi, blo, bhi = to_base(alo, ua), to_base(ahi, ua), to_base(blo, ub), to_base(bhi, ub)
+    if ua and ub:  # same group: convert the bot value into the buyer's unit, so the tolerance applies in that unit
+        k = to_base(1, ub) / to_base(1, ua)
+        blo, bhi = blo * k, bhi * k
     onset = _handoff_turn(led)
     if (alo, ahi) == (blo, bhi):
         return Finding(parameter="qty_accuracy", status="Pass", reason="quantities match", basis="spoken_proxy")

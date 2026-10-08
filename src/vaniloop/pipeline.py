@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, run_issues
-from .jsonl import dedupe_by_call_id, read_jsonl
+from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord
 from .rules import audit_call
@@ -60,15 +60,6 @@ def _run_audit(calls_path, ledgers_path, audits_path, errors_path, workers, limi
         led = extract_ledger(call)
         return led, audit_call(call, led)
 
-    def append(p: Path, line: str) -> None:
-        with p.open("a+b") as f:  # an interrupted write may leave no trailing newline: start a fresh line
-            f.seek(0, 2)
-            if f.tell():
-                f.seek(-1, 2)
-                if f.read(1) != b"\n":
-                    f.write(b"\n")
-            f.write((line + "\n").encode("utf-8"))
-
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         futs = {ex.submit(work, c): c for c in todo}
         for fut in as_completed(futs):
@@ -78,11 +69,11 @@ def _run_audit(calls_path, ledgers_path, audits_path, errors_path, workers, limi
             except Exception as e:  # one bad call must not stop the run
                 errors += 1
                 with lock:
-                    append(errors_path, json.dumps({"call_id": call.call_id, "error": f"{type(e).__name__}: {e}"}, ensure_ascii=False))
+                    append_jsonl(errors_path, [{"call_id": call.call_id, "error": f"{type(e).__name__}: {e}"}])
                 continue
             with lock:
-                append(ledgers_path, led.model_dump_json())
-                append(audits_path, aud.model_dump_json())  # audit last: it marks the call done
+                append_jsonl(ledgers_path, [led.model_dump(mode="json")])
+                append_jsonl(audits_path, [aud.model_dump(mode="json")])  # audit last: it marks the call done
             verdicts[aud.verdict] += 1
     return {"processed": len(todo) - errors, "skipped": skipped, "errors": errors, "verdicts": dict(verdicts)}
 

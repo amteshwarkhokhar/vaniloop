@@ -7,7 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from vaniloop.jsonl import read_jsonl
+from vaniloop.jsonl import append_jsonl, read_jsonl
 from vaniloop.models import CallRecord, Silence, Turn
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,19 +83,17 @@ def build_call_records(
             rec = CallRecord.model_validate(row)
             done.add(rec.call_id)
             records.append(rec)
-    with out.open("a", encoding="utf-8") as f:
-        for p in sorted(Path(transcripts_dir).glob("*.json")):
-            if p.name.startswith("_"):
-                continue
-            rec = load_transcript(p, audio_dir)
-            if rec.call_id in done:
-                continue
-            if rec.audio_path:
-                rec.silences = detect_silences(rec.audio_path)
-            f.write(rec.model_dump_json() + "\n")
-            f.flush()
-            done.add(rec.call_id)
-            records.append(rec)
+    for p in sorted(Path(transcripts_dir).glob("*.json")):
+        if p.name.startswith("_"):
+            continue
+        rec = load_transcript(p, audio_dir)
+        if rec.call_id in done:
+            continue
+        if rec.audio_path:
+            rec.silences = detect_silences(rec.audio_path)
+        append_jsonl(out, [rec.model_dump(mode="json")])
+        done.add(rec.call_id)
+        records.append(rec)
     return records
 
 
