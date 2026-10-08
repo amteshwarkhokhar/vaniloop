@@ -119,6 +119,7 @@ class Cause(BaseModel):
     nonfatal_calls: list[str] = Field(default_factory=list)
     fixability: float = 1.0
     priority: float = 0.0
+    rank_score: float = 0.0  # wilson_low * mean_severity * fixability; used for sorting
     freq_ci_low: float = 0.0
     freq_ci_high: float = 0.0
     status: Literal["ranked", "isolated", "watch"] = "ranked"

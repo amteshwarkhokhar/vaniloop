@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import threading
 from collections import Counter
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, run_issues
+from .jsonl import dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord
 from .rules import audit_call
@@ -20,17 +22,32 @@ LEDGERS_PATH = RUNS / "ledgers.jsonl"
 ERRORS_PATH = RUNS / "errors.jsonl"
 
 
-def _read_lines(p: Path) -> list[str]:
-    return [l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()] if p.exists() else []
+LOCK_MSG = "another audit run is active"
 
 
 def run_audit(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AUDITS_PATH,
               errors_path=ERRORS_PATH, workers: int = 4, limit: int | None = None) -> dict:
-    calls = [CallRecord.model_validate_json(l) for l in _read_lines(Path(calls_path))]
+    """Hold an exclusive lock on <runs>/.audit.lock for the whole run. Exit if another run holds it."""
+    lock_path = Path(audits_path).parent / ".audit.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lf:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise SystemExit(LOCK_MSG) from None
+        try:
+            return _run_audit(calls_path, ledgers_path, audits_path, errors_path, workers, limit)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def _run_audit(calls_path, ledgers_path, audits_path, errors_path, workers, limit) -> dict:
+    # duplicate input calls: first wins
+    calls = [CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)]
     if limit is not None:
         calls = calls[:limit]
     audits_path, ledgers_path, errors_path = Path(audits_path), Path(ledgers_path), Path(errors_path)
-    done = {json.loads(l)["call_id"] for l in _read_lines(audits_path)}
+    done = {r["call_id"] for r in read_jsonl(audits_path) if "call_id" in r}  # done = has an audit row
     todo = [c for c in calls if c.call_id not in done]
     skipped = len(calls) - len(todo)
     for p in (audits_path, ledgers_path, errors_path):
@@ -44,8 +61,13 @@ def run_audit(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AUDI
         return led, audit_call(call, led)
 
     def append(p: Path, line: str) -> None:
-        with p.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with p.open("a+b") as f:  # an interrupted write may leave no trailing newline: start a fresh line
+            f.seek(0, 2)
+            if f.tell():
+                f.seek(-1, 2)
+                if f.read(1) != b"\n":
+                    f.write(b"\n")
+            f.write((line + "\n").encode("utf-8"))
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         futs = {ex.submit(work, c): c for c in todo}

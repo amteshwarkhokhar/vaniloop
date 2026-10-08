@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 from vaniloop.models import AuditRecord, CallRecord, Cause
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,30 +39,47 @@ def _pick(d: Path, *names: str) -> Path | None:
     return None
 
 
-def _read_jsonl(p: Path | None) -> list[dict]:
-    if p is None:
-        return []
-    return [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+def _models(cls, rows: list[dict]) -> list:
+    out = []
+    for r in rows:
+        try:
+            out.append(cls.model_validate(r))
+        except Exception:  # skip a malformed row, keep the rest
+            continue
+    return out
 
 
 def load_audits(d: Path | str) -> list[AuditRecord]:
     p = _pick(Path(d), "audits.jsonl", "synthetic_audits.jsonl")
-    return [AuditRecord.model_validate(r) for r in _read_jsonl(p)]
+    return _models(AuditRecord, dedupe_by_call_id(read_jsonl(p)))
+
+
+def load_causes_doc(d: Path | str) -> tuple[list[Cause], dict]:
+    """(causes, meta). Reads the new object format and the old list format. Malformed -> warning + ([], {})."""
+    p = _pick(Path(d), "causes.json", "synthetic_causes.json")
+    if p is None:
+        return [], {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        meta: dict = {}
+        if isinstance(raw, dict):
+            meta = {k: v for k, v in raw.items() if k != "causes"}
+            raw = raw.get("causes", [])
+        if not isinstance(raw, list):
+            raise ValueError("causes is not a list")
+        return [Cause.model_validate(r) for r in raw], meta
+    except Exception as e:
+        st.warning(f"Could not read {p.name}: {type(e).__name__}. Showing no causes.")
+        return [], {}
 
 
 def load_causes(d: Path | str) -> list[Cause]:
-    p = _pick(Path(d), "causes.json", "synthetic_causes.json")
-    if p is None:
-        return []
-    raw = json.loads(p.read_text())
-    if isinstance(raw, dict):
-        raw = raw.get("causes", [])
-    return [Cause.model_validate(r) for r in raw]
+    return load_causes_doc(d)[0]
 
 
 def load_calls(d: Path | str) -> dict[str, CallRecord]:
     p = _pick(Path(d), "calls.jsonl", "synthetic_calls.jsonl")
-    return {c.call_id: c for c in (CallRecord.model_validate(r) for r in _read_jsonl(p))}
+    return {c.call_id: c for c in _models(CallRecord, read_jsonl(p))}
 
 
 # ---------- helpers ----------
@@ -206,13 +224,13 @@ def issues_tab(causes: list[Cause], total_calls: int) -> None:
     if not causes:
         st.warning("No causes found in this data source.")
         return
-    st.caption(f"Causes in given order. Frequency is over {total_calls} audited calls.")
-    hdr = st.columns([3, 1.2, 1.6, 0.8, 1, 1.6, 1, 1.2])
-    for c, t in zip(hdr, ["Name", "Type", "Parameter", "Fatal", "NonFatal", "Frequency (interval)", "Priority", "Status"]):
+    st.caption(f"Causes in given order. Frequency is over {total_calls} eligible calls.")
+    hdr = st.columns([3, 1.2, 1.6, 0.8, 1, 1.6, 1, 1, 1.2])
+    for c, t in zip(hdr, ["Name", "Type", "Parameter", "Fatal", "NonFatal", "Frequency (interval)", "Priority", "Rank score", "Status"]):
         c.markdown(f"**{t}**")
     for cs in causes:
         freq = (len(set(cs.fatal_calls) | set(cs.nonfatal_calls)) / total_calls) if total_calls else 0.0
-        row = st.columns([3, 1.2, 1.6, 0.8, 1, 1.6, 1, 1.2])
+        row = st.columns([3, 1.2, 1.6, 0.8, 1, 1.6, 1, 1, 1.2])
         row[0].write(f"{cs.cause_id} {cs.name}")
         row[1].write(cs.type)
         row[2].write(cs.parameter)
@@ -220,7 +238,8 @@ def issues_tab(causes: list[Cause], total_calls: int) -> None:
         row[4].write(len(cs.nonfatal_calls))
         row[5].write(f"{freq * 100:.1f}% ({cs.freq_ci_low * 100:.1f}-{cs.freq_ci_high * 100:.1f}%)")
         row[6].write(f"{cs.priority:.3f}")
-        row[7].markdown(
+        row[7].write(f"{cs.rank_score:.3f}")
+        row[8].markdown(
             f"<span style='background:{STATUS_COLOR.get(cs.status, '#6b7280')};color:#fff;"
             f"padding:2px 10px;border-radius:12px'>{cs.status}</span>",
             unsafe_allow_html=True,
@@ -241,7 +260,7 @@ def issues_tab(causes: list[Cause], total_calls: int) -> None:
 def main() -> None:
     st.set_page_config(page_title="vaniloop", layout="wide")
     data_dir = default_data_dir()
-    audits, causes, calls = load_audits(data_dir), load_causes(data_dir), load_calls(data_dir)
+    audits, (causes, meta), calls = load_audits(data_dir), load_causes_doc(data_dir), load_calls(data_dir)
     with st.sidebar:
         st.markdown("**Data source**")
         st.code(str(data_dir))
@@ -251,7 +270,7 @@ def main() -> None:
     if view == "Audit":
         audit_tab(audits, calls)
     elif view == "Issues":
-        issues_tab(causes, len(audits))
+        issues_tab(causes, meta.get("denominator", sum(a.verdict != "NeedsReview" for a in audits)))
     elif view == "Fix":
         st.info("Coming next: fix diffs")
     else:

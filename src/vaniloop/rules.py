@@ -51,23 +51,48 @@ _ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six":
          "saath": 60, "sattar": 70, "assi": 80, "nabbe": 90, "dedh": 1.5, "dhai": 2.5, "adhai": 2.5}
 _MULT = {"hundred": 100, "sau": 100, "thousand": 1000, "hazaar": 1000, "hazar": 1000, "hajar": 1000,
          "lakh": 100000, "lac": 100000}
-_TOKEN = re.compile(r"\d[\d,]*\.?\d*|\.\d+|[a-z]+")
+_TOKEN = re.compile(r"\d[\d,]*\.?\d*|\.\d+|[a-z]+|[-\u2013]")
+_RANGE_SEP = {"to", "se", "-", "\u2013"}
+
+# unit token -> (group, canonical name, factor to the group's base unit)
+_UNITS: dict[str, tuple[str, str, float]] = {}
 
 
-def parse_quantity(text: str | None) -> float | None:
-    """Parse the first quantity in text: digits, decimals, English or Hindi/Hinglish number words."""
-    if not text:
-        return None
+def _add_units(group: str, canon: str, factor: float, *names: str) -> None:
+    for n in (canon, *names):
+        _UNITS[n] = (group, canon, factor)
+
+
+_add_units("mass", "g", 1, "gm", "gram", "grams", "gms")
+_add_units("mass", "kg", 1000, "kgs", "kilo", "kilos", "kilogram", "kilograms")
+_add_units("mass", "quintal", 100000, "quintals")
+_add_units("mass", "ton", 1000000, "tons", "tonne", "tonnes")
+_add_units("count", "piece", 1, "pieces", "pc", "pcs", "nos", "number", "numbers", "unit", "units", "set", "sets",
+           "pair", "pairs")
+_add_units("count", "dozen", 12, "dozens")
+_add_units("length", "mm", 1, "millimeter", "millimetre")
+_add_units("length", "cm", 10, "centimeter", "centimetre", "centimeters", "centimetres")
+_add_units("length", "m", 1000, "meter", "metre", "meters", "metres", "mtr")
+_add_units("length", "ft", 304.8, "feet", "foot")
+_add_units("length", "inch", 25.4, "inches")
+_add_units("volume", "ml", 1, "milliliter", "millilitre")
+_add_units("volume", "l", 1000, "litre", "liter", "litres", "liters", "ltr")
+
+
+def _number_at(toks: list[str], i: int, skip_junk: bool = True) -> tuple[float, int] | None:
+    """Parse a number starting at toks[i]. Returns (value, index of the first token after it)."""
     total = current = 0.0
     started = False
     prev_digit = False
-    for tok in _TOKEN.findall(str(text).lower()):
+    while i < len(toks):
+        tok = toks[i]
         if tok[0].isdigit() or tok[0] == ".":
             if started and (prev_digit or current):
                 break  # a second separate number: stop at the first
             try:
                 val = float(tok.replace(",", ""))
             except ValueError:
+                i += 1
                 continue
             current += val
             started = prev_digit = True
@@ -76,6 +101,7 @@ def parse_quantity(text: str | None) -> float | None:
             started, prev_digit = True, False
         elif tok in _MULT:
             if not started:
+                i += 1
                 continue
             m = _MULT[tok]
             if m == 100:
@@ -85,10 +111,60 @@ def parse_quantity(text: str | None) -> float | None:
                 current = 0.0
             prev_digit = False
         elif tok == "and" and started:
-            continue
+            pass
         elif started:
             break
-    return total + current if started else None
+        elif not skip_junk:
+            return None
+        i += 1
+    return (total + current, i) if started else None
+
+
+def parse_quantity(text: str | None) -> float | None:
+    """Parse the first quantity in text: digits, decimals, English or Hindi/Hinglish number words."""
+    if not text:
+        return None
+    r = _number_at(_TOKEN.findall(str(text).lower()), 0)
+    return r[0] if r else None
+
+
+def norm_unit(text: str | None) -> str | None:
+    """Canonical unit name for a unit word (first token that is a known unit), else None."""
+    for tok in _TOKEN.findall(str(text or "").lower()):
+        if tok in _UNITS:
+            return _UNITS[tok][1]
+    return None
+
+
+def unit_group(unit: str | None) -> str | None:
+    return _UNITS[unit][0] if unit in _UNITS else None
+
+
+def to_base(value: float, unit: str | None) -> float:
+    return value * _UNITS[unit][2] if unit in _UNITS else value
+
+
+def parse_quantity_full(text: str | None) -> tuple[float, float, str | None] | None:
+    """(low, high, unit|None). A range "2-3", "2 se 3" or "2 to 3" gives low=2, high=3; a single value low=high.
+    The unit is the canonical name of the unit word right after a number (None if absent). None if no number."""
+    if not text:
+        return None
+    toks = _TOKEN.findall(str(text).lower())
+    r = _number_at(toks, 0)
+    if not r:
+        return None
+    low, i = r
+    high, unit = low, None
+    if i < len(toks) and toks[i] in _UNITS:
+        unit, i = _UNITS[toks[i]][1], i + 1
+    if i < len(toks) and toks[i] in _RANGE_SEP:
+        r2 = _number_at(toks, i + 1, skip_junk=False)
+        if r2:
+            high, j = r2
+            if j < len(toks) and toks[j] in _UNITS and unit is None:
+                unit = _UNITS[toks[j]][1]
+            low, high = min(low, high), max(low, high)
+    return low, high, unit
 
 
 def _fmt_pct(x: float) -> str:
@@ -143,7 +219,7 @@ def rule_looping(call: CallRecord, led: Ledger) -> Finding:
     others = f"; {len(results) - 1} other looping slot(s)" if len(results) > 1 else ""
     return Finding(parameter="looping", status="Fatal" if fatal else "NonFatal", basis="observed",
                    reason=f"bot asked for {label} {n} times ({why}){others}",
-                   evidence=[_ev(call, i) for i in idxs], onset_turn=idxs[LOOP_MAX_ASKS])
+                   evidence=[_ev(call, i) for i in idxs], onset_turn=min(r[3][LOOP_MAX_ASKS] for r in results))
 
 
 def rule_category_isq(call: CallRecord, led: Ledger) -> Finding:
@@ -199,19 +275,58 @@ def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
     if led.scope not in BL_SCOPES or not said or not kept:
         return Finding(parameter="qty_accuracy", status="NotApplicable", basis="observed",
                        reason="needs both a buyer quantity and a bot-confirmed quantity")
-    a, b = parse_quantity(said), parse_quantity(kept)
-    if a is None or b is None:
+    pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
+    if pa is None or pb is None:
         return Finding(parameter="qty_accuracy", status="Unknown", basis="spoken_proxy",
                        reason=f"cannot parse quantity (buyer '{said}', bot '{kept}')")
-    if a == b:
+    (alo, ahi, ua), (blo, bhi, ub) = pa, pb
+    ga, gb = unit_group(ua), unit_group(ub)
+    if ga and gb and ga != gb:
+        return Finding(parameter="qty_accuracy", status="Unknown", basis="spoken_proxy",
+                       reason=f"units differ in kind (buyer '{ua}', bot '{ub}'); see qty_unit")
+    if ua and ub:  # same group: compare in the base unit
+        alo, ahi, blo, bhi = to_base(alo, ua), to_base(ahi, ua), to_base(blo, ub), to_base(bhi, ub)
+    onset = _handoff_turn(led)
+    if (alo, ahi) == (blo, bhi):
         return Finding(parameter="qty_accuracy", status="Pass", reason="quantities match", basis="spoken_proxy")
+    if blo == bhi and alo < ahi and alo <= blo <= ahi:
+        return Finding(parameter="qty_accuracy", status="NonFatal", basis="spoken_proxy", onset_turn=onset,
+                       reason=f"range collapsed to one value (buyer said '{said}', bot confirmed '{kept}')")
+    if blo != bhi and (blo <= ahi and alo <= bhi):  # bot range overlaps the buyer's but is not the same
+        return Finding(parameter="qty_accuracy", status="NonFatal", basis="spoken_proxy", onset_turn=onset,
+                       reason=f"ranges differ (buyer '{said}', bot '{kept}')")
+    # nearest endpoint of the buyer's range to the bot's value (or nearest bot endpoint for a bot range)
+    if blo == bhi:
+        a, b = (alo if blo < alo else ahi), blo
+    else:
+        a, b = (alo, bhi) if bhi < alo else (ahi, blo)
     diff = abs(a - b)
     rel = diff / abs(a) if a else float("inf")
     minor = diff <= QTY_MINOR_ABS and rel <= QTY_MINOR_REL
     return Finding(parameter="qty_accuracy", status="NonFatal" if minor else "Fatal", basis="spoken_proxy",
                    reason=f"buyer said '{said}' ({a:g}), bot confirmed '{kept}' ({b:g}); "
                           f"diff {diff:g} ({_fmt_pct(rel) if rel != float('inf') else 'n/a'})",
-                   onset_turn=_handoff_turn(led))
+                   onset_turn=onset)
+
+
+def rule_qty_unit(call: CallRecord, led: Ledger) -> Finding:
+    said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
+    if led.scope not in BL_SCOPES or not said or not kept:
+        return Finding(parameter="qty_unit", status="NotApplicable", basis="observed",
+                       reason="needs both a buyer quantity and a bot-confirmed quantity")
+    pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
+    ua = (pa[2] if pa else None) or norm_unit(led.buyer_facts.get("unit"))
+    ub = (pb[2] if pb else None) or norm_unit(led.bot_confirmed.get("unit"))
+    if ua is None and ub is None:
+        return Finding(parameter="qty_unit", status="NotApplicable", basis="spoken_proxy", reason="no unit on either side")
+    if ua is None or ub is None:
+        return Finding(parameter="qty_unit", status="Pass", basis="spoken_proxy",
+                       reason=f"only one side states a unit (buyer '{ua}', bot '{ub}')")
+    if unit_group(ua) != unit_group(ub):
+        return Finding(parameter="qty_unit", status="Fatal", basis="spoken_proxy", onset_turn=_handoff_turn(led),
+                       reason=f"buyer unit '{ua}' ({unit_group(ua)}) but bot confirmed '{ub}' ({unit_group(ub)})")
+    return Finding(parameter="qty_unit", status="Pass", basis="spoken_proxy",
+                   reason="units are the same kind; values are checked by qty_accuracy")
 
 
 def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
@@ -238,7 +353,7 @@ def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
 
 
 RULES = [rule_category_isq, rule_product_accuracy, rule_qty_probing, rule_qty_missed, rule_qty_accuracy,
-         rule_looping, rule_dead_air]
+         rule_qty_unit, rule_looping, rule_dead_air]
 
 
 def label_coverage(call: CallRecord, led: Ledger) -> tuple[float, float]:
@@ -248,6 +363,13 @@ def label_coverage(call: CallRecord, led: Ledger) -> tuple[float, float]:
     lb = {b.idx for b in led.bot_turns} & bots
     lu = {u.idx for u in led.user_turns} & users
     return (len(lb) / len(bots) if bots else 1.0, len(lu) / len(users) if users else 1.0)
+
+
+def unlabelled_turns(call: CallRecord, led: Ledger) -> list[int]:
+    """Turn idx values of bot and user turns that have no label of the right kind."""
+    lb = {b.idx for b in led.bot_turns}
+    lu = {u.idx for u in led.user_turns}
+    return sorted(t.idx for t in call.turns if t.idx not in (lb if t.speaker == "bot" else lu))
 
 
 def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
@@ -260,6 +382,7 @@ def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
         return AuditRecord(call_id=call.call_id, verdict="NeedsReview", scope=led.scope, findings=[],
                            flags=["low_confidence"],
                            review_reason=f"incomplete ledger (coverage {cov * 100:.0f}%)" + ("; scope missing" if scope_missing else ""))
+    missing = unlabelled_turns(call, led)
     findings = [r(call, led) for r in RULES]
     flags: list = []
     if any(u.frustrated >= FRUSTRATED_P for u in led.user_turns):
@@ -268,7 +391,7 @@ def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
         flags.append("human_request")
     if any(f.parameter == "looping" and f.status in ("Fatal", "NonFatal") for f in findings):
         flags.append("loops")
-    if any(f.parameter in ("product_change", "qty_missed", "qty_accuracy", "category_isq") and f.status == "Fatal" for f in findings):
+    if any(f.parameter in ("product_change", "qty_missed", "qty_accuracy", "qty_unit", "category_isq") and f.status == "Fatal" for f in findings):
         flags.append("wrong_requirement")
     statuses = {f.status for f in findings}
     unknown = [f.parameter for f in findings if f.status == "Unknown" and f.parameter not in UNKNOWN_EXEMPT]
@@ -279,7 +402,11 @@ def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
         verdict = "NonFatal"
     elif unknown:
         verdict = "NeedsReview"
-        review = "unknown on: " + ", ".join(unknown)
+        review = "unknown on: " + ", ".join(unknown) + (f"; unlabelled turns: {missing}" if missing else "")
+        flags.append("low_confidence")
+    elif missing:
+        verdict = "NeedsReview"  # Pass needs 100% label coverage
+        review = f"unlabelled turns: {missing}"
         flags.append("low_confidence")
     else:
         verdict = "Pass"
