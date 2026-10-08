@@ -1,0 +1,98 @@
+[
+ {
+  "cause_id": "C-01",
+  "name": "Specs kept after product change",
+  "description": "Synthetic cause.",
+  "type": "prompt",
+  "parameter": "category_isq",
+  "fatal_calls": [
+   "syn_002",
+   "syn_010",
+   "syn_018",
+   "syn_026",
+   "syn_034"
+  ],
+  "nonfatal_calls": [],
+  "fixability": 0.8,
+  "priority": 0.1,
+  "freq_ci_low": 0.045,
+  "freq_ci_high": 0.20500000000000002,
+  "status": "ranked"
+ },
+ {
+  "cause_id": "C-02",
+  "name": "Bot repeats the same question",
+  "description": "Synthetic cause.",
+  "type": "flow_logic",
+  "parameter": "looping",
+  "fatal_calls": [
+   "syn_001",
+   "syn_009",
+   "syn_017",
+   "syn_025",
+   "syn_033"
+  ],
+  "nonfatal_calls": [],
+  "fixability": 0.8,
+  "priority": 0.1,
+  "freq_ci_low": 0.045,
+  "freq_ci_high": 0.20500000000000002,
+  "status": "ranked"
+ },
+ {
+  "cause_id": "C-03",
+  "name": "Long silence before reply",
+  "description": "Synthetic cause.",
+  "type": "asr",
+  "parameter": "dead_air",
+  "fatal_calls": [],
+  "nonfatal_calls": [
+   "syn_004",
+   "syn_012",
+   "syn_020",
+   "syn_028",
+   "syn_036"
+  ],
+  "fixability": 0.8,
+  "priority": 0.1,
+  "freq_ci_low": 0.045,
+  "freq_ci_high": 0.20500000000000002,
+  "status": "ranked"
+ },
+ {
+  "cause_id": "C-04",
+  "name": "Quantity not probed",
+  "description": "Synthetic cause.",
+  "type": "knowledge_gap",
+  "parameter": "qty_probing",
+  "fatal_calls": [],
+  "nonfatal_calls": [
+   "syn_003",
+   "syn_011",
+   "syn_019",
+   "syn_027",
+   "syn_035"
+  ],
+  "fixability": 0.8,
+  "priority": 0.1,
+  "freq_ci_low": 0.045,
+  "freq_ci_high": 0.20500000000000002,
+  "status": "watch"
+ },
+ {
+  "cause_id": "C-05",
+  "name": "Rare one-off case",
+  "description": "Synthetic cause.",
+  "type": "prompt",
+  "parameter": "category_isq",
+  "fatal_calls": [
+   "syn_002"
+  ],
+  "nonfatal_calls": [],
+  "fixability": 0.8,
+  "priority": 0.02,
+  "freq_ci_low": 0.0,
+  "freq_ci_high": 0.10500000000000001,
+  "status": "isolated"
+ }
+]
