@@ -1,0 +1,9 @@
+.env
+data/raw/
+transcripts/
+runs/
+.cache/
+.playwright-mcp/
+__pycache__/
+.venv/
+*.pyc

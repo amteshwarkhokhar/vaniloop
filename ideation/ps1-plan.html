@@ -1,0 +1,573 @@
+<title>VANI Fix Loop Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: single reading column (~880px) with full-width tables/diagram; stages colour-coded like an audit sheet: pass / fatal / non-fatal */
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --ink:#18202b; --muted:#5a6676; --line:#dde2e9;
+  --accent:#1f5fbf; --accent-soft:#e6eefb;
+  --pass:#1e7a46; --pass-soft:#e3f3ea; --fatal:#b42318; --fatal-soft:#fbe7e5; --warn:#a15c00; --warn-soft:#fdf0dc;
+  --code-bg:#f0f2f6;
+  --f-display:"Fraunces", Georgia, "Times New Roman", serif;
+  --f-body:"Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0f141b; --surface:#161d27; --ink:#e6ebf2; --muted:#9aa7b8; --line:#2a3443;
+  --accent:#7aa7ff; --accent-soft:#1b2a44;
+  --pass:#5cc98a; --pass-soft:#16301f; --fatal:#ff8a7e; --fatal-soft:#3a1b18; --warn:#f2b45a; --warn-soft:#3a2a12;
+  --code-bg:#1c2430; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --surface:#161d27; --ink:#e6ebf2; --muted:#9aa7b8; --line:#2a3443;
+  --accent:#7aa7ff; --accent-soft:#1b2a44;
+  --pass:#5cc98a; --pass-soft:#16301f; --fatal:#ff8a7e; --fatal-soft:#3a1b18; --warn:#f2b45a; --warn-soft:#3a2a12;
+  --code-bg:#1c2430; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 var(--f-body);padding-inline:16px;padding-block:32px 64px}
+.wrap{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:40px}
+h1,h2,h3{font-family:var(--f-display);text-wrap:balance;line-height:1.2;margin:0}
+h1{font-size:clamp(28px,5vw,40px)}
+h2{font-size:26px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h3{font-size:18px;font-family:var(--f-body);font-weight:700}
+p{margin:0;max-width:68ch}
+section{display:flex;flex-direction:column;gap:16px}
+.eyebrow{font:600 12px/1 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.lede{font-size:18px;color:var(--muted)}
+.verdict{background:var(--accent-soft);border-left:4px solid var(--accent);padding:16px 20px;border-radius:4px}
+.verdict p{max-width:none}
+code,.mono{font-family:var(--f-mono);font-size:.88em}
+code{background:var(--code-bg);padding:1px 5px;border-radius:3px}
+.tablebox{overflow-x:auto;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:14.5px;min-width:640px}
+th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}
+th{font:600 12px/1.3 var(--f-mono);letter-spacing:.05em;text-transform:uppercase;color:var(--muted);background:var(--code-bg)}
+tr:last-child td{border-bottom:0}
+td:first-child{font-weight:600;white-space:nowrap}
+.chip{display:inline-block;font:600 11px/1 var(--f-mono);letter-spacing:.04em;padding:4px 7px;border-radius:999px;white-space:nowrap}
+.c-a{background:var(--pass-soft);color:var(--pass)}
+.c-b{background:var(--accent-soft);color:var(--accent)}
+.c-c{background:var(--warn-soft);color:var(--warn)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.card p{font-size:15px}
+ul{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
+li{max-width:68ch}
+.stage{display:grid;grid-template-columns:120px 1fr;gap:16px;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px}
+.stage .tag{font:700 13px/1.2 var(--f-mono);color:var(--accent)}
+.stage .tag span{display:block;font-weight:400;color:var(--muted);margin-top:4px}
+.stage > div{min-width:0;display:flex;flex-direction:column;gap:8px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:15px}
+.kv dt{color:var(--muted);font-weight:600}
+.kv dd{margin:0;min-width:0}
+@media (max-width:560px){.stage{grid-template-columns:1fr}.kv{grid-template-columns:1fr}.kv dt{margin-top:6px}}
+pre.diagram{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:16px;overflow-x:auto;font:13px/1.45 var(--f-mono);color:var(--ink);margin:0}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:640px){.compare{grid-template-columns:1fr}}
+.panel{border-radius:6px;border:1px solid var(--line);background:var(--surface);overflow:hidden;min-width:0}
+.panel header{padding:8px 12px;font:600 12px/1.3 var(--f-mono);letter-spacing:.05em;text-transform:uppercase}
+.panel.old header{background:var(--fatal-soft);color:var(--fatal)}
+.panel.new header{background:var(--pass-soft);color:var(--pass)}
+.turns{padding:10px 12px;display:flex;flex-direction:column;gap:6px;font-size:14px}
+.t b{font-family:var(--f-mono);font-size:12px;color:var(--muted);margin-right:6px}
+.t.bad{background:var(--fatal-soft);border-radius:4px;padding:2px 6px}
+.t.good{background:var(--pass-soft);border-radius:4px;padding:2px 6px}
+.t.fork{border-top:2px dashed var(--line);padding-top:6px;font:600 11px/1.2 var(--f-mono);color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.diff{background:var(--code-bg);border-radius:6px;padding:12px 14px;font:13px/1.55 var(--f-mono);overflow-x:auto;margin:0}
+.diff .add{color:var(--pass)}
+.diff .del{color:var(--fatal)}
+.note{font-size:14px;color:var(--muted)}
+.steps{counter-reset:s;list-style:none;padding:0;display:flex;flex-direction:column;gap:10px}
+.steps li{counter-increment:s;display:grid;grid-template-columns:32px 1fr;gap:10px;max-width:none}
+.steps li::before{content:counter(s);font:700 14px/28px var(--f-mono);text-align:center;width:28px;height:28px;border-radius:50%;background:var(--accent-soft);color:var(--accent)}
+.flag{background:var(--warn-soft);border-left:4px solid var(--warn);padding:12px 16px;border-radius:4px}
+.flag p{max-width:none}
+</style>
+
+<div class="wrap">
+
+<header style="display:flex;flex-direction:column;gap:12px">
+  <div class="eyebrow">Voice AI Hackathon 2.0 · PS1 Quality Audit &amp; Fix Loop · 9–10 Oct 2026</div>
+  <h1>VANI Fix Loop: research, decision and architecture</h1>
+  <p class="lede">Start with the walkthrough below. After it: what 14 agents found, how we picked one design, what we build and with which tools, and how judges will see and hear a fix work.</p>
+  <div class="verdict">
+    <p><strong>The plan in one line.</strong> We grade every VANI call against the QA team's own 17-parameter rubric. We then trace each failure to its first wrong bot turn and group the failures into testable root causes. For the top causes we write small prompt or flow patches, and we prove each patch by forking the real failed call at the failure turn and replaying it with the old and the new bot. All of it is visible on one dashboard, and it can be heard through Sarvam voice.</p>
+  </div>
+</header>
+
+<style>
+/* Walkthrough (scoped .x-*) — uses page tokens so it follows light/dark */
+.x-wrap{display:flex;flex-direction:column;gap:12px}
+.x-tabs{display:flex;flex-wrap:wrap;gap:6px}
+.x-tab{font:600 13px/1.2 var(--f-body);background:var(--surface);border:1px solid var(--line);color:var(--muted);padding:8px 12px;border-radius:6px;cursor:pointer}
+.x-tab:hover{color:var(--ink)}
+.x-tab.on{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.x-tab:focus-visible,.x-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.x-intro{font-size:15px;color:var(--muted);max-width:none}
+.x-main{display:grid;grid-template-columns:1.1fr .9fr;gap:14px;align-items:start}
+@media (max-width:860px){.x-main{grid-template-columns:1fr}}
+.x-diagram{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 6px 18px;overflow-x:auto;min-width:0}
+.x-canvas{position:relative;min-width:500px;display:grid;grid-template-columns:20px 1fr 1fr 20px;row-gap:30px;padding:4px 0}
+.x-cell{display:flex;justify-content:center;align-items:center}
+svg.x-edges{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.x-node{position:relative;z-index:2;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:7px 10px;min-width:140px;max-width:200px;text-align:center;transition:border-color .16s ease,box-shadow .16s ease,opacity .16s ease}
+.x-node .t{font:600 13px/1.3 var(--f-body);color:var(--ink)}
+.x-node .s{font:11px/1.3 var(--f-mono);color:var(--muted);margin-top:2px}
+.x-node.dim{opacity:.4}
+.x-node.seen{opacity:.95;border-color:var(--accent)}
+.x-node.hot{opacity:1;border-width:2px;border-color:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
+.x-node.hot.tone-pass{border-color:var(--pass);box-shadow:0 0 0 4px var(--pass-soft)}
+.x-node.hot.tone-fatal{border-color:var(--fatal);box-shadow:0 0 0 4px var(--fatal-soft)}
+.x-node.hot.tone-warn{border-color:var(--warn);box-shadow:0 0 0 4px var(--warn-soft)}
+path.x-edge{fill:none;stroke:var(--line);stroke-width:1.4}
+path.x-edge.hot{stroke:var(--accent);stroke-width:2.4}
+path.x-edge.hot.tone-pass{stroke:var(--pass)} path.x-edge.hot.tone-fatal{stroke:var(--fatal)} path.x-edge.hot.tone-warn{stroke:var(--warn)}
+.x-m-base{fill:var(--line)} .x-m-accent{fill:var(--accent)} .x-m-pass{fill:var(--pass)} .x-m-fatal{fill:var(--fatal)} .x-m-warn{fill:var(--warn)}
+text.x-lbl{font:10.5px var(--f-mono);fill:var(--muted);paint-order:stroke;stroke:var(--surface);stroke-width:4px}
+text.x-lbl.hot{fill:var(--ink)}
+.x-side{display:flex;flex-direction:column;gap:10px;min-width:0}
+.x-card{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:12px 14px;min-width:0}
+.x-h{font:600 11px/1 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.x-why{font-size:15.5px;line-height:1.55;color:var(--ink)}
+.x-ref{display:inline-block;margin-top:8px;font:11px var(--f-mono);color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:2px 8px}
+.x-chips{display:flex;flex-wrap:wrap;gap:6px}
+.x-chip{font:600 11px/1 var(--f-mono);padding:5px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.x-chip.pass{color:var(--pass);border-color:var(--pass);background:var(--pass-soft)}
+.x-chip.fatal{color:var(--fatal);border-color:var(--fatal);background:var(--fatal-soft)}
+.x-chip.warn{color:var(--warn);border-color:var(--warn);background:var(--warn-soft)}
+.x-chip.info{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.x-meter{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.x-dot{width:12px;height:12px;border-radius:3px;border:1px solid var(--line)}
+.x-dot.f{background:var(--fatal);border-color:var(--fatal)}
+.x-dot.p{background:var(--pass);border-color:var(--pass)}
+.x-mt{font:12px var(--f-mono);color:var(--muted);margin-left:6px}
+.x-log{max-height:230px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
+.x-ln{display:grid;grid-template-columns:58px 1fr;gap:8px;font-size:13.5px;line-height:1.4}
+.x-ln .w{font:600 10.5px/1.6 var(--f-mono);text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.x-ln .tx{min-width:0;overflow-wrap:anywhere}
+.x-ln.call .tx{font-style:italic}
+.x-ln.ok .tx{color:var(--pass)} .x-ln.err .tx{color:var(--fatal)} .x-ln.hold .tx{color:var(--warn)}
+.x-empty{color:var(--muted);font-size:13.5px;font-style:italic}
+.x-ctrls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.x-btn{font:600 13px/1 var(--f-body);cursor:pointer;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:10px 16px}
+.x-btn.primary{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.x-btn.primary:disabled{opacity:.4;cursor:default}
+.x-btn.toggled{color:var(--accent);border-color:var(--accent)}
+.x-hint{font:11px var(--f-mono);color:var(--muted);margin-left:auto}
+@media (prefers-reduced-motion:reduce){.x-node{transition:none}}
+</style>
+
+<section id="walkthrough">
+  <h2>Start here: watch a call go through the loop</h2>
+  <p>Pick a story, then press <strong>Next</strong> (or the space bar). Each story follows one call and teaches one part of the system. The boxes light up as the call moves. The panels on the right show what the system knows at that moment.</p>
+  <div class="x-wrap">
+    <div class="x-tabs" id="x-tabs" role="tablist"></div>
+    <p class="x-intro" id="x-intro"></p>
+    <div class="x-main">
+      <div class="x-diagram">
+        <div class="x-canvas" id="x-canvas">
+          <svg class="x-edges" id="x-edges" aria-hidden="true"></svg>
+          <div class="x-cell" style="grid-area:1/2"><div class="x-node" id="x-rec"><div class="t">Call recording</div><div class="s">1 of 713 mp3</div></div></div>
+          <div class="x-cell" style="grid-area:2/2"><div class="x-node" id="x-ing"><div class="t">Transcribe</div><div class="s">Gemini + ffmpeg</div></div></div>
+          <div class="x-cell" style="grid-area:3/2"><div class="x-node" id="x-aud"><div class="t">Audit</div><div class="s">ledger + 17 QA rules</div></div></div>
+          <div class="x-cell" style="grid-area:3/3"><div class="x-node" id="x-pass"><div class="t">Pass</div><div class="s">kept as a check</div></div></div>
+          <div class="x-cell" style="grid-area:4/3"><div class="x-node" id="x-rev"><div class="t">Needs review</div><div class="s">a human decides</div></div></div>
+          <div class="x-cell" style="grid-area:4/2"><div class="x-node" id="x-iss"><div class="t">Find the cause</div><div class="s">first wrong bot turn</div></div></div>
+          <div class="x-cell" style="grid-area:5/3"><div class="x-node" id="x-np"><div class="t">Non-prompt fix</div><div class="s">flow / ASR / latency</div></div></div>
+          <div class="x-cell" style="grid-area:5/2"><div class="x-node" id="x-fix"><div class="t">Write the fix</div><div class="s">small prompt diff</div></div></div>
+          <div class="x-cell" style="grid-area:6/2"><div class="x-node" id="x-tst"><div class="t">Test the fix</div><div class="s">fork the call, replay</div></div></div>
+          <div class="x-cell" style="grid-area:6/3"><div class="x-node" id="x-rej"><div class="t">Fix rejected</div><div class="s">broke a good call</div></div></div>
+          <div class="x-cell" style="grid-area:7/2"><div class="x-node" id="x-dash"><div class="t">Dashboard</div><div class="s">proven fix, shown</div></div></div>
+        </div>
+      </div>
+      <div class="x-side">
+        <div class="x-card"><div class="x-h">What is happening <span id="x-stepno"></span></div>
+          <div class="x-why" id="x-why"></div><span class="x-ref" id="x-ref" hidden></span></div>
+        <div class="x-card"><div class="x-h">What the system knows</div><div class="x-chips" id="x-chips"><span class="x-chip">nothing yet</span></div></div>
+        <div class="x-card"><div class="x-h">Replay results (10 runs)</div><div class="x-meter" id="x-meter"><span class="x-mt">no replay yet</span></div></div>
+        <div class="x-card"><div class="x-h">Log</div><div class="x-log" id="x-log"></div></div>
+        <div class="x-ctrls">
+          <button class="x-btn" id="x-reset" type="button">Restart</button>
+          <button class="x-btn primary" id="x-next" type="button">Next</button>
+          <button class="x-btn" id="x-auto" type="button">Auto play</button>
+          <span class="x-hint">space / → to step</span>
+        </div>
+      </div>
+    </div>
+    <p class="note">These are planned behaviours from the design, not results. The replay numbers in the stories are illustrations. Real numbers come from the Day 1 and Day 2 runs. "Decision model" means OpenAI Decisions or TypeSafe Jev. We pick one on Day 1.</p>
+  </div>
+</section>
+
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const NODES=['rec','ing','aud','pass','rev','iss','np','fix','tst','rej','dash'];
+const EDGES=[
+ {id:'r-i',f:'rec',t:'ing',fs:'b',ts:'t'},
+ {id:'i-a',f:'ing',t:'aud',fs:'b',ts:'t'},
+ {id:'a-p',f:'aud',t:'pass',fs:'r',ts:'l',label:'no errors'},
+ {id:'a-r',f:'aud',t:'rev',fs:'r',ts:'t',label:'unsure'},
+ {id:'a-s',f:'aud',t:'iss',fs:'b',ts:'t',label:'Fatal'},
+ {id:'s-n',f:'iss',t:'np',fs:'r',ts:'t',label:'not a prompt issue'},
+ {id:'s-f',f:'iss',t:'fix',fs:'b',ts:'t',label:'prompt issue'},
+ {id:'n-t',f:'np',t:'tst',fs:'l',ts:'t'},
+ {id:'f-t',f:'fix',t:'tst',fs:'b',ts:'t'},
+ {id:'t-d',f:'tst',t:'dash',fs:'b',ts:'t',label:'fails drop'},
+ {id:'t-x',f:'tst',t:'rej',fs:'r',ts:'l',label:'regression'},
+ {id:'x-f',f:'rej',t:'fix',fs:'t',ts:'r',label:'try next fix'},
+];
+/* step: n node, e edge, tone pass|fatal|warn, chips [[cls,text]], m [fails,total] or [before,after,total,'ba'], log [[who,text]], why, ref */
+const SCN=[
+{name:'Wrong product questions',intro:'A buyer wanted a school-bus CCTV camera, then switched to a home dome camera. The bot kept asking drone questions. Follow this Fatal call all the way to a proven fix.',steps:[
+ {n:'rec',e:null,chips:[['','call #282 · 198 s']],log:[['call','Buyer: "Ghar ke liye chahiye… Dome, mobile se connect."']],why:'One recorded call enters the loop. Every call goes through the same steps, all 713 of them, not a sample.',ref:'data/raw/call_recordings'},
+ {n:'ing',e:'r-i',chips:[['','call #282'],['info','transcript ready']],log:[['ai','Gemini writes the transcript: 35 turns, bot vs buyer'],['code','ffmpeg measures silences (no gap over 5 s)']],why:'The audio becomes text with speaker labels. A separate tool measures real silences, because transcript timestamps are only accurate to about 1 second.',ref:'transcripts/<call>.json'},
+ {n:'aud',e:'i-a',tone:'fatal',chips:[['','call #282'],['fatal','FATAL · Category ISQ error'],['info','evidence: turn at 88 s']],log:[['ai','Ledger: buyer confirmed "dome camera, 1 piece, mobile connect"'],['ai','Decision model: "Does flight time fit a dome camera?" → no (0.03)'],['code','QA rule "contradicting ISQ" → Fatal'],['err','Bot asked "flight time 45 minute?" at 88 s']],why:'First an LLM lists what the buyer asked for and what the bot asked. Then plain code applies the QA team\'s own rules. Each verdict comes with the exact quote and time, so an auditor can check it in seconds.',ref:'QA matrix · Category ISQ error'},
+ {n:'iss',e:'a-s',tone:'warn',chips:[['fatal','FATAL'],['warn','cause C-01 · old specs kept after product change'],['','seen in 23 calls (example)']],log:[['ai','First wrong bot turn: 57 s, asks the brand with drone options'],['code','Matched to frozen cause C-01, priority #1'],['code','Score = (5 × Fatal calls + Non-Fatal calls) × fixability']],why:'We do not stop at "wrong questions". We find the first turn where the bot went wrong and the mechanism behind it: the product changed, but the spec list did not. Every call with that mechanism joins one cause.',ref:'ideation/02_issue_B.md'},
+ {n:'fix',e:'s-f',chips:[['warn','cause C-01'],['info','fix F-01 · prompt diff, 3 lines']],log:[['ai','+ When the product changes, drop the old product\'s spec questions'],['ai','+ Ask only the specs of the new product\'s category'],['human','Teammate approves the diff']],why:'For a prompt cause, we write a small, readable change to the bot\'s instructions. It is not a rewrite. Each line names the rule it enforces and the calls it should repair.',ref:'ideation/03_fix_A.md'},
+ {n:'tst',e:'f-t',tone:'pass',m:[9,1,10,'ba'],chips:[['warn','cause C-01'],['info','fix F-01'],['pass','8 of 9 failures repaired']],log:[['code','Fork call #282 at turn 10 (the moment before the error)'],['ai','Simulated buyer continues, knowing only the real facts'],['code','Old bot: 9 of 10 runs Fatal. New bot: 1 of 10.'],['ok','Regression set: 0 new Fatals (noise floor: 1)']],why:'We freeze the real call just before the mistake, then let the old bot and the new bot each continue it. A simulated buyer plays the same facts. If failures drop and good calls stay good, the fix is proven.',ref:'ideation/04_test_B.md · fork-the-call'},
+ {n:'dash',e:'t-d',tone:'pass',m:[9,1,10,'ba'],chips:[['pass','fix F-01 proven'],['info','issue → tested fix: 14 min']],log:[['ok','Dashboard row: audit → cause → diff → before/after'],['ok','Play old vs new audio (Sarvam voice)']],why:'The judges see one chain: the call, the evidence, the cause, the exact diff and the test result. A stopwatch shows how fast the loop ran. They can also hear the old and the new bot. The fixed call also becomes a permanent guard test (story 6).',ref:'plan · section 8'},
+]},
+{name:'Clean call',intro:'A seller was unavailable, and the bot handed off cleanly in 21 seconds. See why a Pass is still useful.',steps:[
+ {n:'rec',e:null,chips:[['','call #133 · 21 s']],log:[['call','Bot: "The seller is unavailable… I\'ll send details on WhatsApp."']],why:'A short call enters. Short does not mean bad. This one is a planned handoff.',ref:'transcripts/133_…json'},
+ {n:'ing',e:'r-i',chips:[['','call #133'],['info','3 turns']],log:[['ai','Transcript: 3 turns, Hinglish']],why:'Same first step as every call.',ref:'transcripts/'},
+ {n:'aud',e:'i-a',chips:[['','call #133'],['info','scope: seller-unavailable handoff']],log:[['ai','Decision model: call scope → "handoff" (0.94)'],['code','Quantity and spec rules: not applicable to a handoff']],why:'The system first decides what kind of call this is. A handoff is not failed for "missing quantity", because it never meant to collect it. This avoids false Fatals.',ref:'ideation/01_audit_C.md · scope'},
+ {n:'pass',e:'a-p',tone:'pass',chips:[['pass','PASS'],['info','added to regression set']],log:[['ok','No rule broken → Pass']],why:'The call passes.',ref:'QA matrix · Overall call'},
+ {n:'tst',e:null,tone:'pass',chips:[['pass','PASS'],['info','regression check']],log:[['code','Every new fix is replayed on this call too'],['ok','If a fix breaks it, the fix is rejected']],why:'Good calls become guards. Every new fix must keep them passing. This is how we prove a fix did not break something else.',ref:'ideation/04_test_A.md · regression suite'},
+]},
+{name:'Name asked 4 times',intro:'The buyer said their name 4 times, and the bot kept asking. Learn why not every fix is a prompt change.',steps:[
+ {n:'rec',e:null,chips:[['','call #282, end of call']],log:[['call','Buyer: "(name), (name)." Bot: "Kripya apna naam bata dijiye."']],why:'Same call as story 1, but a different failure near the end.',ref:'transcripts/282_…json'},
+ {n:'ing',e:'r-i',chips:[['info','transcript ready']],log:[['ai','Turns 128 s to 177 s transcribed']],why:'Transcription as usual.',ref:'transcripts/'},
+ {n:'aud',e:'i-a',tone:'fatal',chips:[['fatal','LOOP · name asked 4 times'],['warn','buyer irritated']],log:[['ai','Decision model, each bot turn: "Which slot is asked?" → name, name, name, name'],['code','Code counts: 4 asks of one slot, more than the limit of 3'],['ai','Decision model: buyer frustrated? → yes (0.88)']],why:'An LLM is bad at counting. So a fast decision model labels each bot turn with the slot it asks about, and plain code counts. The loop evidence is exact.',ref:'QA matrix · Looping behaviour'},
+ {n:'iss',e:'a-s',tone:'warn',chips:[['warn','cause C-04 · name not accepted'],['','type: flow logic']],log:[['ai','Competing causes: speech recognizer misses the name, or the slot is never saved'],['code','Router: a prompt line cannot enforce a counter']],why:'Telling the bot "do not ask too often" in the prompt is not reliable. The real fix is a guard in code.',ref:'ideation/03_fix_B.md · fix router'},
+ {n:'np',e:'s-n',chips:[['warn','cause C-04'],['info','fix F-04 · flow guard']],log:[['code','Guard: after 2 failed asks, accept the best guess and confirm once'],['code','Optional: add the name to Saaras keyterms']],why:'The fix router sends this cause to a flow guard. A counter stops the loop, and the bot confirms once instead of asking forever.',ref:'ideation/03_fix_A.md · typed fix menu'},
+ {n:'tst',e:'n-t',tone:'pass',m:[7,0,10,'ba'],chips:[['pass','loop gone in replay'],['info','fix F-04']],log:[['code','Old flow: 7 of 10 runs loop. New flow: 0 of 10.']],why:'The flow fix is tested the same way as a prompt fix: replay, count, compare.',ref:'ideation/04_test_B.md'},
+ {n:'dash',e:'t-d',tone:'pass',m:[7,0,10,'ba'],chips:[['pass','fix F-04 proven']],log:[['ok','Shown on the dashboard as a "flow guard" fix']],why:'The dashboard shows which layer changed, so nobody thinks a prompt fixed a code problem.',ref:'ideation/03_fix_C.md · attribution'},
+]},
+{name:'A bad fix gets caught',intro:'The first fix for the camera problem also wipes the quantity the buyer already gave. Watch the test reject it.',steps:[
+ {n:'iss',e:null,tone:'warn',chips:[['warn','cause C-01 · old specs kept'],['info','noise floor: 1 flip in 30']],log:[['code','Cause C-01 picked, priority #1'],['code','Calibration: replay the OLD bot against itself on the 30-call regression set'],['code','Even with no change, 1 good call flips to Fatal → noise floor = 1']],why:'Before judging any fix, we measure how much the results wobble when nothing changes. LLM runs are not perfectly repeatable, so a do-nothing change can still flip a call. That wobble is the noise floor.',ref:'AgentCI D8 · noise-calibrated gate'},
+ {n:'fix',e:'s-f',chips:[['warn','cause C-01'],['info','fix F-01a · "reset everything on product change"']],log:[['ai','Candidate A: reset all collected details when the product changes']],why:'The first candidate sounds sensible: start fresh after a product change.',ref:'ideation/03_fix_C.md'},
+ {n:'tst',e:'f-t',tone:'fatal',m:[9,2,10,'ba'],chips:[['info','fix F-01a'],['fatal','4 good calls now Fatal'],['info','noise floor: 1']],log:[['ok','Drone questions gone in replay'],['err','But a passing call lost its quantity ("50 pieces")'],['err','New Fatal: Quantity missed']],why:'It fixes the target, but it breaks good calls. The regression check catches calls that used to pass and now fail.',ref:'ideation/04_test_A.md · pass→fail table'},
+ {n:'rej',e:'t-x',tone:'fatal',chips:[['fatal','F-01a rejected'],['','4 new Fatals > noise floor 1']],log:[['err','Rule: reject if new Fatals on the regression set exceed the noise floor']],why:'A fix is rejected when it breaks more good calls than random wobble would. A zero-tolerance rule sounds strict, but it would also reject a fix that changes nothing. Comparing against the measured floor is both strict and fair.',ref:'AgentCI D8 · recovery criterion'},
+ {n:'fix',e:'x-f',chips:[['warn','cause C-01'],['info','fix F-01b · "drop old specs, keep buyer details"']],log:[['ai','Candidate B: drop old spec questions, keep quantity and features']],why:'The next candidate is narrower. It changes only what the cause needs.',ref:'ideation/03_fix_A.md · 3 candidates'},
+ {n:'tst',e:'f-t',tone:'pass',m:[9,1,10,'ba'],chips:[['pass','F-01b passes'],['pass','0 new Fatals']],log:[['ok','Target: 9 → 1 Fatal runs'],['ok','Regression set: 1 flip, within the noise floor of 1']],why:'Candidate B wins. The target failures drop, and the good calls are no worse than re-running the old bot. This is also how we show the judges that our test is strict, not friendly.',ref:'ideation/04_test_C.md · negative controls'},
+]},
+{name:'Unsure call',intro:'A noisy call where the buyer says "Hello?" twice. The models disagree. See how uncertainty goes to a human instead of becoming a fake Pass.',steps:[
+ {n:'rec',e:null,chips:[['','call #10 · 72 s']],log:[['call','Buyer: "Hello?… Aap sun nahi paa rahe hain kya?"']],why:'The buyer seems not to hear the bot, and there are gaps.',ref:'transcripts/10_…json'},
+ {n:'ing',e:'r-i',chips:[['info','silence 6.5 s found (example)']],log:[['code','ffmpeg: silence from 29 s to 36 s']],why:'The silence check runs on the real audio.',ref:'QA matrix · Dead air (> 5 s)'},
+ {n:'aud',e:'i-a',tone:'warn',chips:[['warn','dead air?'],['','Gemini: Non-Fatal · Claude: Fatal']],log:[['ai','Gemini says the second product was deflected: Non-Fatal'],['ai','Claude, checking it, says the buyer\'s request was lost: Fatal'],['code','Models disagree → do not guess']],why:'For risky or close calls, a second model from another family checks the first. When they disagree, we do not pick one.',ref:'ideation/01_audit_A.md · challenge pass'},
+ {n:'rev',e:'a-r',tone:'warn',chips:[['warn','NEEDS REVIEW'],['info','sent to teammate']],log:[['human','Teammate listens, labels: Non-Fatal (policy unclear)'],['code','Label saved → used for the agreement score']],why:'A person decides. Each human label also measures how often our auto-grades match humans, which is 25% of the PS1 score.',ref:'PS1 scoring · agreement with auditors'},
+]},
+{name:'The bug cannot come back',intro:'Weeks later, someone edits the prompt to make the bot "more concise". The edit quietly brings back the drone-questions bug. Watch the saved guard block it.',steps:[
+ {n:'tst',e:null,tone:'pass',chips:[['pass','fix F-01 approved'],['info','guard G-01 written']],log:[['ai','Guard G-01: "after a product change, no spec question from the old category"'],['code','Two-sided check: G-01 fails on the old bot, passes on the fixed bot'],['person','Teammate approves → G-01 joins the permanent suite']],why:'When a fix is approved, its cause becomes a permanent test called a guard. A guard is kept only if it catches the bad behaviour and passes the good behaviour. That proves it tests the right thing.',ref:'AgentCI plan 06 · compounding immunity'},
+ {n:'fix',e:null,chips:[['info','new prompt edit P-17 · "be more concise"'],['','guards in suite: 6']],log:[['person','Prompt edit P-17 proposed: shorten the spec instructions']],why:'Later, an unrelated change arrives. Before it can ship, it must pass every guard saved so far.',ref:'AgentCI · regression CI'},
+ {n:'tst',e:'f-t',tone:'fatal',m:[0,7,10,'ba'],chips:[['fatal','guard G-01 FAILS'],['info','P-17']],log:[['code','Run the guard suite against P-17'],['err','G-01: 7 of 10 replays ask old-category specs again']],why:'The shortened prompt dropped the line that fixed the camera case, and guard G-01 catches it at once. Nobody needs to remember the old bug.',ref:'AgentCI · persisted-guard gate'},
+ {n:'rej',e:'t-x',tone:'fatal',chips:[['fatal','P-17 blocked'],['','reason: guard G-01 · cause C-01']],log:[['err','Blocked: reintroduces cause C-01 (old specs kept after product change)']],why:'The change is blocked, with the old cause named. Each fix makes the bot permanently harder to break. That is the "compounding" part.',ref:'AgentCI plan 06 · guard gate'},
+]}
+];
+let scn=0,step=-1,timer=null,seen=new Set(),hot=null,hotE=null,tone='accent';
+function anchor(r,s){return s==='t'?[r.x+r.w/2,r.y]:s==='b'?[r.x+r.w/2,r.y+r.h]:s==='l'?[r.x,r.y+r.h/2]:[r.x+r.w,r.y+r.h/2];}
+function draw(){
+  const svg=$('x-edges'),cv=$('x-canvas'),cb=cv.getBoundingClientRect();
+  svg.setAttribute('viewBox',`0 0 ${cv.scrollWidth} ${cv.scrollHeight}`);
+  const mk=c=>`<marker id="xm-${c}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="x-m-${c}" d="M0,0 L8,4 L0,8 z"/></marker>`;
+  let h='<defs>'+['base','accent','pass','fatal','warn'].map(mk).join('')+'</defs>',L='';
+  for(const e of EDGES){
+    const a=$('x-'+e.f).getBoundingClientRect(),b=$('x-'+e.t).getBoundingClientRect();
+    const fr={x:a.left-cb.left,y:a.top-cb.top,w:a.width,h:a.height},tr={x:b.left-cb.left,y:b.top-cb.top,w:b.width,h:b.height};
+    const[fx,fy]=anchor(fr,e.fs),[tx,ty]=anchor(tr,e.ts);let d,mx;
+    if(e.bow){const bx=e.bow>0?Math.max(fx,tx)+e.bow:Math.min(fx,tx)+e.bow;d=`M${fx},${fy} C${bx},${fy} ${bx},${ty} ${tx},${ty}`;mx=bx;}
+    else{const g=30,c1=e.fs==='b'?[fx,fy+g]:e.fs==='t'?[fx,fy-g]:e.fs==='r'?[fx+g,fy]:[fx-g,fy],c2=e.ts==='t'?[tx,ty-g]:e.ts==='b'?[tx,ty+g]:e.ts==='l'?[tx-g,ty]:[tx+g,ty];d=`M${fx},${fy} C${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${tx},${ty}`;mx=(fx+tx)/2;}
+    h+=`<path class="x-edge" id="xe-${e.id}" d="${d}" marker-end="url(#xm-base)"/>`;
+    if(e.label)L+=`<text class="x-lbl" id="xl-${e.id}" x="${mx}" y="${(fy+ty)/2-4}" text-anchor="middle">${e.label}</text>`;
+  }
+  svg.innerHTML=h+L;sync();
+}
+function sync(){
+  NODES.forEach(n=>{const el=$('x-'+n);el.className='x-node'+(seen.has(n)?' seen':step>=0?' dim':'');if(n===hot)el.className='x-node hot tone-'+tone;});
+  document.querySelectorAll('path.x-edge').forEach(p=>{p.setAttribute('class','x-edge');p.setAttribute('marker-end','url(#xm-base)');});
+  document.querySelectorAll('text.x-lbl').forEach(t=>t.classList.remove('hot'));
+  if(hotE){const p=$('xe-'+hotE);if(p){p.setAttribute('class','x-edge hot tone-'+tone);p.setAttribute('marker-end',`url(#xm-${tone})`);}const l=$('xl-'+hotE);if(l)l.classList.add('hot');}
+}
+function tabs(){
+  $('x-tabs').innerHTML=SCN.map((s,i)=>`<button class="x-tab${i===scn?' on':''}" role="tab" aria-selected="${i===scn}" data-i="${i}" type="button">${i+1} · ${s.name}</button>`).join('');
+  document.querySelectorAll('.x-tab').forEach(b=>b.onclick=()=>{scn=+b.dataset.i;reset();tabs();});
+}
+function chips(c){$('x-chips').innerHTML='';(c&&c.length?c:[['','nothing yet']]).forEach(([k,t])=>{const s=document.createElement('span');s.className='x-chip '+k;s.textContent=t;$('x-chips').appendChild(s);});}
+function meter(m){
+  const el=$('x-meter');if(!m){el.innerHTML='<span class="x-mt">no replay yet</span>';return;}
+  const[bf,af,n]=m;let h='<span class="x-mt" style="margin:0 6px 0 0">old</span>';
+  for(let i=0;i<n;i++)h+=`<span class="x-dot ${i<bf?'f':'p'}"></span>`;
+  h+=`<span class="x-mt">${bf}/${n} Fatal</span><span style="flex-basis:100%;height:4px"></span><span class="x-mt" style="margin:0 6px 0 0">new</span>`;
+  for(let i=0;i<n;i++)h+=`<span class="x-dot ${i<af?'f':'p'}"></span>`;
+  h+=`<span class="x-mt">${af}/${n} Fatal</span>`;el.innerHTML=h;
+}
+const WHO={call:'call',ai:'model',code:'code',human:'person',person:'person',ok:'result',err:'problem',hold:'wait'};
+function log(lines){const L=$('x-log');if(step===0)L.innerHTML='';for(const[w,t]of lines){const d=document.createElement('div');d.className='x-ln '+w;d.innerHTML='<span class="w"></span><span class="tx"></span>';d.querySelector('.w').textContent=WHO[w]||w;d.querySelector('.tx').textContent=t;L.appendChild(d);}L.scrollTop=L.scrollHeight;}
+function render(){
+  const s=SCN[scn];$('x-intro').textContent=s.intro;
+  if(step<0){seen=new Set();hot=null;hotE=null;tone='accent';$('x-log').innerHTML='<div class="x-empty">Press Next to start.</div>';$('x-why').textContent=s.intro;$('x-ref').hidden=true;$('x-stepno').textContent='';chips(null);meter(null);$('x-next').disabled=false;$('x-next').textContent='Next';sync();return;}
+  const st=s.steps[step];tone=st.tone||'accent';if(hot)seen.add(hot);hot=st.n;hotE=st.e;
+  if(st.log)log(st.log);$('x-why').textContent=st.why;
+  if(st.ref){$('x-ref').hidden=false;$('x-ref').textContent=st.ref;}else $('x-ref').hidden=true;
+  $('x-stepno').textContent=`· step ${step+1} of ${s.steps.length}`;chips(st.chips);meter(st.m);
+  const done=step>=s.steps.length-1;$('x-next').disabled=done;$('x-next').textContent=done?'Done':'Next';if(done&&timer)auto(false);sync();
+}
+function next(){if(step<SCN[scn].steps.length-1){step++;render();}}
+function reset(){step=-1;if(timer)auto(false);render();}
+function auto(on){const want=on!==undefined?on:!timer;if(want&&!timer){timer=setInterval(()=>{if(step>=SCN[scn].steps.length-1)auto(false);else next();},2600);$('x-auto').classList.add('toggled');$('x-auto').textContent='Pause';}else if(!want&&timer){clearInterval(timer);timer=null;$('x-auto').classList.remove('toggled');$('x-auto').textContent='Auto play';}}
+$('x-next').onclick=next;$('x-reset').onclick=reset;$('x-auto').onclick=()=>auto();
+document.addEventListener('keydown',e=>{if(e.target.closest&&e.target.closest('input,textarea'))return;const r=$('walkthrough').getBoundingClientRect();if(r.bottom<0||r.top>innerHeight)return;if(e.key===' '||e.key==='ArrowRight'){e.preventDefault();next();}});
+addEventListener('resize',draw);
+tabs();render();requestAnimationFrame(draw);
+if(document.fonts&&document.fonts.ready)document.fonts.ready.then(draw);
+})();
+</script>
+
+<section>
+  <h2>1. The data we have</h2>
+  <div class="grid2">
+    <div class="card"><h3>713 call recordings</h3><p>Mono 8 kHz phone audio, 831 minutes in total. Median call 64 s, longest 6.4 min. 74 calls are under 10 s. Gemini 3 Flash transcribes them into Roman-script Hinglish with bot and user turns, at about $0.002 per minute.</p></div>
+    <div class="card"><h3>Official QA rubric</h3><p>17 parameters with exact Fatal and Non-Fatal rules (quantity, unit, specs, looping, dead air over 5 s, wrong product, ISQ, MCAT, and more). Fatal means an error that hurts the seller through the captured Buy Lead. Sep '26 baseline for Sarvam calls: 95% pass, 4% BL fatal.</p></div>
+    <div class="card"><h3>What is missing</h3><p>Human labels, the real VANI prompt, and the Buy Lead fields that were actually captured. We ask for all three on Day 1, and the design works without them.</p></div>
+  </div>
+  <p class="note">An example from 3 test calls: the buyer switches from a school-bus CCTV camera to a home dome camera, and the bot then asks drone questions such as "flight time 45 minutes?". It also asks for the buyer's name 4 times after the buyer gave it.</p>
+</section>
+
+<section>
+  <h2>2. The research: 14 agents, 3 lenses per stage</h2>
+  <p>Each stage of the loop got 3 agents with different instructions. <span class="chip c-a">A · pragmatic</span> looked for the most score per build hour. <span class="chip c-b">B · moonshot</span> looked for what other teams will not have. <span class="chip c-c">C · skeptic</span> was a different model family (Codex) and attacked the obvious approach. A Sarvam platform researcher and an independent Codex architect made 14 agents.</p>
+  <div class="tablebox"><table>
+    <thead><tr><th>Stage</th><th>A · pragmatic (Claude Sonnet)</th><th>B · moonshot (Claude Sonnet)</th><th>C · skeptic (Codex)</th></tr></thead>
+    <tbody>
+      <tr><td>Audit</td><td>An LLM builds a "call ledger" (inferred BL, each question and answer). Python rules apply the rubric.</td><td>Same backbone, plus a mutation answer key: plant known faults in clean calls to measure the judge without labels.</td><td>One LLM judge invents facts it cannot see. Each verdict records whether it was observed, inferred from what was spoken, or unavailable. When unsure, the grade is "Needs review", never a silent Pass.</td></tr>
+      <tr><td>Issue</td><td>A seeded taxonomy of about 12 causes. Group by the first wrong turn. Priority = frequency × severity × fixability.</td><td>First-fault tracing gives "mechanism cards". Prove a cause by switching it off in replay and counting the calls that flip to pass.</td><td>A symptom is not a cause. Keep competing hypotheses, each with a test that could disprove it. Freeze cause IDs so the clusters do not drift.</td></tr>
+      <tr><td>Fix</td><td>Small rule-block diffs on a prompt reconstructed from the calls. 3 candidates per cause. A human approves.</td><td>A fix router: prompt patch, flow guard, ASR keyterms, knowledge base, or human. "Prompt archaeology" rebuilds the hidden prompt.</td><td>A reconstructed prompt is a stand-in. Label results "inferred baseline". At most 2 candidates, each with conditions that reject it.</td></tr>
+      <tr><td>Test</td><td>A text replay with a "buyer twin" gives the numbers. Voice only for 2–3 showcase calls. Held-out split and regression suite.</td><td>"Fork the call": keep the real call up to the failure turn, then continue it with the old and the new bot. Paired statistics, then Bulbul → 8 kHz → Saaras for audio.</td><td>Simulators are too cooperative and leak answers. Use frozen buyer facts and negative controls: a deliberately bad bot must fail the suite.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="grid2">
+    <div class="card"><h3>Sarvam researcher</h3><p>Sarvam Voice Agents already has a simulated-caller <strong>Tests API</strong> with an AI judge, run per agent version, plus call logs and single-call analysis. It does <strong>not</strong> group failures across calls or suggest fixes. That gap is exactly PS1, so we plug into Sarvam instead of competing with it. Saaras v4 handles Hinglish and keyterms. Bulbul v3 supports 8 kHz output.</p></div>
+    <div class="card"><h3>Codex architect</h3><p>One local Python app built on Streamlit, SQLite and typed records. The differentiator is <strong>traceable repair</strong>: a judge can click from a recording to its rubric evidence, to the ranked cause, to the exact patch, to the paired test, without switching tools.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>3. How we decided</h2>
+  <p>We scored every option against the PS1 weights: agreement with humans 25%, root causes 25%, failure-rate drop 25%, speed 15%, coverage 10%. We also checked the overall weights (voice experience is 20%), whether it can be built in 2 days, and whether other teams are likely to have it.</p>
+  <div class="grid2">
+    <div class="card"><h3>Where the agents agreed</h3>
+      <ul>
+        <li>Extract first, then apply rules. Never one big LLM verdict. Five of five Audit and Architect agents chose this.</li>
+        <li>Find the first wrong bot turn, then group by mechanism. Do not cluster by embeddings, because Hinglish embeddings are noisy and the clusters are hard to explain.</li>
+        <li>A fix is not always a prompt. The name loop needs a code counter, and dead air is a latency setting.</li>
+        <li>Prove a fix with paired before and after runs, a held-out set, and passing calls kept as regression checks.</li>
+      </ul></div>
+    <div class="card"><h3>What the skeptics changed</h3>
+      <ul>
+        <li>Each verdict says how it knows: <em>observed</em>, <em>spoken proxy</em> or <em>unavailable</em>. That stops us claiming a BL error we cannot see.</li>
+        <li>The simulated buyer gets only frozen facts, never the failed call's script or the fix, so there is no answer leakage.</li>
+        <li>Negative controls: a sabotage bot must fail our test suite, or the suite proves nothing.</li>
+        <li>Any number from a reconstructed prompt is labelled "inferred baseline". Below 30 scenarios the result is "inconclusive".</li>
+      </ul></div>
+  </div>
+  <div class="card"><h3>What we reuse from AgentCI (ideas only, not code)</h3>
+    <ul>
+      <li><strong>Noise-calibrated gate.</strong> AgentCI found that re-running an unchanged prompt at temperature 0 still flipped 2 of 16 held-out cases. A zero-tolerance gate rejects even a no-op change, so we measure the floor first.</li>
+      <li><strong>Recovery criterion.</strong> A fix must restore good behaviour (lift of 0 or more) without more regressions than the noise floor.</li>
+      <li><strong>Compounding immunity.</strong> Each fixed cause becomes a guard test, kept only if it fails on the bad bot and passes on the good one. Guards go into the tuning set, never the held-out set.</li>
+    </ul>
+    <p class="note">AgentCI is a personal project. To respect the "no pre-built solutions" rule, we rebuild these patterns during the event and credit the design in skills.md.</p></div>
+  <div class="flag"><p><strong>Why this wins.</strong> Most teams will build an LLM that grades calls plus a list of themes. Our edge is <strong>proof</strong>: QA's own rubric gives agreement with humans; first-fault cause cards make the causes credible; fork-the-call replay with controls shows a real drop in failures; and a native Sarvam agent version, Tests API and voice replay cover the voice-experience score. Guards add one more line for the judges: a bug we fix cannot come back.</p></div>
+</section>
+
+<section>
+  <h2>4. The proposed architecture</h2>
+  <pre class="diagram">  713 mp3 ──► INGEST ─────────────► AUDIT ──────────────► ISSUE ──────────────► FIX ───────────────► TEST
+              Gemini transcript      call ledger (LLM)      first-fault turn      fix router            fork-the-call replay
+              ffmpeg silences        + Jev turn signals     mechanism cards       prompt diff / flow    old bot vs new bot
+                                     + 17 rubric rules      Jev cause assign      guard / keyterms      Jev re-grades runs
+                                     + evidence basis       priority score                              paired stats + controls
+                  │                       │                     │                     │                     │
+                  ▼                       ▼                     ▼                     ▼                     ▼
+              CallRecord             AuditRecord           IssueRecord            FixRecord             TestRecord
+                  └──────────────────────────┬──────────────────────────────────────────────────────────────┘
+                                             ▼
+                            SQLite + JSON  ──►  DASHBOARD (Streamlit)
+                                                Audit → Issue → Fix → Test, one click per step
+
+  Voice lane:  Bulbul (buyer voice) ─► 8 kHz ─► Saaras STT ─► old or new bot ─► Bulbul (bot voice) ─► audio A/B
+  Sarvam lane: patched prompt ─► new agent version (app_version) ─► Sarvam Tests API on old vs new</pre>
+
+  <div class="stage"><div class="tag">INGEST<span>stage 0</span></div><div>
+    <dl class="kv"><dt>Does</dt><dd>Transcribes all 713 calls and finds real silence gaps in the audio (Gemini timestamps are only accurate to about 1 s).</dd>
+    <dt>Uses</dt><dd>Gemini 3 Flash through the IndiaMART LiteLLM proxy, and ffmpeg <code>silencedetect</code>.</dd>
+    <dt>Output</dt><dd>One record per call: turns, speakers, timestamps and dead-air spans.</dd></dl></div></div>
+
+  <div class="stage"><div class="tag">AUDIT<span>stage 1</span></div><div>
+    <dl class="kv"><dt>Does</dt><dd>An LLM extracts a ledger: what the buyer asked for, what the bot confirmed (the "shadow BL"), and each question with its answer. Python then applies the 17 QA rules. Code counts repeat questions exactly. Fatal and low-confidence calls get a second opinion from a different model. When unsure, the grade is Needs review.</dd>
+    <dt>Uses</dt><dd>Gemini Flash for extraction. TypeSafe Jev for typed questions on every turn: which slot the bot is asking about, buyer frustration, a request for a human, whether a spec fits the product, and whether a quote supports a finding. Claude for the challenge pass. Python rules, Pydantic types.</dd>
+    <dt>Output</dt><dd>Pass, Fatal, Non-Fatal or Needs review per call and per parameter, each with a quote, a timestamp and an evidence basis. Plus 5 risk flags: wrong requirement, frustration, loops, low confidence, human request.</dd>
+    <dt>Validated by</dt><dd>40–60 calls hand-labelled by our non-tech teammate (kappa score), plus faults we plant in clean calls.</dd></dl></div></div>
+
+  <div class="stage"><div class="tag">ISSUE<span>stage 2</span></div><div>
+    <dl class="kv"><dt>Does</dt><dd>For each failed call, finds the first wrong bot turn and writes a mechanism card: trigger, then behaviour, then consequence. It merges cards into a frozen cause list and keeps competing explanations visible. It also shows chains, for example a stale category leading to wrong ISQs leading to buyer irritation.</dd>
+    <dt>Assign</dt><dd>Jev Choice assigns each failure to the frozen cause list with a confidence score. Low-confidence failures go to a "new cause" queue for review.</dd>
+    <dt>Ranking</dt><dd><code>priority = (5 × fatal calls + 1 × non-fatal calls) × fixability</code>. Each call counts once per cause. The score is shown and can be recomputed.</dd>
+    <dt>Output</dt><dd>A ranked cause list. Each cause has a name, a one-line description, a type (prompt, ASR, knowledge or flow), example calls, and a test that could disprove it.</dd></dl></div></div>
+
+  <div class="stage"><div class="tag">FIX<span>stage 3</span></div><div>
+    <dl class="kv"><dt>Does</dt><dd>A router picks the right fix surface for each cause. For prompt causes it writes 2–3 minimal diffs against the baseline prompt. That is the real prompt if the organizers give it, otherwise one rebuilt from the calls and clearly labelled "inferred". Each diff carries its evidence quotes, the rubric rule it enforces, and conditions that reject it. A human approves it.</dd>
+    <dt>Uses</dt><dd>Gemini or Claude to draft and critique. The Sarvam Voice Agents MCP to commit the winning prompt as a new agent version.</dd>
+    <dt>Output</dt><dd>A unified diff, or a flow or keyterm change, with its rationale.</dd></dl></div></div>
+
+  <div class="stage"><div class="tag">TEST<span>stage 4</span></div><div>
+    <dl class="kv"><dt>Does</dt><dd>Fork-the-call replay. It keeps the real call up to the failure turn, then lets the old bot and the new bot each continue against a simulated buyer that knows only frozen facts. Each case runs 5 times. The same audit rules and Jev turn questions re-grade every run. That is cheap, and it uses a different model from the bot under test. The test uses held-out calls, passing calls as regression checks, and a sabotage bot that must fail. First we replay the old bot against itself to measure the noise floor: how many good calls flip when nothing changes. A fix passes if target failures drop and new failures on good calls stay within that floor. A fix only has to restore good behaviour, not beat the baseline.</dd>
+    <dt>Reports</dt><dd>The failure rate before and after, with a 95% interval. A table of calls that flipped from fail to pass and from pass to fail. The time from finding the issue to testing the fix, measured by an automatic stopwatch.</dd>
+    <dt>Plus</dt><dd>The same scenarios run in the Sarvam Tests API on the old and the new agent version.</dd>
+    <dt>Guards</dt><dd>Each approved fix adds a permanent guard test. It must fail on the old bot and pass on the new one. Every later prompt change must pass all guards, so a fixed bug cannot return.</dd></dl></div></div>
+</section>
+
+<section id="noise">
+  <h2>How we tell noise from a real issue</h2>
+  <p>There are two separate questions. Neither number is guessed. Both are measured from our own runs.</p>
+  <div class="grid2">
+    <div class="card"><h3>In TEST: real regression, or wobble?</h3>
+      <ol class="steps">
+        <li><span><strong>Replay the old bot against itself.</strong> Take 30 good calls and run them 5 times each with nothing changed. Do it as 5 separate batches.</span></li>
+        <li><span><strong>Count the flips per batch.</strong> A flip is a good call that fails with no change, for example 0, 1, 1, 2, 1.</span></li>
+        <li><span><strong>Floor = the high end of that wobble.</strong> With 5 batches, use the maximum, 2. With 20 batches, use the 95th percentile.</span></li>
+        <li><span><strong>Judge the fix.</strong> 4 broken good calls is more than 2, so reject it. 1 is noise, so it passes.</span></li>
+      </ol>
+      <p class="note">Per call: a call that passed only 3 of 5 old runs is borderline, so its failure is noise. A call that passed 5 of 5 and now fails 4 of 5 is a real break, even under the floor. Re-measure the floor when the bot model, the judge or the call set changes.</p></div>
+    <div class="card"><h3>In ISSUE: one-off, or recurring cause?</h3>
+      <ul>
+        <li><strong>Every Fatal call stays Fatal.</strong> This rule only decides what counts as a cause worth fixing.</li>
+        <li><strong>Minimum support: 3 calls.</strong> Fewer goes to an "isolated" list, for example one call whose audio could not be recovered.</li>
+        <li><strong>Rank by the low end of a 95% interval</strong> on frequency, using the Wilson interval, which works for small counts. A cause seen in 20 calls outranks one seen in 3.</li>
+        <li><strong>Severity overrides support.</strong> A cause with a Fatal effect on the seller is shown even at 1–2 calls, flagged "seen once, watch it".</li>
+      </ul></div>
+  </div>
+  <div class="verdict"><p><strong>For the demo:</strong> "We measured how much our bot wobbles when nothing changes. We call something a regression only when it breaks more than that."</p></div>
+</section>
+
+<section>
+  <h2>5. What we build it with</h2>
+  <div class="tablebox"><table>
+    <thead><tr><th>Part</th><th>Tool</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Transcripts</td><td>Gemini 3 Flash via the LiteLLM proxy</td><td>Already running. Good Hinglish. About $1.5 for all 713 calls.</td></tr>
+      <tr><td>Audio signals</td><td>ffmpeg silencedetect</td><td>Measures dead air exactly. Local and free.</td></tr>
+      <tr><td>Audit and issue LLM</td><td>Gemini Flash, with Claude as the challenger</td><td>Cheap extraction, and a second model family catches the first one's mistakes.</td></tr>
+      <tr><td>Turn signals and checks</td><td>TypeSafe Jev (System One): Choice, Noul, Score</td><td>Typed answers with probabilities, at about $0.04 per million tokens. Fast enough to re-grade thousands of replay turns and to fire signals live during a call.</td></tr>
+      <tr><td>Bot under test</td><td>Sarvam LLM (sarvam-105b) or Gemini running the baseline and patched prompts</td><td>Sarvam is the required platform, and it is OpenAI-compatible with JSON output.</td></tr>
+      <tr><td>Voice</td><td>Sarvam Bulbul v3 (TTS) and Saaras v4 (STT)</td><td>Audible before and after. Covers the voice-experience score.</td></tr>
+      <tr><td>Agent and tests</td><td>Sarvam Voice Agents, Tests API and MCP</td><td>Gives the required agent ID, versioned prompts, and a native test judge.</td></tr>
+      <tr><td>App</td><td>Python, Pydantic, SQLite, Streamlit</td><td>Fast to build. Typed contracts between stages. Audio playback built in.</td></tr>
+      <tr><td>Coding help</td><td>Claude Sonnet and Codex on real data. GLM and DeepSeek on code only, with synthetic fixtures.</td><td>Speed and token savings without sending call data to non-approved providers.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>6. Where TypeSafe Jev fits</h2>
+  <p>Jev is a System One model. It does not write text. It answers narrow typed questions (<strong>Choice</strong> picks one option, <strong>Noul</strong> says yes or no with a probability, <strong>Score</strong> gives a level) quickly and cheaply. Code keeps control of the loop, and Jev adds the judgments that need language understanding. Python does the counting and the arithmetic, because Jev does not count reliably.</p>
+  <div class="tablebox"><table>
+    <thead><tr><th>Stage</th><th>Jev question (asked per turn or per call)</th><th>Type</th><th>What code does with it</th></tr></thead>
+    <tbody>
+      <tr><td>Audit</td><td>Which slot is this bot turn asking about: product, quantity, unit, spec, name, city, or other?</td><td><span class="chip c-b">Choice</span></td><td>Counts the asks per slot. More than 3 asks of one slot is a loop, with exact turn evidence.</td></tr>
+      <tr><td>Audit</td><td>Does this spec question fit the product the buyer confirmed?</td><td><span class="chip c-b">Noul</span></td><td>A low probability marks a Category ISQ error (the drone-questions-on-a-camera case).</td></tr>
+      <tr><td>Audit</td><td>Is the buyer frustrated, confused, or asking for a human?</td><td><span class="chip c-b">Noul</span> · <span class="chip c-b">Score</span></td><td>Sets the risk flags. The probability becomes the confidence shown on the dashboard.</td></tr>
+      <tr><td>Audit</td><td>What is this call's scope: BL collection, seller-unavailable handoff, OnCall AstBuy, refusal, or unclear?</td><td><span class="chip c-b">Choice</span></td><td>Picks which rubric parameters apply, so a handoff is not failed for a missing quantity.</td></tr>
+      <tr><td>Audit</td><td>Does this quote support this finding?</td><td><span class="chip c-b">Noul</span></td><td>A citation check on Gemini's findings. A weak quote sends the call to Needs review.</td></tr>
+      <tr><td>Issue</td><td>Which frozen cause does this failure episode belong to?</td><td><span class="chip c-b">Choice</span></td><td>Assigns it with a confidence. Low confidence goes to a "new cause" queue.</td></tr>
+      <tr><td>Test</td><td>The same Audit questions, run on every replay turn.</td><td>all</td><td>Re-grades scenarios × 5 runs × old and new consistently. It is a different model from the bot under test.</td></tr>
+      <tr><td>Demo</td><td>Frustration and loop signals, live on each turn of the voice replay.</td><td><span class="chip c-b">Noul</span></td><td>Shows a "signal fired at turn N" moment on screen and in the video.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Jev does not do: fix writing, the simulated buyer, or the bot itself, because those need generated text. Inputs are text only, so Jev reads transcript turns, not audio. Limit: 64k tokens per request. Price: $0.042 per million input tokens (TypeSafe docs, checked 8 Oct 2026).</p>
+</section>
+
+<section>
+  <h2>7. Do we build the voices and the tests? Yes, in 3 layers</h2>
+  <div class="grid2">
+    <div class="card"><h3>Layer 1 · Text replay</h3><p>This produces the headline numbers. It forks dozens of failed calls and runs each pair 5 times. It is fast, cheap and repeatable, and it is the evidence for the "failure-rate drop" score.</p></div>
+    <div class="card"><h3>Layer 2 · Sarvam Tests API</h3><p>The same scenarios run as Sarvam test cases against agent version N (old prompt) and N+1 (patched prompt). It is native to the platform, it has its own judge, and it gives the agent ID the judges ask for.</p></div>
+    <div class="card"><h3>Layer 3 · Voice replay</h3><p>For 2–3 showcase calls, a Bulbul-voiced buyer talks through 8 kHz phone audio to Saaras and the bot, and the bot answers in Bulbul. The judges hear the old bot fail and the new bot handle the same moment.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>8. How you see the fix</h2>
+  <p>The dashboard walks one cause from start to end. Here is the flow, using the camera case as the example. The transcript lines are shortened and the buyer's name is removed.</p>
+  <ol class="steps">
+    <li><span><strong>Audit tab.</strong> Call #282 is marked Fatal, with the parameter "Category ISQ error". It shows the quote and the timestamp (88 s), and the audio player jumps to that moment.</span></li>
+    <li><span><strong>Issue tab.</strong> The cause card "Specs from the old category kept after a product change" ranks #1, with its frequency, its Fatal count, its example calls, and the chain it starts.</span></li>
+    <li><span><strong>Fix tab.</strong> The diff, the rule it enforces, and the reject conditions.</span></li>
+    <li><span><strong>Test tab.</strong> The forked replay side by side, a table of which calls flipped, the before and after failure rate with its interval, the stopwatch, and play buttons for the old and new audio.</span></li>
+  </ol>
+
+  <pre class="diff"><span class="note"># fix C-01 · prompt_patch · baseline: inferred · enforces rubric: Category ISQ error, Product change</span>
+<span class="add">+ When the buyer changes the product, drop every spec question from the old product.</span>
+<span class="add">+ Confirm the new product, then ask only the specs that belong to the new product's category.</span>
+<span class="add">+ Keep details the buyer already gave (quantity, features). Never reuse old-category options.</span>
+<span class="del">- Ask the configured ISQs for the enquiry's MCAT in order.</span></pre>
+
+  <div class="compare">
+    <div class="panel old"><header>Before · baseline prompt</header><div class="turns">
+      <div class="t"><b>user</b>Ghar ke liye chahiye.</div>
+      <div class="t"><b>bot</b>Kaun sa camera chahiye? Dome, bullet?</div>
+      <div class="t"><b>user</b>Dome, mobile se connect.</div>
+      <div class="t fork">fork point · turn 10</div>
+      <div class="t bad"><b>bot</b>Brand mein DJI ya MI? Resolution 4K ya 5.1K?</div>
+      <div class="t bad"><b>bot</b>Flight time mein kya pasand karenge? 45 minute?</div>
+      <div class="t"><b>verdict</b><span class="chip c-c" style="background:var(--fatal-soft);color:var(--fatal)">FATAL · Category ISQ</span></div>
+    </div></div>
+    <div class="panel new"><header>After · patched prompt</header><div class="turns">
+      <div class="t"><b>user</b>Ghar ke liye chahiye.</div>
+      <div class="t"><b>bot</b>Kaun sa camera chahiye? Dome, bullet?</div>
+      <div class="t"><b>user</b>Dome, mobile se connect.</div>
+      <div class="t fork">fork point · turn 10</div>
+      <div class="t good"><b>bot</b>Theek hai, mobile se connect hone wala dome camera. Indoor ya outdoor?</div>
+      <div class="t good"><b>bot</b>Resolution mein 2MP ya 4MP chahiye?</div>
+      <div class="t"><b>verdict</b><span class="chip c-a">PASS</span></div>
+    </div></div>
+  </div>
+  <p class="note">The "after" side is an illustration of what the replay will show. No patched replay has run yet. Real numbers come from the test runs on Day 1 and Day 2.</p>
+</section>
+
+<section>
+  <h2>9. Team and build plan</h2>
+  <div class="tablebox"><table>
+    <thead><tr><th>Block (IST)</th><th>A · audit and data</th><th>B · fix, test and voice</th><th>C · QA and demo (non-tech)</th></tr></thead>
+    <tbody>
+      <tr><td>Day 1 · 09–11</td><td>Data contracts, proxy smoke test, run all transcripts</td><td>Dashboard shell, Sarvam keys, agent created</td><td>Clarify the rubric with organizers; ask for the prompt, labels and BL fields</td></tr>
+      <tr><td>Day 1 · 11–13</td><td>Ledger extraction, Jev turn questions, rubric rules</td><td>Baseline prompt (real or inferred), bot runner</td><td>Hand-label 40–60 random calls</td></tr>
+      <tr><td>Day 1 · 14–18</td><td>Full audit, first-fault cause cards, ranking</td><td>Fork replay, simulated buyer, controls</td><td>Review the cause list, freeze cause IDs, write test facts</td></tr>
+      <tr><td>Day 2 · 09–13</td><td>Agreement metrics, stability runs</td><td>Fixes for the top 3 causes, held-out and regression runs, Sarvam Tests API</td><td>Approve patches, check results blind</td></tr>
+      <tr><td>Day 2 · 14–18</td><td>Finish the dashboard, verify the numbers</td><td>Voice replays for 2–3 showcase calls</td><td>Demo script, README, skills.md, record the video</td></tr>
+      <tr><td>Day 2 · by 23:59</td><td colspan="3">Submit: 5–7 min video, code, README, skills.md, Sarvam agent ID, approach note.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>10. Risks and open questions</h2>
+  <div class="grid2">
+    <div class="card"><h3>Top risks</h3>
+      <ul>
+        <li><strong>No real prompt or BL fields.</strong> We label results "inferred baseline" and "spoken proxy", and we ask on Day 1.</li>
+        <li><strong>Simulator too kind.</strong> Frozen facts, a sabotage-bot control, and a check that the old bot fails again in replay.</li>
+        <li><strong>Jev on Hinglish is unproven.</strong> The docs say nothing about Hindi or code-mixed text. On Day 1 we test it on about 20 hand-labelled turns. If it falls short, Gemini answers the same questions.</li>
+        <li><strong>Proxy or voice latency in the live demo.</strong> We pre-compute results, cache the audio, and label cached clips.</li>
+      </ul></div>
+    <div class="card"><h3>Ask organizers on Day 1</h3>
+      <ul>
+        <li>Can we get human QA labels, the VANI prompt, the ISQ lists per category, and the captured BL fields?</li>
+        <li>Is "one enquiry per day" a real policy?</li>
+        <li>How is Overall derived, and are calls under 10 s graded?</li>
+        <li>Can call text go to Sarvam LLMs? Can we get hackathon credits, given new accounts get only Rs 100?</li>
+      </ul></div>
+  </div>
+  <div class="flag"><p><strong>Two decisions for you.</strong> Your data rule allows Anthropic, OpenAI and Gemini. (1) <strong>Sarvam</strong> is not on that list, but the hackathon requires it. Until the organizers confirm, Sarvam gets only synthetic or anonymized scenarios. (2) <strong>TypeSafe Jev</strong> is not on that list either. Until you approve it, Jev reads only synthetic replay turns, and Gemini answers the same questions on real call text. TypeSafe does not train on customer data. Zero data retention is an enterprise-only option.</p></div>
+</section>
+
+</div>
