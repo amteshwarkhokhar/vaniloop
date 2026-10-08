@@ -21,6 +21,7 @@ KNOWN = {
     "looping": ("Bot keeps asking for the same detail", "Bot repeats the same question although the buyer already answered.", "flow_logic"),
     "qty_probing": ("Quantity never asked", "Bot never asks the buyer for the quantity.", "prompt"),
     "qty_missed": ("Quantity given but not captured", "Buyer stated a quantity but the bot did not record it.", "prompt"),
+    "qty_accuracy": ("Quantity captured wrong", "Buyer stated a quantity but the bot confirmed a different number.", "prompt"),
     "product_change": ("Product change not followed", "Buyer changed the product but the bot kept the old one.", "prompt"),
     "dead_air": ("Long silences on the call", "Long silent gaps with no one speaking.", "flow_logic"),
 }

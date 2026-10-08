@@ -48,6 +48,7 @@ class BotTurnLabel(BaseModel):
     slot: Slot
     options_offered: list[str] = Field(default_factory=list)
     fits_confirmed_product: bool | None = None  # None = not a spec question
+    spec_name: str | None = None  # the ISQ being asked, e.g. "brand" (spec turns only)
 
 
 class UserTurnLabel(BaseModel):
@@ -65,6 +66,7 @@ class Ledger(BaseModel):
     initial_product: str | None = None
     final_product: str | None = None
     product_changed_at_turn: int | None = None
+    product_match: bool | None = None  # bot's final confirmed product == product buyer finally wants
     buyer_facts: dict[str, str] = Field(default_factory=dict)  # slot -> value buyer stated
     bot_confirmed: dict[str, str] = Field(default_factory=dict)  # slot -> value bot read back ("shadow BL")
     bot_turns: list[BotTurnLabel] = Field(default_factory=list)
@@ -87,6 +89,7 @@ class Finding(BaseModel):
     reason: str
     basis: Basis
     evidence: list[Evidence] = Field(default_factory=list)
+    onset_turn: int | None = None  # turn where the fault started (not just context)
 
 
 RiskFlag = Literal["wrong_requirement", "frustration", "loops", "low_confidence", "human_request"]

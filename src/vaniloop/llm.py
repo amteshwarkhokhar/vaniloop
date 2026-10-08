@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,30 +38,55 @@ def model_name() -> str:
     return os.environ.get("LLM_MODEL", "google/gemini-3-flash-preview")
 
 
-def _key(model: str, messages: list[dict]) -> str:
-    raw = json.dumps({"m": model, "msgs": messages}, sort_keys=True, ensure_ascii=False)
+def _key(model: str, messages: list[dict], base_url: str = "", cache_tag: str = "") -> str:
+    raw = json.dumps({"m": model, "u": base_url, "t": cache_tag, "msgs": messages}, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
-def cached_json(key: str) -> dict | None:
+def _is_dict(x) -> bool:
+    return isinstance(x, dict)
+
+
+def _valid(data, validate) -> bool:
+    try:
+        return bool(_is_dict(data) and (validate is None or validate(data)))
+    except Exception:
+        return False
+
+
+def cached_json(key: str, validate=None) -> dict | None:
+    """Return the cached object, or None on miss, corrupt file or failed validation."""
     p = CACHE_DIR / f"{key}.json"
-    if p.exists() and os.environ.get("VANILOOP_CACHE") != "refresh":
-        return json.loads(p.read_text())
-    return None
+    if os.environ.get("VANILOOP_CACHE") == "refresh":
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if _valid(data, validate) else None
 
 
-def complete_json(system: str, user: str, model: str | None = None, retries: int = 2) -> dict:
-    """Return a parsed JSON object. Retries on unparseable output."""
+def _write_cache(key: str, data: dict) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    final = CACHE_DIR / f"{key}.json"
+    tmp = CACHE_DIR / f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    os.replace(tmp, final)
+
+
+def complete_json(system: str, user: str, model: str | None = None, retries: int = 2,
+                  validate=None, cache_tag: str = "") -> dict:
+    """Return a parsed JSON object. Retries on unparseable or invalid output; only valid output is cached."""
     model = model or model_name()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    key = _key(model, messages)
-    hit = cached_json(key)
+    base = os.environ.get("LLM_BASE_URL")
+    key = _key(model, messages, base or "", cache_tag)
+    hit = cached_json(key, validate)
     if hit is not None:
         return hit
 
     from openai import OpenAI
 
-    base = os.environ.get("LLM_BASE_URL")
     api_key = os.environ.get("LLM_API_KEY")
     if not base or not api_key:
         raise RuntimeError("LLM_BASE_URL and LLM_API_KEY must be set in .env (no cached answer for this request)")
@@ -79,7 +105,9 @@ def complete_json(system: str, user: str, model: str | None = None, retries: int
         except json.JSONDecodeError as e:
             last_err = e
             continue
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        (CACHE_DIR / f"{key}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1))
+        if not _valid(data, validate):
+            last_err = ValueError("model output failed validation")
+            continue
+        _write_cache(key, data)
         return data
-    raise RuntimeError(f"model returned unparseable JSON after {retries + 1} tries: {last_err}")
+    raise RuntimeError(f"model returned unparseable or invalid JSON after {retries + 1} tries: {last_err}")

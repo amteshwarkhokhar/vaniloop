@@ -14,8 +14,9 @@ TRANSCRIPTS_DIR = ROOT / "transcripts"
 AUDIO_DIR = ROOT / "data" / "raw" / "call_recordings"
 OUT_PATH = ROOT / "runs" / "calls.jsonl"
 
-_START = re.compile(r"silence_start:\s*(-?\d+(?:\.\d+)?)")
-_END = re.compile(r"silence_end:\s*(-?\d+(?:\.\d+)?)")
+_NUM = r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"  # ffmpeg may print e.g. 2.26757e-05
+_START = re.compile(r"silence_start:\s*" + _NUM)
+_END = re.compile(r"silence_end:\s*" + _NUM)
 _DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
