@@ -358,7 +358,10 @@ def test_misheard_onset_with_a_value_mismatch_is_channel_and_a_pure_re_ask_is_no
     """A misheard re-ask is channel only when the ledger's bot-confirmed quantity differs from what the buyer said.
 
     Gemini sets bot_misheard on every re-ask, so without the ledger check every qty_missed root became a speech
-    fault: a re-ask with equal buyer and bot quantities must stay a prompt cause owned by the prompt (#90).
+    fault: a re-ask with equal buyer and bot quantities must stay a prompt cause owned by the prompt (#90). Both
+    sides must state a value: the bot capturing nothing is a capture gap, not a spoken mismatch, so a one-sided
+    ledger stays prompt-owned, or the plain re-ask would become the very false speech channel this issue removes
+    (#90 review round 2, HIGH).
     """
     audits = [aud_on(c, qty_missed=("Fatal", 4)) for c in "abc"]
     turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
@@ -377,7 +380,7 @@ def test_misheard_onset_with_a_value_mismatch_is_channel_and_a_pure_re_ask_is_no
     causes = build_causes(audits, turns, equal)
     assert [(c.type, c.owner, c.owner_evidence) for c in causes] == [("prompt", "prompt", "likely")]
     one_side = {c: led(c, quantity=("50 kg", None)) for c in "abc"}
-    assert build_causes(audits, turns, one_side)[0].type == "channel"  # bot captured nothing: a mismatch
+    assert [c.type for c in build_causes(audits, turns, one_side)] == ["prompt"]  # bot captured nothing: not a mismatch
     audits += [aud_on(c, qty_missed=("Fatal", 4)) for c in "de"]  # two clean calls (no turns flagged)
     turns.update({c: turns_for() for c in "de"})
     leds = {**wrong, "d": led("d"), "e": led("e")}
@@ -391,11 +394,13 @@ def test_misheard_onset_with_a_value_mismatch_is_channel_and_a_pure_re_ask_is_no
     assert [x.type for x in build_causes(audits, turns)] == ["prompt"]  # no ledgers: a re-ask stays a prompt fault
 
 
-def test_qty_unit_channel_reads_the_unit_slot_only_when_the_ledger_has_one():
-    """A misheard qty_unit root must compare the unit slot when the ledger has one, else the quantity slot.
+def test_qty_unit_channel_compares_units_not_numbers():
+    """A misheard qty_unit root mismatches only when both sides name a unit and the units differ.
 
-    Without the fallback a unit fault on a ledger without a unit slot could never read as channel, and without
-    the check a quantity mismatch under equal units would fake one (#90).
+    The unit each side states is its unit slot when it has one, else the unit word inside its quantity, so
+    '50 kg' vs '50 litres' reads as a unit fault with no separate unit slots; without that extraction the unit
+    fault would hide behind equal numbers. Numbers alone ('5' vs '3') and a value on one side only are never a
+    unit mismatch (#90 review round 2, MEDIUM: unit routing compared the parsed numbers instead).
     """
     audits = [aud_on(c, qty_unit=("Fatal", 4)) for c in "abc"]
     turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
@@ -403,9 +408,30 @@ def test_qty_unit_channel_reads_the_unit_slot_only_when_the_ledger_has_one():
     causes = build_causes(audits, turns, units)
     assert causes[0].type == "channel"  # quantities match, the units differ: the unit slot decided
     no_units = {c: led(c, quantity=("5", "3")) for c in "abc"}
-    assert build_causes(audits, turns, no_units)[0].type == "channel"  # no unit slot: the quantity mismatch decided
+    assert [c.type for c in build_causes(audits, turns, no_units)] == ["prompt"]  # numbers alone: no unit mismatch
+    mixed = {c: led(c, quantity=("50 kg", "50 litres")) for c in "abc"}
+    assert build_causes(audits, turns, mixed)[0].type == "channel"  # units inside the quantity text differ
     equal = {c: led(c, quantity=("5", "5")) for c in "abc"}
     assert [c.type for c in build_causes(audits, turns, equal)] == ["prompt"]  # nothing differs: a re-ask, not speech
+
+
+def test_quantity_channel_converts_units_and_compares_the_range_maximum():
+    """A misheard qty root agrees on the same quantity in two units and mismatches differing ranges.
+
+    '1 kg' and '1000 g' are the same quantity (the bot side converts into the buyer's unit) and '2-3 kg' vs
+    '2-3 kg' is a range stored as its maximum, so both stay a prompt fault. '2-3 kg' vs '2-9 kg' differs by its
+    maximum. Without parse_quantity_full and the conversion, parse_quantity compared first numbers alone:
+    1 kg vs 1000 g looked like a speech fault and a real range mismatch passed as a re-ask (#90 review round 2,
+    MEDIUM).
+    """
+    audits = [aud_on(c, qty_accuracy=("Fatal", 4)) for c in "abc"]
+    turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
+    converted = {c: led(c, quantity=("1 kg", "1000 g")) for c in "abc"}
+    assert [c.type for c in build_causes(audits, turns, converted)] == ["prompt"]  # 1 kg == 1000 g: the same value
+    as_max = {c: led(c, quantity=("2-3 kg", "3 kg")) for c in "abc"}
+    assert [c.type for c in build_causes(audits, turns, as_max)] == ["prompt"]  # a range is stored as its maximum
+    ranges = {c: led(c, quantity=("2-3 kg", "2-9 kg")) for c in "abc"}
+    assert build_causes(audits, turns, ranges)[0].type == "channel"  # the maxima 3 and 9 differ
 
 
 def test_unclear_user_turn_right_before_the_onset_is_a_channel_fault():
