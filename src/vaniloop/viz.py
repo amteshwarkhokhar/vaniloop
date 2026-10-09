@@ -1,4 +1,5 @@
-"""HTML for the dashboard: call strips, the wall of calls, the transcript as a script, the cause list, the fix cards.
+"""HTML for the dashboard: call strips, the wall of calls, the transcript as a script, the cause list,
+the prompt-fix cards, the ship-gate cards and the replay panels.
 
 Pure functions, no streamlit import: the dashboard renders the strings and the tests read them.
 Every piece of call text goes through html.escape. Pass audit=None to draw a call blind (Grade view).
@@ -15,6 +16,7 @@ from .models import AuditRecord, CallRecord, Cause
 
 if TYPE_CHECKING:  # type names only: drawing must not import the LLM client
     from .fix import PromptPatch
+    from .gate import GateResult
 
 VERDICT_ORDER = ("Fatal", "NonFatal", "Pass", "NeedsReview")
 VERDICT_LABEL = {"Fatal": "Fatal", "NonFatal": "Non-Fatal", "Pass": "Pass", "NeedsReview": "Needs review"}
@@ -91,12 +93,15 @@ ol.vl-causes, ol.vl-script { padding-left: 0; margin-left: 0; }
 .vl-cards { list-style: none; padding: 0; margin: 0 0 1rem; max-width: 60rem; }
 .vl-card { display: grid; grid-template-columns: 2rem minmax(0, 1fr); column-gap: .75rem;
   padding: 1rem 0 1.1rem; border-top: 1px solid #E1E4DF; }
+.vl-card.gate { grid-template-columns: minmax(0, 1fr); }
 .vl-card .n { font-size: 1.5rem; font-weight: 700; color: #5E6B6E; }
 .vl-card h4 { font-size: 1.1rem; font-weight: 700; margin: 0 0 .35rem; padding: 0; }
 .vl-card h4 small { font-weight: 400; font-size: .9rem; color: #5E6B6E; margin-left: .5rem; }
 .vl-card p { margin: .35rem 0; max-width: 72ch; line-height: 1.5; }
 .vl-card p b { font-weight: 700; margin-right: .35rem; }
 .vl-card .vl-note { border-left: 3px solid var(--c); padding-left: .75rem; }
+.vl-badge { display: inline-block; border: 2px solid var(--c); color: var(--c); border-radius: 2px;
+  padding: 0 .45rem; margin-right: .6rem; font-size: .85rem; font-weight: 700; vertical-align: .1rem; }
 .vl-diff { margin: .5rem 0; max-width: 60rem; font: .85rem/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 .vl-diff .row { display: grid; grid-template-columns: 3.25rem 1.1rem minmax(0, 1fr); padding: 0 .5rem 0 0;
   border-left: 3px solid transparent; }
@@ -109,6 +114,19 @@ ol.vl-causes, ol.vl-script { padding-left: 0; margin-left: 0; }
 .vl-diff .row.add { border-left-color: #2E7D4F; background: color-mix(in srgb, #2E7D4F 9%, transparent); }
 .vl-diff .row.add .tx { color: #1F5C38; }
 .vl-diff .row.ctx .tx { color: #5E6B6E; }
+.vl-stats { display: flex; flex-wrap: wrap; gap: .4rem 2.25rem; margin: .6rem 0 .8rem; }
+.vl-stats small { display: block; color: #5E6B6E; font-size: .8rem; }
+.vl-stats b { font-size: 1.15rem; font-weight: 700; }
+.vl-scroll { overflow-x: auto; max-width: 34rem; margin: .3rem 0 .6rem; }
+.vl-pc { display: grid; grid-template-columns: minmax(6rem, 1fr) 9rem 9rem; min-width: 26rem;
+  gap: .25rem 1rem; align-items: center; font-size: .95rem; }
+.vl-pc .h { color: #5E6B6E; font-size: .8rem; }
+.vl-pips { display: inline-flex; gap: 3px; margin-right: .5rem; vertical-align: middle; }
+.vl-pips i { display: block; width: .7rem; height: .7rem; border: 1px solid #5E6B6E; border-radius: 2px; }
+.vl-pips i.on { background: #B3261E; border-color: #B3261E; }
+.vl-replay h5 { font-size: 1rem; font-weight: 700; margin: 0 0 .1rem; }
+.vl-replay h5 span { color: var(--c); margin-left: .5rem; }
+.vl-replay .vl-pass { margin: 0 0 .25rem; }
 @media (max-width: 720px) {
   .vl-wall { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .vl-script li { grid-template-columns: 3rem minmax(0, 1fr); }
@@ -369,6 +387,15 @@ def cause_list(causes: list[Cause]) -> str:
     )
 
 
+GATE_LABEL = {"ship": "Ship", "reject": "Reject", "inconclusive": "Inconclusive"}
+GATE_COLOR = {
+    "ship": VERDICT_COLOR["Pass"],
+    "reject": VERDICT_COLOR["Fatal"],
+    "inconclusive": VERDICT_COLOR["NeedsReview"],
+}
+REPLAY_MARK = "__replay_"  # replay.replay_id() names a replayed call "<original id>__replay_<tag>_<seed>_<hash>"
+
+
 def _counts(c: Cause) -> str:
     return ", ".join(
         x
@@ -456,3 +483,98 @@ def fix_cards(causes: list[Cause], patches: list[PromptPatch], rejected: list[di
         f"{n_rejected} had a patch rejected.</p>"
     )
     return f'{lede}<ol class="vl vl-cards" aria-label="Prompt fixes, most urgent cause first">{"".join(cards)}</ol>'
+
+
+def fmt_p(p: float) -> str:
+    return f"{p:.4f}" if p >= 0.0001 else f"{p:.1e}"
+
+
+def _pips(fails: int, k: int) -> str:
+    cells = "".join('<i class="on"></i>' if i < fails else "<i></i>" for i in range(k))
+    return f'<span class="vl-pips" role="img" aria-label="{fails} of {k} replays failed">{cells}</span>{fails} of {k}'
+
+
+def gate_cards(gates: list[GateResult], names: dict[str, str] | None = None) -> str:
+    """One card per cause with its latest gate result: badge, p-value against alpha, rates, lift, calls and guards.
+
+    Each target call shows its old and new fail counts out of k, one filled square per failed replay.
+    A nan p-value means no test ran (an early stop), and the card says so.
+    """
+    names = names or {}
+    cards = []
+    for g in gates:
+        if g.p_value != g.p_value:  # nan
+            p = f"No test run <small>alpha {g.alpha:g}</small>"
+        else:
+            side = "at or below alpha" if g.p_value <= g.alpha else "above alpha"
+            p = f"{fmt_p(g.p_value)} vs {g.alpha:g} <small>{side}</small>"
+        stats = "".join(
+            f"<div><small>{label}</small><b>{value}</b></div>"
+            for label, value in (
+                ("p-value vs alpha", p),
+                ("Old fail rate", f"{g.old_fail_rate:.0%}"),
+                ("New fail rate", f"{g.new_fail_rate:.0%}"),
+                ("Lift", f"{g.lift * 100:+.0f} points"),
+            )
+        )
+        per_call = (
+            '<div class="vl-scroll"><div class="vl-pc">'
+            '<span class="h">Target call</span><span class="h">Old prompt</span><span class="h">New prompt</span>'
+            + "".join(
+                f"<span>{esc(c.call_id)}</span><span>{_pips(c.old_fails, c.k)}</span>"
+                f"<span>{_pips(c.new_fails, c.k)}</span>"
+                for c in g.per_call
+            )
+            + "</div></div>"
+        )
+        breaks = ", ".join(esc(x) for x in g.guard_breaks) or "none"
+        flaky = ", ".join(esc(x) for x in g.guard_flaky) or "none"
+        cards.append(
+            f'<li class="vl-card gate"><div><h4><span class="vl-badge" style="--c:{GATE_COLOR[g.decision]}">'
+            f"{GATE_LABEL[g.decision]}</span>{esc(names.get(g.cause_id, g.cause_id))}"
+            f"<small>attempt {g.attempt}</small></h4>"
+            f"<p>{esc(g.reason)}</p><div class='vl-stats'>{stats}</div>{per_call}"
+            f"<p><b>Guard breaks</b>{breaks}</p>"
+            f"<p><b>Flaky guards</b>{flaky} <span class='vl-pass'>(Fatal under both prompts, not a reject)</span></p>"
+            f'<p class="vl-pass">{g.n_calls} target calls, {g.k_seeds} replays each. '
+            f"The smallest p this design can reach is {fmt_p(g.min_achievable_p)}.</p></div></li>"
+        )
+    n = {d: sum(g.decision == d for g in gates) for d in GATE_LABEL}
+    lede = (
+        f'<p class="vl vl-lede"><b>{n["ship"]} of {len(gates)}</b> tested fixes ship. '
+        f"{n['reject']} rejected, {n['inconclusive']} inconclusive.</p>"
+    )
+    key = (
+        '<p class="vl vl-axis">Each square is one replay of a target call. A filled square is a replay that still had '
+        "the cause's fault.</p>"
+    )
+    return f'{lede}<ol class="vl vl-cards" aria-label="Ship gate result per cause">{"".join(cards)}</ol>{key}'
+
+
+def replay_panel(
+    title: str,
+    call: CallRecord,
+    audit: AuditRecord | None,
+    fork_turn: int,
+    ended_by: str,
+    seed: int = 0,
+    parameter: str | None = None,
+    names: dict[str, str] | None = None,
+) -> str:
+    """One replay from its fork turn on, as a script. Turns before the fork are the original call and are left out.
+
+    The head names the prompt, the audit verdict and, when `parameter` is given, whether the cause's fault showed up.
+    """
+    shown = call.model_copy(update={"turns": call.turns[fork_turn:]})
+    head, meta = esc(title), [f"Seed {seed}", f"from turn {fork_turn}", f"ended by {ended_by.replace('_', ' ')}"]
+    if audit is not None:
+        color, label = VERDICT_COLOR.get(audit.verdict, "#5E6B6E"), VERDICT_LABEL.get(audit.verdict, audit.verdict)
+        head += f'<span style="--c:{color}">{esc(label)}</span>'
+        if parameter:
+            bad = any(f.parameter == parameter and f.status in FAILING for f in audit.findings)
+            name = (names or {}).get(parameter, parameter)
+            meta.append(f"{name}: {'fault shown' if bad else 'no fault'}")
+    return (
+        f'<div class="vl vl-replay"><h5>{head}</h5><p class="vl-pass">{esc(", ".join(meta))}.</p>'
+        f"{script(shown, audit, names)}</div>"
+    )
