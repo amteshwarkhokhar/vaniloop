@@ -5,6 +5,7 @@ Run: uv run streamlit run src/vaniloop/dashboard.py
 
 from __future__ import annotations
 
+import html
 import json
 import os
 from pathlib import Path
@@ -166,7 +167,7 @@ def transcript_frame(call: CallRecord) -> pd.DataFrame:
 def verdict_heading(call_id: str, verdict: str) -> None:
     color = VERDICT_COLOR.get(verdict, "#5E6B6E")
     st.html(
-        f"<h3 style='margin:.25rem 0 .1rem'>{call_id} "
+        f"<h3 style='margin:.25rem 0 .1rem'>{html.escape(call_id)} "
         f"<span style='color:{color};font-weight:700'>{VERDICT_LABEL.get(verdict, verdict)}</span></h3>"
     )
 
@@ -358,6 +359,7 @@ def audit_tab(audits: list[AuditRecord], calls: dict[str, CallRecord]) -> None:
     if st.session_state.get("call_sel") not in ids:
         st.session_state["call_sel"] = ids[0]
     sel = st.selectbox("Open a call", ids, key="call_sel")
+    st.query_params["call"] = sel  # the address bar now links to this call
     render_detail(next(a for a in audits if a.call_id == sel), calls.get(sel))
 
 
@@ -392,6 +394,11 @@ def main() -> None:
         st.caption(f"{len(audits)} audits, {len(causes)} causes, {len(calls)} calls")
     st.title("vaniloop")
     st.caption("Grades VANI calls, finds why they fail, and tests prompt fixes before they ship.")
+    if "deep_link" not in st.session_state:  # only the session's first run reads ?call=<id>; later the app writes it
+        linked = st.query_params.get("call", "")
+        st.session_state["deep_link"] = linked
+        if any(a.call_id == linked for a in audits):
+            open_call(linked)
     view = st.radio(
         "View", ["Audit", "Grade", "Issues", "Fix", "Test"], horizontal=True, key="view", label_visibility="collapsed"
     )

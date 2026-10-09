@@ -50,3 +50,21 @@ def test_unsaved_choice_on_one_call_does_not_follow_to_the_next(tmp_path, monkey
     at.button[0].click().run()
     grades = load_grades(tmp_path / "hand_grades.jsonl")
     assert set(grades) == {ids[1]} and grades[ids[1]]["verdict"] == "Pass"
+
+
+def test_a_call_link_opens_that_call_in_the_audit_view(tmp_path, monkeypatch):
+    """Opening the dashboard with ?call=<id> shows that call's detail, and choosing a call updates the link.
+
+    If this breaks, a link sent for review opens the wrong call or the first call in the list.
+    """
+    for f in FIX.iterdir():
+        shutil.copy(f, tmp_path / f.name)
+    monkeypatch.setenv("VANILOOP_DATA", str(tmp_path))
+    ids = [json.loads(line)["call_id"] for line in (FIX / "synthetic_audits.jsonl").read_text().splitlines()]
+    at = AppTest.from_file(str(APP), default_timeout=30)
+    at.query_params["call"] = ids[2]
+    at.run()
+    assert not at.exception
+    assert at.selectbox(key="call_sel").value == ids[2]
+    at.selectbox(key="call_sel").select(ids[3]).run()
+    assert at.query_params["call"] in (ids[3], [ids[3]])

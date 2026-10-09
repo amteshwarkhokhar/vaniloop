@@ -7,6 +7,7 @@ Every piece of call text goes through html.escape. Pass audit=None to draw a cal
 from __future__ import annotations
 
 import html
+import math
 
 from .models import AuditRecord, CallRecord, Cause
 
@@ -64,6 +65,7 @@ CSS = """
 .vl-script p { margin: 0; max-width: 72ch; }
 .vl-script .note { grid-column: 3; margin: .3rem 0 0; font-size: .9rem; color: var(--c); }
 .vl-script li.fault { border-left-color: var(--c); background: color-mix(in srgb, var(--c) 6%, transparent); }
+.vl-script li.context { border-left: 3px dashed color-mix(in srgb, var(--c) 45%, transparent); }
 .vl-script li.gap { display: block; color: #5E6B6E; font-size: .9rem; font-style: italic; }
 .vl-finds { list-style: none; padding: 0; margin: 0; }
 .vl-finds li { border-left: 3px solid var(--c); padding: .1rem 0 .1rem .75rem; margin: 0 0 .9rem; }
@@ -107,16 +109,26 @@ def call_length(call: CallRecord) -> float:
     return max([call.duration_sec or 0.0, *ends, 1.0])
 
 
-def fault_turns(audit: AuditRecord | None) -> dict[int, str]:
-    """turn idx -> the worst status citing it (Fatal over NonFatal)."""
-    out: dict[int, str] = {}
+def _marks(audit: AuditRecord | None) -> tuple[dict[int, str], dict[int, str]]:
+    """(fault turns, context turns), each turn idx -> the worst status citing it (Fatal over NonFatal).
+
+    A finding's evidence can include turns before its onset: the first three city asks are allowed and only
+    the fourth is the fault. Those earlier turns are context, drawn lighter, so the page agrees with the onset.
+    """
+    fault: dict[int, str] = {}
+    context: dict[int, str] = {}
     for f in audit.findings if audit else []:
         if f.status not in FAILING:
             continue
         for e in f.evidence:
-            if e.turn_idx is not None and out.get(e.turn_idx) != "Fatal":
-                out[e.turn_idx] = f.status
-    return out
+            if e.turn_idx is None:
+                continue
+            bucket = context if f.onset_turn is not None and e.turn_idx < f.onset_turn else fault
+            if bucket.get(e.turn_idx) != "Fatal":
+                bucket[e.turn_idx] = f.status
+    for idx in fault:
+        context.pop(idx, None)
+    return fault, context
 
 
 def _onset_sec(call: CallRecord, audit: AuditRecord | None) -> float | None:
@@ -136,7 +148,7 @@ def call_strip(call: CallRecord, audit: AuditRecord | None = None) -> str:
     With audit=None nothing from the audit is drawn, so the strip is safe for blind grading.
     """
     total = call_length(call)
-    faults = fault_turns(audit)
+    faults, context = _marks(audit)
     parts = []
     for s in call.silences:
         if s.duration > SILENCE_MIN:
@@ -145,10 +157,15 @@ def call_strip(call: CallRecord, audit: AuditRecord | None = None) -> str:
                 f'width:{_pct(s.duration, total)}" title="{s.duration:.0f} s of silence"></span>'
             )
     for t in call.turns:
+        if t.start_sec >= total:
+            continue  # nothing left of the timeline to draw on
         fill = VERDICT_COLOR[faults[t.idx]] if t.idx in faults else SPEAKER_COLOR.get(t.speaker, "#999")
+        if t.idx in context:
+            fill = f"color-mix(in srgb, {VERDICT_COLOR[context[t.idx]]} 35%, #F5F6F3)"
         parts.append(
             f'<span class="turn {esc(t.speaker)}" style="left:{_pct(t.start_sec, total)};'
-            f'width:{_pct(max(t.end_sec - t.start_sec, total / 400), total)};background:{fill}" '
+            f"width:{_pct(min(max(t.end_sec - t.start_sec, total / 400), total - t.start_sec), total)};"
+            f'background:{fill}" '
             f'title="Turn {t.idx}, {SPEAKER_NAME.get(t.speaker, t.speaker)}, {mmss(t.start_sec)}"></span>'
         )
     onset = _onset_sec(call, audit)
@@ -176,7 +193,7 @@ def wall(audits: list[AuditRecord], calls: dict[str, CallRecord]) -> str:
     """
     lengths = sorted(call_length(c) for c in calls.values()) or [1.0]
     longest = lengths[-1]
-    scale = lengths[int(0.95 * (len(lengths) - 1))]  # rows longer than this run off the edge
+    scale = lengths[math.ceil(0.95 * len(lengths)) - 1]  # nearest-rank p95; longer rows run off the edge
     cols = []
     for v in VERDICT_ORDER:
         members = [a for a in audits if a.verdict == v and a.call_id in calls]
@@ -236,17 +253,24 @@ def _who(t) -> str:
 def script(call: CallRecord, audit: AuditRecord | None = None, names: dict[str, str] | None = None) -> str:
     """The transcript as a script: time, speaker, words. Long silences sit between turns.
 
-    With an audit, turns cited by a Fatal or Non-Fatal finding get a coloured rule and the finding as a note.
+    With an audit, turns in a Fatal or Non-Fatal fault get a coloured rule. Cited turns before the fault starts
+    get a dashed rule. Each finding is named once, where it starts.
     With audit=None the script carries no audit information, for blind grading.
     """
     names = names or {}
-    notes: dict[int, list[tuple[str, str]]] = {}
+    notes: dict[int, list[str]] = {}  # each finding speaks once: where its fault starts, and where its context starts
     for f in audit.findings if audit else []:
-        if f.status in FAILING:
-            for e in f.evidence:
-                if e.turn_idx is not None:
-                    notes.setdefault(e.turn_idx, []).append((f.status, names.get(f.parameter, f.parameter)))
-    faults = fault_turns(audit)
+        if f.status not in FAILING:
+            continue
+        name = names.get(f.parameter, f.parameter)
+        cited = sorted(e.turn_idx for e in f.evidence if e.turn_idx is not None)
+        before = [i for i in cited if f.onset_turn is not None and i < f.onset_turn]
+        start = f.onset_turn if f.onset_turn is not None else (cited[0] if cited else None)
+        if before:
+            notes.setdefault(before[0], []).append(f"Counts toward: {name}")
+        if start is not None:
+            notes.setdefault(start, []).append(f"{VERDICT_LABEL[f.status]}: {name} starts here")
+    faults, context = _marks(audit)
     events = [(t.start_sec, 0, t) for t in call.turns]
     events += [(s.start_sec, 1, s) for s in call.silences if s.duration > SILENCE_MIN]
     rows = []
@@ -254,13 +278,11 @@ def script(call: CallRecord, audit: AuditRecord | None = None, names: dict[str, 
         if kind == 1:
             rows.append(f'<li class="gap">{ev.duration:.0f} s of silence at {mmss(ev.start_sec)}</li>')
             continue
-        status = faults.get(ev.idx)
-        cls = ' class="fault"' if status else ""
+        status = faults.get(ev.idx) or context.get(ev.idx)
+        kind = "fault" if ev.idx in faults else "context" if ev.idx in context else ""
+        cls = f' class="{kind}"' if kind else ""
         style = f' style="--c:{VERDICT_COLOR[status]}"' if status else ""
-        note = ""
-        if ev.idx in notes:
-            text = "; ".join(f"{VERDICT_LABEL[s]}: {p}" for s, p in notes[ev.idx])
-            note = f'<span class="note">{esc(text)}</span>'
+        note = f'<span class="note">{esc("; ".join(notes[ev.idx]))}</span>' if ev.idx in notes else ""
         rows.append(
             f'<li{cls}{style}><span class="t">{mmss(ev.start_sec)}<small>turn {ev.idx}</small></span>'
             f"{_who(ev)}<p>{esc(ev.text)}</p>{note}</li>"
@@ -274,7 +296,7 @@ def findings(audit: AuditRecord, names: dict[str, str] | None = None) -> str:
     bad = sorted((f for f in audit.findings if f.status in FAILING), key=lambda f: f.status != "Fatal")
     items = [
         f'<li style="--c:{VERDICT_COLOR[f.status]}"><b>{esc(names.get(f.parameter, f.parameter))}</b>'
-        f"<span>{VERDICT_LABEL[f.status]}</span> from turn {esc(f.onset_turn) if f.onset_turn is not None else 'n/a'}"
+        f"<span>{VERDICT_LABEL[f.status]}</span>{f' from turn {esc(f.onset_turn)}' if f.onset_turn is not None else ''}"
         f'<p>{esc(f.reason)}</p><p class="vl-pass">Evidence: {esc(f.basis.replace("_", " "))}</p></li>'
         for f in bad
     ]

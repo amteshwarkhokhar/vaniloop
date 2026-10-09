@@ -57,7 +57,7 @@ def test_audited_drawings_mark_the_fault_turn_and_the_long_silence():
     """
     strip, text = call_strip(_call(), _audit()), script(_call(), _audit(), {"qty_missed": "Quantity asked again"})
     assert "first fault, turn 2" in strip and "7 s of silence" in strip
-    assert 'class="fault"' in text and "Fatal: Quantity asked again" in text
+    assert 'class="fault"' in text and "Fatal: Quantity asked again starts here" in text
     assert "7 s of silence at 0:06" in text and "turn 2" in text
 
 
@@ -95,3 +95,35 @@ def test_cause_list_keeps_rank_order_and_one_shared_axis():
     positions = [out.index(c.name) for c in causes]
     assert positions == sorted(positions)
     assert out.count("Bars share one axis") == 1
+
+
+def test_cited_turns_before_the_onset_are_context_not_fault():
+    """Asks within the limit are cited as evidence but drawn as context; the fault rule starts at the onset turn.
+
+    Found on a real 5:45 call: three allowed city asks showed as Fatal while the finding said the fault began at the
+    fourth. The page must agree with the finding, and name it once, not on every cited turn.
+    """
+    call = _call()
+    call.turns.append(Turn(idx=3, speaker="bot", start_sec=18.5, end_sec=19.5, text="City bataiye?"))
+    ev = [Evidence(turn_idx=i, start_sec=0, end_sec=1, quote="ask") for i in (0, 2, 3)]
+    f = Finding(parameter="looping", status="Fatal", reason="r", basis="observed", evidence=ev, onset_turn=3)
+    audit = AuditRecord(call_id="c1", verdict="Fatal", scope="bl_collection", findings=[f], first_fault_turn=3)
+    text = script(call, audit, {"looping": "Asks again"})
+    assert text.count('class="context"') == 2 and text.count('class="fault"') == 1
+    assert text.count("Counts toward: Asks again") == 1 and text.count("Fatal: Asks again starts here") == 1
+    assert "color-mix" in call_strip(call, audit)
+
+
+def test_wall_scale_and_strip_edges_stay_inside_the_timeline():
+    """With two calls the wall scale is the longer call, and a zero-length last turn draws no bar past the end.
+
+    Review found the p95 index picked the shorter call (hiding most of the longer one) and an end turn overflowing.
+    """
+    short = CallRecord(call_id="s", audio_path=None, duration_sec=10, turns=[], silences=[])
+    long_ = _call()
+    long_.duration_sec = 100
+    audits = [AuditRecord(call_id=c, verdict="Pass", scope="bl_collection", findings=[]) for c in ("s", "c1")]
+    assert "Rows longer than 1:40" in wall(audits, {"s": short, "c1": long_})
+    edge = _call()
+    edge.turns.append(Turn(idx=3, speaker="bot", start_sec=20, end_sec=20, text="end"))
+    assert "Turn 3," not in call_strip(edge)
