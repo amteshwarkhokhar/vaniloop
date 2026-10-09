@@ -5,7 +5,8 @@ import json
 import pytest
 
 from test_findings import mk_call, mk_led
-from vaniloop.ingest import AUDIO_DIR, TRANSCRIPTS_DIR, build_call_records
+from test_ingest import synthetic_transcripts
+from vaniloop.ingest import build_call_records
 from vaniloop.rules import rule_qty_accuracy, unit_group, to_base
 
 
@@ -18,11 +19,12 @@ def _acc(buyer, bot):
 # ---- 1 torn last line on resume
 def test_r3_1_resume_after_torn_last_line_keeps_new_record(tmp_path):
     out = tmp_path / "calls.jsonl"
-    build_call_records(TRANSCRIPTS_DIR, AUDIO_DIR, out)
+    src = synthetic_transcripts(tmp_path / "t")
+    build_call_records(src, tmp_path, out)
     lines = out.read_text().splitlines()
     assert len(lines) == 3
     out.write_text("\n".join(lines[:2]) + "\n" + lines[2][:40])  # torn third record, no newline
-    recs = build_call_records(TRANSCRIPTS_DIR, AUDIO_DIR, out)
+    recs = build_call_records(src, tmp_path, out)
     assert len(recs) == 3
     good = [ln for ln in out.read_text().splitlines() if ln.strip().endswith("}")]
     parsed = [json.loads(ln)["call_id"] for ln in good]

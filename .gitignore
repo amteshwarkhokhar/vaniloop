@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 data/reference/vani_prompt_sarvam.md
 data/pii_denylist.txt
+.claude/worktrees/
