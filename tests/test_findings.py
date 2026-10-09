@@ -746,3 +746,50 @@ def test_95_set_is_not_an_alias_of_piece():
     )
     f = by(audit_call(call, led))["qty_unit"]
     assert "only one side states a unit" in f.reason and "same kind" not in f.reason
+
+
+def test_95_qty_missed_only_judges_reasks_in_the_final_product_segment():
+    """Only re-asks in the FINAL product segment count, because the posted lead carries the final product.
+
+    Review round 2: an earlier product's re-ask was judged Fatal and the final product's quantity was mixed into it.
+    Turn 1 gives 10 pumps, the bot re-asks at turn 2, turn 3 switches to valves, turn 7 gives 20 valves with unclear
+    audio, and the bot re-asks at turn 8. Turn 8 must be judged NonFatal on the unclear turn 7. A Fatal at turn 2
+    would grade the pump ask with the valve quantity and inflate the Fatal rate.
+    """
+    call = mk_call(12)
+    call.turns[7].audio_unclear = True
+    led = mk_led(
+        call,
+        [bt(0, "quantity"), bt(2, "quantity"), bt(8, "quantity")],
+        [UserTurnLabel(idx=1, gave_value_for="quantity"), UserTurnLabel(idx=7, gave_value_for="quantity")],
+        buyer_facts={"quantity": "20"},
+        bot_confirmed={"product": "valve"},
+        product_changed_at_turn=3,
+        final_product="valve",
+    )
+    f = by(audit_call(call, led))["qty_missed"]
+    assert f.status == "NonFatal" and f.onset_turn == 8 and "unclear" in f.reason
+
+
+def test_95_qty_captured_rejects_an_unrecognised_unit_word():
+    """ "10 sets" against "10 pieces" is not a captured match: an unrecognised unit word must not read as no unit.
+
+    Review round 2: "sets" parsed as no unit, the numbers matched, and an unanswered re-ask graded NonFatal. A set
+    can hold several pieces, so a possible quantity error would ship on the lead. With the fix it is Fatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said="10 sets", kept="10 pieces")
+    assert f.status == "Fatal" and f.onset_turn == 2
+
+
+def test_95_qty_captured_keeps_a_bare_number_matching_a_stated_unit():
+    """Guard: a bare "10" against "10 pieces" keeps today's NonFatal, because a bare number is still "no unit".
+
+    The unit-word fix must not turn every one-sided unit into a capture fault, or calls where the buyer gave only a
+    number and the bot recorded the category's default unit would be regraded Fatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said="10", kept="10 pieces")
+    assert f.status == "NonFatal" and f.onset_turn == 2

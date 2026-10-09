@@ -245,6 +245,30 @@ def parse_quantity_full(text: str | None) -> tuple[float, float, str | None] | N
     return low, high, unit
 
 
+def _unit_word(text: str | None) -> tuple[str | None, bool]:
+    """(canonical unit|None, unrecognised). Reads the unit position parse_quantity_full reads: the word right
+    after the number (after the second number for a range). unrecognised is True when a word sits there that is
+    not a known unit, so "10 sets" cannot silently equal "10 pieces"; a bare "10" with no word stays no-unit."""
+    if not text:
+        return None, False
+    toks = _TOKEN.findall(str(text).lower())
+    r = _number_at(toks, 0)
+    if not r:
+        return None, False
+    _, i = r
+    if i < len(toks) and toks[i] in _RANGE_SEP:  # a range: the unit sits after the high number
+        r2 = _number_at(toks, i + 1, skip_junk=False)
+        if r2:
+            _, i = r2
+    if i < len(toks):
+        tok = toks[i]
+        if tok in _UNITS:
+            return _UNITS[tok][1], False
+        if tok.isalpha():  # an attempted unit the parser does not know
+            return None, True
+    return None, False
+
+
 def _fmt_pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
@@ -558,7 +582,11 @@ def _qty_captured(led: Ledger) -> bool:
     pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
     if pa is None or pb is None:
         return False
-    (alo, ahi, ua), (blo, bhi, ub) = pa, pb
+    (alo, ahi, _), (blo, bhi, _) = pa, pb
+    ua, unrec_a = _unit_word(said)
+    ub, unrec_b = _unit_word(kept)
+    if unrec_a or unrec_b:
+        return False  # an unrecognised unit word on either side is not a match ("10 sets" vs "10 pieces")
     ua = ua or norm_unit(led.buyer_facts.get("unit"))
     ub = ub or norm_unit(led.bot_confirmed.get("unit"))
     if ua and ub:
@@ -593,18 +621,19 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
             reason=f"buyer said quantity '{said}' but no turn is labelled as giving it; cannot tell if it was captured",
         )
     change = led.product_changed_at_turn
+    final_seg = 1 if change is not None else 0  # the posted lead carries the FINAL product
 
     def seg(i: int) -> int:  # a product change starts a new quantity (L83): compare only inside one segment
         return 1 if change is not None and i >= change else 0  # the change turn itself belongs to the new product
 
-    reasked = []
-    for sg in (0, 1):
-        first = [g for g in gave if seg(g) == sg]
-        if first:
-            reasked += sorted(
-                b.idx for b in led.bot_turns if b.slot == "quantity" and seg(b.idx) == sg and b.idx > first[0]
-            )
-    reasked.sort()
+    # Only re-asks in the final product segment count. A re-ask in an earlier segment belongs to a product the
+    # lead does not carry; judging it mixed the old product's ask with the final product's quantity (review round 2).
+    first = [g for g in gave if seg(g) == final_seg]
+    reasked = (
+        sorted(b.idx for b in led.bot_turns if b.slot == "quantity" and seg(b.idx) == final_seg and b.idx > first[0])
+        if first
+        else []
+    )
     if reasked:
         unanswered = [r for r in reasked if not any(g > r and seg(g) == seg(r) for g in gave)]
         if unanswered:  # an unanswered re-ask may leave the lead without a quantity, unless a, b below apply
