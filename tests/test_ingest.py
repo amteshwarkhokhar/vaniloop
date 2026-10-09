@@ -5,6 +5,21 @@ import pytest
 
 from vaniloop.ingest import AUDIO_DIR, TRANSCRIPTS_DIR, build_call_records, detect_silences, load_transcript
 
+HAS_DATA = (TRANSCRIPTS_DIR / "10_90797297_EMBDVXFH5.json").exists()
+needs_data = pytest.mark.skipif(not HAS_DATA, reason="local call data not present")
+
+
+def synthetic_transcripts(d: Path, n: int = 3) -> Path:
+    """Write n tiny transcripts so ingest tests do not depend on real call data."""
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        (d / f"syn{i}.json").write_text(
+            f'{{"call_id":"syn{i}","duration_sec":4,"turns":[{{"speaker":"bot","start_sec":0,"end_sec":2,"text":"hello"}},'
+            f'{{"speaker":"user","start_sec":2,"end_sec":4,"text":"haan"}}]}}'
+        )
+    return d
+
+
 COUNTS = {
     "10_90797297_EMBDVXFH5": 9,
     "133_90852837_DSXGKXVH5": 3,
@@ -12,6 +27,7 @@ COUNTS = {
 }
 
 
+@needs_data
 @pytest.mark.parametrize("call_id,n", COUNTS.items())
 def test_load_transcript_turn_counts(call_id, n):
     rec = load_transcript(TRANSCRIPTS_DIR / f"{call_id}.json")
@@ -31,6 +47,7 @@ def test_seller_maps_to_user(tmp_path):
     assert rec.audio_path is None
 
 
+@needs_data
 def test_detect_silences_real_call():
     sil = detect_silences(AUDIO_DIR / "10_90797297_EMBDVXFH5.mp3")
     print(sil)
@@ -70,8 +87,9 @@ def test_trailing_silence(tmp_path):
 
 def test_build_resumable(tmp_path):
     out = tmp_path / "calls.jsonl"
-    r1 = build_call_records(TRANSCRIPTS_DIR, AUDIO_DIR, out)
+    src = synthetic_transcripts(tmp_path / "t")
+    r1 = build_call_records(src, tmp_path, out)
     assert len(r1) == 3
-    r2 = build_call_records(TRANSCRIPTS_DIR, AUDIO_DIR, out)
+    r2 = build_call_records(src, tmp_path, out)
     assert len(r2) == 3
     assert len(out.read_text().splitlines()) == 3
