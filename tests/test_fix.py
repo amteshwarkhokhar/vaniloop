@@ -2,7 +2,7 @@ import json
 
 from vaniloop.fix import PromptPatch, _retry_kwargs, apply_patch, propose_patch, run_fix
 from vaniloop.llm import complete_json
-from vaniloop.models import Cause
+from vaniloop.models import AuditRecord, Cause, Evidence, Finding
 
 PROMPT = "\n".join(f"line {i}: rule text {i}" for i in range(1, 31))
 
@@ -221,3 +221,183 @@ def test_propose_patch_zeroes_llm_retries():
         return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
 
     assert propose_patch(cause(), [], PROMPT, llm=no_kw) is not None
+
+
+def audit(call_id, parameter, quotes, status="NonFatal"):
+    """One audit row with a single finding of `parameter` that carries the given evidence quotes."""
+    finding = Finding(
+        parameter=parameter,
+        status=status,
+        reason="r",
+        basis="observed",
+        evidence=[Evidence(turn_idx=i, quote=q) for i, q in enumerate(quotes)],
+    )
+    return AuditRecord(call_id=call_id, verdict=status, scope="bl_collection", findings=[finding])
+
+
+def write_run(tmp_path, prompt_bytes, causes, audits=()):
+    """Write causes.json, the prompt file and audits.jsonl under tmp_path and return their paths."""
+    cp, pp, ap = tmp_path / "causes.json", tmp_path / "prompt.md", tmp_path / "audits.jsonl"
+    cp.write_text(json.dumps({"causes": [c.model_dump() for c in causes]}))
+    pp.write_bytes(prompt_bytes)
+    ap.write_text("".join(json.dumps(a.model_dump(mode="json")) + "\n" for a in audits))
+    return cp, pp, ap, tmp_path / "out" / "patches.json"
+
+
+def test_anchor_copied_without_boms_or_escapes_is_found(tmp_path):
+    """An anchor typed without the file's BOMs and escapes must match and give the file's own L refs.
+
+    Without cleaning, the visible text the model copies never matches, so a real cause gets no patch.
+    """
+    lines = [f"\ufeffrow {i}" for i in range(1, 21)]
+    lines[9] = "\ufeffAsk the \\_quantity\\_ before the \\*city\\*."
+    lines[10] = "\ufeffNever skip step 2\\."
+    raw = "\n".join(lines)
+    old = "Ask the _quantity_ before the *city*.\nNever skip step 2."
+    new = old + "\nAlways ask the quantity."
+    # Why the anchor missed before: the raw text does not hold it.
+    rej: list = []
+    assert propose_patch(cause(), [], raw, llm=stub(old, new), rejected=rej) is None
+    assert "not found" in rej[0]["reason"]
+
+    cp, pp, ap, op = write_run(tmp_path, raw.encode("utf-8"), [cause()])
+    r = run_fix(cp, pp, op, llm=stub(old, new), audits_path=ap)
+    assert r["rejected"] == []
+    patch = PromptPatch(**r["patches"][0])
+    assert (patch.target_start_line, patch.target_end_line) == (10, 11)  # the file's lines 10 and 11
+    assert patch.old_text == old
+
+
+def test_prefixed_anchor_is_found_once_and_a_repeated_one_is_rejected():
+    """An anchor with copied "N: " prefixes must match once after stripping, and still fail if it repeats.
+
+    Without the retry the copied prefixes reject a correct anchor. Without the count a repeat would patch blindly.
+    """
+    old = "10: line 10: rule text 10\n11: line 11: rule text 11"
+    new = "10: line 10: rule text 10\n11: Always ask the quantity.\n12: line 11: rule text 11"
+    p = propose_patch(cause(), [], PROMPT, llm=stub(old, new))
+    assert isinstance(p, PromptPatch)
+    assert p.old_text == "line 10: rule text 10\nline 11: rule text 11"
+    assert p.new_text == "line 10: rule text 10\nAlways ask the quantity.\nline 11: rule text 11"
+    assert (p.target_start_line, p.target_end_line) == (10, 11)
+    assert apply_patch(PROMPT, p).count("Always ask the quantity.") == 1
+
+    repeated = "head\nrepeat me\nmiddle\nrepeat me\ntail"
+    rej: list = []
+    assert propose_patch(cause(), [], repeated, llm=stub("2: repeat me", "2: repeat it"), rejected=rej) is None
+    assert "2 times" in rej[0]["reason"]
+
+
+def test_prefix_strip_that_leaves_no_edit_is_rejected():
+    """If stripping the "N: " prefixes makes new_text equal old_text, the patch must be rejected.
+
+    Otherwise a prefix-only difference would ship a patch that changes nothing in the prompt.
+    """
+    rej: list = []
+    assert (
+        propose_patch(cause(), [], PROMPT, llm=stub("5: line 5: rule text 5", "6: line 5: rule text 5"), rejected=rej)
+        is None
+    )
+    assert "identical" in rej[0]["reason"]
+
+
+def test_fix_sees_main_variant_only_and_gets_evidence_quotes(tmp_path):
+    """The user message must hold prompt lines 1-1722 only, and up to 3 one-line quotes cut to 160 characters.
+
+    Line 1723 onward is other variants, and without quotes the model proposes fixes blind.
+    """
+    raw = "\n".join(f"\ufeffrow {i}" for i in range(1, 1801)).encode("utf-8")
+    c = cause()
+    c.fatal_calls = ["f1"]
+    c.nonfatal_calls = ["n1", "n2", "n3", "other_param"]
+    long = "x" * 200
+    audits = [
+        audit("f1", "qty_probing", ["Fatal quote one", "second quote of the same call"], status="Fatal"),
+        audit("n1", "qty_probing", ["two\nline  quote"]),
+        audit("n2", "qty_probing", [long]),
+        audit("n3", "qty_probing", ["fourth call quote"]),  # over the cap of 3
+        audit("other_param", "dead_air", ["wrong parameter quote"]),
+        audit("not_a_member", "qty_probing", ["non member quote"]),
+    ]
+    cp, pp, ap, op = write_run(tmp_path, raw, [c], audits)
+    calls: list = []
+    run_fix(cp, pp, op, llm=stub("row 5", "row 5 changed", calls), audits_path=ap)
+    user = calls[0][1]
+    assert "\n1722: row 1722" in user
+    assert "1723: " not in user and "row 1723" not in user
+    data = json.loads(user.split("</data>")[0].removeprefix("<data>\n"))
+    assert data["examples"] == ["Fatal quote one", "two line quote", "x" * 160]
+
+
+def test_anchor_from_line_1723_onward_is_rejected(tmp_path):
+    """An anchor that sits after line 1722 must be rejected, because Fix patches the main variant only.
+
+    A patch into a later variant would edit text that 100 of 103 audited calls never use.
+    """
+    raw = "\n".join(f"row {i}" for i in range(1, 1801)).encode("utf-8")
+    cp, pp, ap, op = write_run(tmp_path, raw, [cause()])
+    r = run_fix(cp, pp, op, llm=stub("row 1723", "row 1723 changed"), audits_path=ap)
+    assert r["patches"] == []
+    assert "not found" in r["rejected"][0]["reason"]
+
+
+def test_run_fix_without_audits_file_still_runs(tmp_path):
+    """A missing audits file must give no examples, not a crash.
+
+    Fix must stay usable on a checkout that has causes but no audit rows.
+    """
+    c = cause()
+    c.fatal_calls = ["f1"]
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), [c])
+    ap.unlink()
+    calls: list = []
+    r = run_fix(cp, pp, op, llm=stub("line 3: rule text 3", "z", calls), audits_path=ap)
+    assert len(r["patches"]) == 1
+    assert json.loads(calls[0][1].split("</data>")[0].removeprefix("<data>\n"))["examples"] == []
+
+
+def test_rejected_rows_keep_the_first_300_chars_of_old_text(tmp_path):
+    """A rejected row must hold the first 300 characters of the proposed old_text, in memory and on disk.
+
+    Without it a failed anchor cannot be read without paying for another model call.
+    """
+    old = "".join(chr(97 + i % 26) for i in range(500))  # not in the prompt
+    rej: list = []
+    assert propose_patch(cause(), [], PROMPT, llm=stub(old, "x"), rejected=rej) is None
+    assert rej[0]["old_text"] == old[:300] and len(rej[0]["old_text"]) == 300
+    dup = "rule text"  # present many times
+    assert propose_patch(cause(), [], PROMPT, llm=stub(dup, "x"), rejected=rej) is None
+    assert rej[1]["old_text"] == dup
+
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), [cause()])
+    r = run_fix(cp, pp, op, llm=stub(old, "x"), audits_path=ap)
+    assert r["rejected"][0]["old_text"] == old[:300]
+    assert json.loads(op.read_text())["rejected"][0]["old_text"] == old[:300]
+
+
+def test_prefix_strip_that_empties_new_text_is_rejected():
+    """If stripping the "N: " prefix leaves new_text empty, the patch must be rejected.
+
+    Otherwise a model reply of just a line number would delete the instruction it anchored on.
+    """
+    prompt = "head\nAsk quantity.\ntail"
+    rej: list = []
+    assert propose_patch(cause(), [], prompt, llm=stub("2: Ask quantity.", "2: "), rejected=rej) is None
+    assert "empty" in rej[0]["reason"]
+
+
+def test_new_text_with_mixed_line_numbering_is_rejected_and_unnumbered_is_kept():
+    """new_text may lose "N: " prefixes only when every non-empty line has one; a mix is rejected.
+
+    A real line such as "2: 1 is the preferred ratio." would otherwise lose its "2: " and corrupt the prompt.
+    """
+    old = "10: line 10: rule text 10"
+    mixed = "line 10: rule text 10\n2: 1 is the preferred ratio."
+    rej: list = []
+    assert propose_patch(cause(), [], PROMPT, llm=stub(old, mixed), rejected=rej) is None
+    assert "ambiguous" in rej[0]["reason"]
+
+    plain = "line 10: rule text 10\nAlways ask the quantity."  # no numbered line: kept exactly as given
+    p = propose_patch(cause(), [], PROMPT, llm=stub(old, plain))
+    assert isinstance(p, PromptPatch)
+    assert p.old_text == "line 10: rule text 10" and p.new_text == plain

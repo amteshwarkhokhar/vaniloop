@@ -6,17 +6,23 @@ import difflib
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 
 from pydantic import BaseModel
 
-from .issue import CAUSES_PATH
+from . import prompt
+from .issue import AUDITS_PATH, CAUSES_PATH, load_audits
 from .llm import complete_json
-from .models import Cause
+from .models import AuditRecord, Cause
 
 ROOT = Path(__file__).resolve().parents[2]
 PATCHES_PATH = ROOT / "runs" / "patches.json"
 MAX_CHANGED_LINES = 15
+MAX_EXAMPLES = 3  # evidence quotes sent per cause
+EXAMPLE_CHARS = 160
+REJECTED_OLD_CHARS = 300  # how much of a rejected anchor is kept in the rejected row
+_LINE_NUMBER = re.compile(r"^\d+: ", re.M)  # the "N: " prefix of the numbered prompt view
 
 SYSTEM = (
     "You edit the system prompt of VANI, a voice bot that calls buyers. "
@@ -88,6 +94,48 @@ def _count_overlapping(text: str, sub: str) -> int:
     return n
 
 
+def _strip_line_numbers(text: str) -> str:
+    return _LINE_NUMBER.sub("", text)
+
+
+def _strip_new_text_numbers(text: str) -> str | None:
+    """Strip "N: " prefixes from new_text only when every non-empty line has one.
+
+    No numbered line: return the text unchanged. Some but not all: return None (ambiguous numbering), because a
+    line such as "2: 1 is the preferred ratio." may be real prompt text.
+    """
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    numbered = sum(1 for ln in lines if _LINE_NUMBER.match(ln))
+    if numbered == 0:
+        return text
+    return _strip_line_numbers(text) if numbered == len(lines) else None
+
+
+def evidence_examples(cause: Cause, audits: dict[str, AuditRecord]) -> list[str]:
+    """Up to MAX_EXAMPLES one-line evidence quotes of the cause's parameter, one per member call.
+
+    Fatal calls come first. Each quote is joined onto one line and cut to EXAMPLE_CHARS.
+    """
+    out: list[str] = []
+    for call_id in [*cause.fatal_calls, *cause.nonfatal_calls]:
+        audit = audits.get(call_id)
+        if audit is None:
+            continue
+        quotes = (
+            " ".join(e.quote.split())
+            for f in audit.findings
+            if f.parameter == cause.parameter and f.status in ("Fatal", "NonFatal")
+            for e in f.evidence
+            if e.quote
+        )
+        quote = next((q[:EXAMPLE_CHARS] for q in quotes if q), None)
+        if quote is not None and quote not in out:
+            out.append(quote)
+        if len(out) == MAX_EXAMPLES:
+            break
+    return out
+
+
 def changed_lines(old: str, new: str) -> int:
     d = difflib.ndiff(old.splitlines(keepends=True), new.splitlines(keepends=True))
     return sum(1 for x in d if x.startswith(("- ", "+ ")))
@@ -96,11 +144,18 @@ def changed_lines(old: str, new: str) -> int:
 def propose_patch(
     cause: Cause, examples: list[str], prompt_text: str, llm=complete_json, rejected: list[dict] | None = None
 ) -> PromptPatch | None:
-    """Return a validated patch, or None. The reason for a rejection is appended to `rejected`."""
+    """Return a validated patch, or None. A rejection is appended to `rejected` with its reason.
+
+    The row keeps the first REJECTED_OLD_CHARS of the proposed old_text, so a failed anchor can be read later.
+    """
+    proposed: str | None = None  # the model's old_text as returned, kept for the rejected row
 
     def reject(reason: str) -> None:
         if rejected is not None:
-            rejected.append({"cause_id": cause.cause_id, "reason": reason})
+            row = {"cause_id": cause.cause_id, "reason": reason}
+            if proposed is not None:
+                row["old_text"] = proposed[:REJECTED_OLD_CHARS]
+            rejected.append(row)
         return None
 
     try:
@@ -109,6 +164,8 @@ def propose_patch(
         rationale, risk = str(out.get("rationale", "")), str(out.get("risk", ""))
     except Exception as e:
         return reject(f"llm failed: {type(e).__name__}")
+    if isinstance(old, str):
+        proposed = old
     if not isinstance(old, str) or not isinstance(new, str) or not old.strip():
         return reject("old_text empty or not a string")
     if not new.strip():
@@ -116,6 +173,18 @@ def propose_patch(
     if new == old:
         return reject("new_text identical to old_text")
     n = _count_overlapping(prompt_text, old)
+    if n == 0:  # the model may have copied the "N: " prefixes of the numbered view: retry once without them
+        old2 = _strip_line_numbers(old)
+        if old2 != old:
+            new2 = _strip_new_text_numbers(new)
+            if new2 is None:
+                return reject("new_text has some lines with N: prefixes and some without (ambiguous numbering)")
+            if not new2.strip():
+                return reject("new_text empty")
+            if new2 == old2:
+                return reject("new_text identical to old_text")
+            old, new = old2, new2
+            n = _count_overlapping(prompt_text, old)
     if n != 1:
         return reject("old_text not found in prompt" if n == 0 else f"old_text occurs {n} times")
     changed = changed_lines(old, new)
@@ -144,14 +213,16 @@ def run_fix(
     out_path: Path = PATCHES_PATH,
     top_n: int = 3,
     llm=complete_json,
+    audits_path: Path = AUDITS_PATH,
 ) -> dict:
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
     ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") == "ranked"]
-    prompt_text = Path(prompt_path).read_bytes().decode("utf-8")  # keep CRLF: anchors use original chars
+    prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
+    audits = {a.call_id: a for a in load_audits(Path(audits_path))}
     rejected: list[dict] = []
     patches = []
     for cause in ranked[:top_n]:
-        p = propose_patch(cause, [], prompt_text, llm=llm, rejected=rejected)
+        p = propose_patch(cause, evidence_examples(cause, audits), prompt_text, llm=llm, rejected=rejected)
         if p is not None:
             patches.append(p)
     result = {"patches": [p.model_dump() for p in patches], "rejected": rejected}
