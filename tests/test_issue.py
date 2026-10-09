@@ -198,7 +198,7 @@ def test_legacy_gate_row_with_zero_old_failures_counts_as_not_reproduced():
     cats = cat_map(a="food", b="food", c="services")
     out, outliers = classify_causes(looping_causes(), cats, [legacy])
     assert out[0].status == "outlier" and outliers[0]["failed"] == ["reproduction"]
-    shipped = {**legacy, "decision": "ship"}  # a shipped row with old rate 0 is not demoted by the rate rule
+    shipped = {**legacy, "decision": "ship", "reason": "exact permutation p 0.001 <= alpha 0.05"}
     assert classify_causes(looping_causes(), cats, [shipped])[0][0].status == "ranked"
     real_reject = {**legacy, "old_fail_rate": 0.4}  # a reject where OLD did fail stays a reject
     assert classify_causes(looping_causes(), cats, [real_reject])[0][0].status == "ranked"
@@ -239,3 +239,20 @@ def test_not_reproduced_prefix_matches_the_gate_reason_text():
     """
     assert NOT_REPRODUCED_PREFIX in open(gate.__file__, encoding="utf-8").read()
     assert UNKNOWN_CATEGORY == categorize.UNKNOWN
+
+
+def test_zero_old_rate_rows_without_real_evidence_do_not_make_an_outlier():
+    """Unresolved, futility and identical-replay gate rows with old_fail_rate 0 must not demote a cause.
+
+    Without it a gate run that never saw OLD fail for lack of evidence would hide a real pattern as an outlier.
+    """
+    cats = cat_map(a="food", b="food", c="services")
+    reasons = [
+        "6 trial(s) lack conclusive evidence (old=6, new=0, guards=0; Unknown/missing finding)",
+        "futility: new prompt failed on every call at seed 0",
+        "replays do not vary; K copies are one sample",
+    ]
+    for reason in reasons:
+        row = {"cause_id": "cause_looping", "decision": "inconclusive", "reason": reason, "old_fail_rate": 0.0}
+        out, outliers = classify_causes(looping_causes(), cats, [row])
+        assert out[0].status == "ranked" and outliers == [], reason

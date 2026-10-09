@@ -22,6 +22,7 @@ UNKNOWN_CATEGORY = "unknown"  # same label as categorize.UNKNOWN (a test pins it
 NOT_REPRODUCED_PREFIX = "replay did not reproduce the fault"  # start of the gate.decide reason (#63)
 # Display order of the statuses. A pattern is ranked (gate-confirmed) or pattern_unconfirmed (no gate row yet).
 FIXABLE_STATUSES = frozenset({"ranked", "pattern_unconfirmed"})  # the causes fix and the Fix view work on
+LEGACY_NO_IMPROVEMENT_PREFIX = "no improvement: lift"  # gate.decide reject text; pre-#63 rows with OLD 0/n carry it
 STATUS_ORDER = {"ranked": 0, "pattern_unconfirmed": 0, "watch": 1, "outlier": 2, "single_category": 3, "isolated": 4}
 FIXABILITY = {"prompt": 1.0, "flow_logic": 0.5, "asr": 0.25}
 
@@ -124,11 +125,13 @@ def _not_reproduced(row: dict) -> bool:
     """True if a gate row says the OLD replay did not show the fault.
 
     Rows written since #63 say so in the reason. A row from before #63 with 0 OLD failures was a plain
-    "no improvement" reject, so a non-ship row with old_fail_rate 0 counts too.
+    "no improvement: lift" reject, so that reason with old_fail_rate 0 counts too. Any other row with rate 0
+    (unresolved trials, a futility stop, identical replays) has no real evidence and does not count.
     """
-    if str(row.get("reason", "")).startswith(NOT_REPRODUCED_PREFIX):
+    reason = str(row.get("reason", ""))
+    if reason.startswith(NOT_REPRODUCED_PREFIX):
         return True
-    return row.get("decision") != "ship" and row.get("old_fail_rate") == 0
+    return reason.startswith(LEGACY_NO_IMPROVEMENT_PREFIX) and row.get("old_fail_rate") == 0
 
 
 def require_fixable(cause_id: str, causes_path: Path) -> None:
