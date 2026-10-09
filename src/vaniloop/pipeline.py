@@ -1,4 +1,5 @@
-"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|categorize|fix|refix|prove|grade-sample|golden`."""
+"""Pipeline runner. `python -m vaniloop.pipeline <command>`: audit, regrade, issues, categorize, fix, refix, prove,
+grade-sample, golden."""
 
 from __future__ import annotations
 
