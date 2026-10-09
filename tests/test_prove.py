@@ -268,7 +268,8 @@ def test_cost_counts_only_replay_rows_that_belong_to_this_run(tmp_path):
     stubs = Stubs()
 
     def replay_with_cost(call, ledger, fork, bot_prompt, seed):
-        tag, tail = replay.prompt_tag(bot_prompt), f"{seed}:{call.call_id}:{fork}"
+        sent = prove._sent_prompt(bot_prompt, call, ledger)  # the real replay tags its rows with the sent prompt
+        tag, tail = replay.prompt_tag(sent), f"{seed}:{call.call_id}:{fork}"
         rows = [
             {"cache_tag": f"replay:bot:{tag}:{tail}", "cost_usd": 0.25},  # this run
             {"cache_tag": f"replay:user:{tag}:{tail}", "cost_usd": 0.25},  # this run
@@ -400,7 +401,8 @@ def test_cost_includes_the_warm_up_spend(tmp_path):
     stubs, lock, paid = Stubs(), threading.Lock(), set()
 
     def replay_with_cache(call, ledger, fork, bot_prompt, seed):
-        tag, key = replay.prompt_tag(bot_prompt), (call.call_id, bot_prompt, seed)
+        tag = replay.prompt_tag(prove._sent_prompt(bot_prompt, call, ledger))  # the tag of the sent prompt
+        key = (call.call_id, bot_prompt, seed)
         with lock:
             if key not in paid:  # like the LLM cache: only the first call for a key costs money
                 paid.add(key)
@@ -485,7 +487,12 @@ def test_real_replay_fn_sends_the_prompt_rendered_for_the_call(monkeypatch):
     fn = prove.real_replay_fn(9)
     fn(make_call("c1"), live, 4, template, 0)
     fn(make_call("c1"), none, 2, template, 0)
-    assert sent == [("LIVE-BRANCH CCTV camera", 4, 9), ("NOSELLER-BRANCH ", 2, 9)]
+    # the rendered branch comes first; the "Call values" block follows it (tested in test_call_values_block_*)
+    assert [(p.split("\n\n## Call values")[0], f, m) for p, f, m in sent] == [
+        ("LIVE-BRANCH CCTV camera", 4, 9),
+        ("NOSELLER-BRANCH ", 2, 9),
+    ]
+    assert all("\n\n## Call values\n" in p for p, _, _ in sent)
 
 
 def test_run_prove_sends_rendered_prompts_labels_old_new_and_attributes_cost_by_their_tags(tmp_path, monkeypatch):
@@ -537,3 +544,134 @@ def test_a_prompt_that_does_not_render_stops_before_any_replay_even_on_a_dry_run
         with pytest.raises(SystemExit, match="does not render"):
             prove.run_prove(CAUSE, pf, n=3, k=2, replay_fn=raising, audit_fn=raising, **kw, **paths)
     assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
+
+
+def test_a_patch_in_an_unrendered_branch_drops_the_call_and_stops_below_three_targets(tmp_path, capsys):
+    """A patched line inside a Jinja branch that a call's variables do not render must drop that call, and a run
+    with fewer than 3 calls left must stop before any LLM call. Otherwise the NEW replays are the OLD cache hits and
+    the gate compares a prompt with itself."""
+    # LIVE-BRANCH renders only for t00..t09 (a seller handoff); the patched line sits inside it.
+    live_only = "{% if ast_seller_pns == 'LIVE' %}rule text 10{% endif %}"
+    pf, paths = write_template_inputs(tmp_path, old_text="rule text 10", new_text="rule text 10 PATCHED")
+    pf.write_bytes(pf.read_bytes().replace(b"rule text 10", live_only.encode(), 1))
+    # make every target ledger a non-live one, so the patch is inert for all of them
+    rows = [Ledger.model_validate_json(x) for x in paths["ledgers_path"].read_text().splitlines()]
+    for r in rows:
+        r.bot_turns = []
+    paths["ledgers_path"].write_text("".join(r.model_dump_json() + "\n" for r in rows))
+    with pytest.raises(SystemExit, match="patch does not reach this cause's calls"):
+        prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, dry_run=True, replay_fn=raising, audit_fn=raising, **paths)
+    assert "inert patch" in capsys.readouterr().out
+    assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
+
+
+def test_an_inert_call_is_replaced_by_the_next_candidate(tmp_path, capsys):
+    """When the patch is inert for some calls only, those calls must be dropped by id and replaced from the other
+    candidates, so n targets still run and only calls the patch can change are replayed."""
+    live_only = "{% if ast_seller_pns == 'LIVE' %}rule text 10{% endif %}"
+    pf, paths = write_template_inputs(tmp_path, old_text="rule text 10", new_text="rule text 10 PATCHED")
+    pf.write_bytes(pf.read_bytes().replace(b"rule text 10", live_only.encode(), 1))
+    out = prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, dry_run=True, replay_fn=raising, audit_fn=raising, **paths)
+    ids = [c.call_id for c, _, _ in out.plan.targets]
+    assert len(ids) == 3 and all(i.startswith("t0") for i in ids)  # only t00..t09 render the live branch
+    assert "inert patch" in capsys.readouterr().out  # t10 or t11 or t12 were picked first and dropped
+
+
+def test_channel_fault_targets_are_replaced_by_the_next_candidate(capsys):
+    """A target whose fork turn is flagged bot_misheard, or whose preceding user turn is flagged audio_unclear, must be
+    dropped by id and replaced by the next candidate in the seeded order. A text replay hears clean text, so it cannot
+    reproduce a mishearing, and such a target would only add noise to the gate."""
+    calls, ledgers, audits = synthetic()
+    plain, _ = prove.select_targets(calls, ledgers, audits, PARAM, 3)
+    first, second = plain[0][0].call_id, plain[1][0].call_id
+    fork_of = {c.call_id: f for c, _, f in plain}
+    calls[first].turns[fork_of[first]].bot_misheard = True  # the fork turn itself
+    before = next(t for t in reversed(calls[second].turns[: fork_of[second]]) if t.speaker == "user")
+    before.audio_unclear = True  # the user turn right before the fork
+    capsys.readouterr()
+    dropped = {}
+    items, _ = prove.select_targets(calls, ledgers, audits, PARAM, 3, dropped=dropped)
+    ids = [c.call_id for c, _, _ in items]
+    assert len(ids) == 3 and first not in ids and second not in ids
+    assert sorted(dropped["channel fault"]) == sorted([first, second])
+    assert f"channel fault: {', '.join(sorted([first, second]))}" in capsys.readouterr().out
+    assert plain[2][0].call_id in ids  # the pick that was clean stays
+
+
+def test_all_calls_channel_faulted_leave_too_few_targets(tmp_path):
+    """When every candidate is a channel fault, the run must stop with the existing too-few-targets message before any
+    LLM call, not replay calls that were dropped."""
+    pf, paths = write_inputs(tmp_path)
+    rows = [CallRecord.model_validate_json(x) for x in paths["calls_path"].read_text().splitlines()]
+    for c in rows:
+        for t in c.turns:
+            t.audio_unclear = True
+    paths["calls_path"].write_text("".join(c.model_dump_json() + "\n" for c in rows))
+    with pytest.raises(SystemExit, match="only 0 target call"):
+        prove.run_prove(CAUSE, pf, n=3, k=2, replay_fn=raising, audit_fn=raising, **paths)
+
+
+def test_product_change_forks_at_the_first_bot_turn_after_the_change_in_every_scope():
+    """For `product_change` the fork must be the first bot turn after ledger.product_changed_at_turn, also in the
+    seller_unavailable_handoff scope where the audit's onset is the later handoff turn, and fall back to the onset
+    when the change turn is missing. When the change turn is set but no bot turn follows it, there is no fork
+    (None). A fork at the handoff would skip the bot's reply to the change, which is the behaviour under test."""
+    call = make_call("c1", "bot user bot user bot user bot user bot")  # turns 0..8, bot on even idx
+    audit = make_audit("c1", "Fatal", onset=7, parameter="product_change")  # the handoff turn is at 8; onset 7 here
+    for scope in ("seller_unavailable_handoff", "bl_collection"):
+        ledger = Ledger(call_id="c1", scope=scope, product_changed_at_turn=3)
+        assert prove.target_fork(call, audit, "product_change", ledger) == 4
+    on_bot = Ledger(call_id="c1", scope="seller_unavailable_handoff", product_changed_at_turn=2)  # a bot turn
+    assert prove.target_fork(call, audit, "product_change", on_bot) == 3 + 1  # next bot turn after idx 2 is idx 4
+    no_change = Ledger(call_id="c1", scope="seller_unavailable_handoff")
+    assert prove.target_fork(call, audit, "product_change", no_change) == 7  # today's rule: the onset turn
+    assert prove.target_fork(call, audit, "product_change") == 7  # no ledger given: the onset rule
+    after_last = Ledger(call_id="c1", scope="bl_collection", product_changed_at_turn=8)  # no bot turn after it
+    assert prove.target_fork(call, audit, "product_change", after_last) is None  # never an earlier fork
+    other = make_audit("c1", "Fatal", onset=7, parameter="looping")
+    changed = Ledger(call_id="c1", scope="bl_collection", product_changed_at_turn=3)
+    assert prove.target_fork(call, other, "looping", changed) == 7  # other parameters keep the onset
+
+
+def test_call_values_block_is_the_same_in_old_and_new_and_holds_the_ledger_values():
+    """Every rendered prompt must end with a "Call values" JSON block holding the product, the specs with the options
+    the bot offered and whether units were asked, identical for the old and the new prompt. Rendering only switches
+    branches, so without the block the replay bot never sees the call's values and invents its own."""
+    ledger = Ledger(
+        call_id="c1", scope="bl_collection", initial_product="ProductA",
+        bot_turns=[
+            BotTurnLabel(idx=0, slot="spec", spec_name="size", options_offered=["small", "large"]),
+            BotTurnLabel(idx=2, slot="spec", spec_name="size", options_offered=["large", "XL"]),
+            BotTurnLabel(idx=4, slot="spec", spec_name="colour", options_offered=[]),
+            BotTurnLabel(idx=6, slot="unit"),
+        ],
+    )  # fmt: skip
+    call = make_call("c1")
+    sent = [prove._sent_prompt(t, call, ledger) for t in ("rule {{ product_name }} A", "rule {{ product_name }} B")]
+    blocks = [s.split("\n\n## Call values\n")[1] for s in sent]
+    assert blocks[0] == blocks[1] and sent[0] != sent[1]
+    values = json.loads(blocks[0])
+    assert values == {
+        "product_name": "ProductA",
+        "specs": {"size": ["small", "large", "XL"], "colour": []},
+        "units_asked": True,
+    }
+    bare = Ledger(call_id="c1", scope="bl_collection")
+    assert json.loads(prove._sent_prompt("x", call, bare).split("\n\n## Call values\n")[1]) == {
+        "product_name": "", "specs": {}, "units_asked": False,
+    }  # fmt: skip
+
+
+def test_product_change_target_with_no_bot_turn_after_the_change_is_skipped_and_printed(capsys):
+    """A product_change target whose buyer changed product on the last turn must be skipped and printed, not forked at
+    an earlier handoff onset. An earlier fork would drop the change from the replay history, so the replay would test a
+    call without the change."""
+    calls, ledgers, audits = {}, {}, {}
+    for cid, change in (("a", 3), ("b", 3), ("c", 3), ("late", 7)):  # "late": change on the final user turn
+        calls[cid] = make_call(cid)
+        ledgers[cid] = Ledger(call_id=cid, scope="seller_unavailable_handoff", variant="main",
+                                product_changed_at_turn=change)  # fmt: skip
+        audits[cid] = make_audit(cid, "Fatal", onset=3, parameter="product_change")
+    items, cand = prove.select_targets(calls, ledgers, audits, "product_change", 4)
+    assert sorted(c.call_id for c, _, _ in items) == ["a", "b", "c"] and "late" not in cand
+    assert "no bot turn after the product change: late" in capsys.readouterr().out
