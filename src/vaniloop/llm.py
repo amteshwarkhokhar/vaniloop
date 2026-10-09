@@ -10,10 +10,13 @@ Set VANILOOP_CACHE=refresh to bypass reads.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import math
 import os
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,9 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = ROOT / ".cache" / "llm"
 COSTS_PATH = ROOT / "runs" / "costs.jsonl"
 
-LOCK = threading.Lock()
-_spent: float | None = None  # USD recorded so far, loaded once from COSTS_PATH before a budget check
-_in_flight = 0  # real provider requests started but not yet settled
+LOCK = threading.Lock()  # serialises ledger access between threads in this process
+_ledger_broken = False  # set when a cost row could not be written; blocks every later admission
+_ledger_broken_reason = ""
 
 
 class BudgetExceeded(RuntimeError):
@@ -79,64 +82,97 @@ def _valid(data, validate) -> bool:
 
 
 def _budget() -> float | None:
-    """Return LLM_BUDGET_USD as a float, or None when the setting is absent or blank."""
+    """Return LLM_BUDGET_USD as a finite float >= 0, or None when the setting is absent or blank."""
     raw = os.environ.get("LLM_BUDGET_USD", "").strip()
-    return float(raw) if raw else None
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"LLM_BUDGET_USD must be a finite number >= 0, got {raw!r}") from None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"LLM_BUDGET_USD must be a finite number >= 0, got {raw!r}")
+    return value
 
 
 def _load_spent() -> float:
-    """Sum cost_usd over COSTS_PATH. Missing, null or non-numeric costs count as zero."""
+    """Sum valid cost_usd over COSTS_PATH. Missing, null, non-finite or negative costs count zero."""
     total = 0.0
     for row in read_jsonl(COSTS_PATH):
         cost = row.get("cost_usd")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-            total += float(cost)
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            continue
+        value = float(cost)
+        if math.isfinite(value) and value >= 0:
+            total += value
     return total
 
 
-def _claim(budget: float | None) -> None:
-    """Reserve one slot for a real provider request, raising BudgetExceeded at the cap.
+@contextmanager
+def _ledger_lock():
+    """Hold the thread lock and an interprocess flock for one ledger read or append.
 
-    The lock is held only for the check. Overspend is bounded by the calls already in
-    flight when the cap is reached, because those calls settled after it and their cost
-    is charged once they return.
+    The flock is the cross-process guard: every process that shares one COSTS_PATH
+    serialises its reads and appends on COSTS_PATH.with_suffix(".lock").
     """
-    global _spent, _in_flight
+    COSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOCK:
-        if budget is not None:
-            if _spent is None:
-                _spent = _load_spent()
-            if _spent >= budget:
-                raise BudgetExceeded(
-                    f"LLM budget reached: spent ${_spent:.4f} of ${budget:.4f}; delete or rename {COSTS_PATH} to reset"
-                )
-        _in_flight += 1
+        with open(COSTS_PATH.with_suffix(".lock"), "a") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _admit(budget: float | None) -> None:
+    """Refuse the request when the shared ledger is at the cap or the ledger is unwritable.
+
+    The lock is held only for the fresh ledger read, then released before the provider call.
+    Overspend is bounded by the cost of requests already admitted in any process when the
+    cap is reached, because those requests settle after it and charge their cost then.
+    """
+    if _ledger_broken:
+        raise BudgetExceeded(f"cost ledger not writable: {_ledger_broken_reason}")
+    with _ledger_lock():
+        if budget is None:
+            return
+        spent = _load_spent()
+        if spent >= budget:
+            raise BudgetExceeded(
+                f"LLM budget reached: spent ${spent:.4f} of ${budget:.4f}; delete or rename {COSTS_PATH} to reset"
+            )
 
 
 def _header_cost(headers) -> float | None:
-    """Read the LiteLLM USD cost header. A missing or malformed value is null, never an error."""
+    """Read the LiteLLM USD cost header. Missing, malformed, non-finite or negative values are null."""
     raw = headers.get("x-litellm-response-cost") if headers else None
     if raw is None:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
 
 
-def _create(client, request: dict):
-    """One provider call, returning (parsed response, headers). Uses the raw SDK path when present."""
-    completions = client.chat.completions
-    raw_api = getattr(completions, "with_raw_response", None)
-    if raw_api is None:  # test stand-ins that only expose create()
-        return completions.create(**request), {}
-    raw = raw_api.create(**request)
-    return raw.parse(), raw.headers
+def _exception_headers(exc) -> dict:
+    """Best-effort headers from an SDK exception's response (for example APIStatusError.response.headers)."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return {}
+    try:
+        return dict(headers)
+    except (TypeError, ValueError):
+        return {}
 
 
-def _settle(model: str, cache_tag: str, resp, cost: float | None) -> None:
-    """Append one cost row for a finished provider request and add its cost to the in-memory spend."""
-    global _spent, _in_flight
+def _settle(model: str, cache_tag: str, resp, cost: float | None, status: str, error: str | None) -> None:
+    """Append one cost row under the ledger lock. A write failure marks the ledger broken, never raises."""
+    global _ledger_broken, _ledger_broken_reason
     usage = getattr(resp, "usage", None)
     row = {
         "ts": datetime.now(UTC).isoformat(),
@@ -145,13 +181,62 @@ def _settle(model: str, cache_tag: str, resp, cost: float | None) -> None:
         "prompt_tokens": getattr(usage, "prompt_tokens", None),
         "completion_tokens": getattr(usage, "completion_tokens", None),
         "cost_usd": cost,
+        "status": status,
+        "error": error,
     }
-    with LOCK:
-        COSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        append_jsonl(COSTS_PATH, [row])
-        if _spent is not None and cost:
-            _spent += cost
-        _in_flight -= 1
+    try:
+        with _ledger_lock():
+            append_jsonl(COSTS_PATH, [row])
+    except Exception as exc:
+        # Never mask the request result or its exception: record the break and refuse later requests.
+        _ledger_broken = True
+        _ledger_broken_reason = f"{type(exc).__name__}: {exc}"
+
+
+def metered_create(client, request: dict, cache_tag: str):
+    """One metered provider request: admit, call, settle exactly once, return the parsed response.
+
+    Raw headers are read before parse(), so a parse failure still records the header cost. The
+    request body is passed through unchanged, so audio content parts and other shapes work too.
+    """
+    model = request.get("model") or model_name()
+    _admit(_budget())
+    resp = None
+    headers: dict = {}
+    status = "ok"
+    error: str | None = None
+    try:
+        completions = client.chat.completions
+        raw_api = getattr(completions, "with_raw_response", None)
+        if raw_api is None:  # test stand-ins that expose only create()
+            resp = completions.create(**request)
+        else:
+            raw = raw_api.create(**request)
+            headers = dict(getattr(raw, "headers", None) or {})
+            resp = raw.parse()
+        return resp
+    except Exception as exc:
+        status = "error"
+        error = f"{type(exc).__name__}: {exc}"
+        if not headers:
+            headers = _exception_headers(exc)
+        raise
+    finally:
+        _settle(model, cache_tag, resp, _header_cost(headers), status, error)
+
+
+def _make_client(base_url: str, api_key: str, max_retries: int | None):
+    """Build the OpenAI client with transport retries off, so complete_json owns every attempt.
+
+    The caller's max_retries is accepted for compatibility but never enables SDK retries:
+    setting client.max_retries to 0 disables the SDK's internal retry loop.
+    """
+    from openai import OpenAI
+
+    kw = {} if max_retries is None else {"max_retries": 0}
+    client = OpenAI(base_url=base_url, api_key=api_key, **kw)
+    client.max_retries = 0
+    return client
 
 
 def cached_json(key: str, validate=None) -> dict | None:
@@ -194,13 +279,11 @@ def complete_json(
     if hit is not None:
         return hit
 
-    from openai import OpenAI
-
     api_key = os.environ.get("LLM_API_KEY")
     if not base or not api_key:
         raise RuntimeError("LLM_BASE_URL and LLM_API_KEY must be set in .env (no cached answer for this request)")
-    client_kw = {} if max_retries is None else {"max_retries": max_retries}
-    client = OpenAI(base_url=base, api_key=api_key, **client_kw)
+    _budget()  # validate the setting before the first real attempt, so a bad value raises ValueError
+    client = _make_client(base, api_key, max_retries)
     extra = {} if seed is None else {"seed": seed}
     request = {
         "model": model,
@@ -209,16 +292,15 @@ def complete_json(
         "response_format": {"type": "json_object"},
         **extra,
     }
-    budget = _budget()
     last_err: Exception | None = None
     for _ in range(retries + 1):
-        _claim(budget)
-        resp = None
-        headers: dict = {}
         try:
-            resp, headers = _create(client, request)
-        finally:
-            _settle(model, cache_tag, resp, _header_cost(headers))
+            resp = metered_create(client, request, cache_tag)
+        except BudgetExceeded:
+            raise
+        except Exception as exc:
+            last_err = exc
+            continue
         text = resp.choices[0].message.content or ""
         try:
             data = json.loads(text.strip().removeprefix("```json").removesuffix("```").strip())

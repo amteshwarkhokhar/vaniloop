@@ -12,5 +12,5 @@ def _isolated_cost_log(tmp_path, monkeypatch):
     Without this, any test that stubs the LLM client appends rows to the real runs/costs.jsonl.
     """
     monkeypatch.setattr(llm, "COSTS_PATH", tmp_path / "costs.jsonl")
-    monkeypatch.setattr(llm, "_spent", None)
-    monkeypatch.setattr(llm, "_in_flight", 0)
+    monkeypatch.setattr(llm, "_ledger_broken", False)
+    monkeypatch.setattr(llm, "_ledger_broken_reason", "")
