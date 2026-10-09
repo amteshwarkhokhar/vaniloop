@@ -3,12 +3,15 @@
 Turns before the fork stay verbatim. After it, an LLM plays the bot (system = bot prompt) and an LLM plays
 the buyer (from a brief built from the ledger). The result is a CallRecord the normal audit can grade.
 One LLM call per generated turn. Same seed + prompt + history gives the same cache key, so reruns are free.
+The channel is as noisy as the forked call: a share of generated buyer turns (`unclear_rate`, from the call's audio
+flags) reaches the bot as `[unclear audio]`, chosen by the seed. The recorded turn keeps the real text.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import random
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +29,8 @@ BUYER_SYSTEM = (
     "ignores what you said. Hang up if it becomes unbearable or the call is finished. "
     'Reply with JSON only: {"text": str, "hang_up": bool}. text is your next spoken line.'
 )
+UNCLEAR_TEXT = "[unclear audio]"  # what the bot's prompt shows for a buyer turn the bot did not hear
+MAX_UNCLEAR_RATE = 0.8  # a fully noisy channel would hide every answer and no prompt could finish the call
 BOT_FORMAT = 'Reply with JSON only: {"text": str, "end_call": bool}. text is your next spoken line.'
 
 
@@ -34,6 +39,7 @@ class BuyerBrief(BaseModel):
     facts: dict[str, str] = Field(default_factory=dict)  # slot -> value the buyer stated
     temper: float = 0.0  # peak frustration 0..1 seen in the original call
     language: str = "hinglish"
+    unclear_rate: float = 0.0  # share of replayed buyer turns the bot cannot hear; 0 = clean channel
 
 
 class ReplayResult(BaseModel):
@@ -44,9 +50,24 @@ class ReplayResult(BaseModel):
     ended_by: str  # end_call | hang_up | max_turns | invalid_output
 
 
-def buyer_brief(call: CallRecord, ledger: Ledger) -> BuyerBrief:
+def unclear_rate(call: CallRecord, fork_turn: int) -> float:
+    """Share of user turns at or after the fork that the bot did not hear: flagged audio_unclear, or followed by a
+    bot turn flagged bot_misheard. 0.0 without such signals or without user turns. Capped at MAX_UNCLEAR_RATE."""
+    turns = call.turns
+    user = [i for i in range(fork_turn, len(turns)) if turns[i].speaker == "user"]
+    bad = [i for i in user if turns[i].audio_unclear or (i + 1 < len(turns) and turns[i + 1].bot_misheard)]
+    return min(len(bad) / len(user), MAX_UNCLEAR_RATE) if user else 0.0
+
+
+def buyer_brief(call: CallRecord, ledger: Ledger, fork_turn: int = 0) -> BuyerBrief:
     temper = max((u.frustrated for u in ledger.user_turns), default=0.0)
-    return BuyerBrief(goal=ledger.final_product, facts=dict(ledger.buyer_facts), temper=temper, language="hinglish")
+    return BuyerBrief(
+        goal=ledger.final_product,
+        facts=dict(ledger.buyer_facts),
+        temper=temper,
+        language="hinglish",
+        unclear_rate=unclear_rate(call, fork_turn),
+    )
 
 
 def prompt_tag(bot_prompt: str) -> str:
@@ -64,9 +85,15 @@ def _flag(d: dict, key: str) -> bool:
 
 def _data_block(transcript: str, brief: BuyerBrief | None) -> str:
     payload: dict = {"transcript": transcript or "(call just started)"}
-    if brief is not None:
-        payload = {"brief": brief.model_dump(), **payload}
+    if brief is not None:  # the buyer need not know the channel is noisy; keeps its cache keys as before
+        payload = {"brief": brief.model_dump(exclude={"unclear_rate"}), **payload}
     return "<data>\n" + json.dumps(payload, ensure_ascii=False, indent=1) + "\n</data>"
+
+
+def _heard(turns: list[Turn], unclear: set[int]) -> CallRecord:
+    """The history as the bot heard it: generated buyer turns in `unclear` show UNCLEAR_TEXT. The input is unchanged."""
+    shown = [t.model_copy(update={"text": UNCLEAR_TEXT}) if t.idx in unclear else t for t in turns]
+    return CallRecord(call_id="", duration_sec=0, turns=shown)
 
 
 def replay_id(call_id: str, fork_turn: int, brief: BuyerBrief, max_turns: int, bot_prompt: str, seed: int) -> str:
@@ -97,9 +124,11 @@ def replay_result(
     else:
         speaker = "bot" if not turns or turns[-1].speaker == "user" else "user"
     ended_by = "max_turns"
+    unclear: set[int] = set()  # idx of generated buyer turns the bot did not hear; pre-fork turns stay verbatim
     for _ in range(max_turns):
         history = CallRecord(call_id=call.call_id, duration_sec=0, turns=turns)
-        block = _data_block(render_transcript(history), brief if speaker == "user" else None)
+        seen = _heard(turns, unclear) if speaker == "bot" else history
+        block = _data_block(render_transcript(seen), brief if speaker == "user" else None)
         kw = dict(validate=_is_dict, temperature=TEMPERATURE, seed=seed, retries=0, max_retries=0)
         if speaker == "bot":
             out = llm(bot_prompt, f"{block}\n\n{BOT_FORMAT}", cache_tag=f"replay:bot:{ns}", **kw)
@@ -111,7 +140,19 @@ def replay_result(
             break
         start = turns[-1].end_sec if turns else 0.0
         idx = turns[-1].idx + 1 if turns else 0
-        turns.append(Turn(idx=idx, speaker=speaker, start_sec=start, end_sec=start + SEC_PER_TURN, text=text))
+        is_unclear = speaker == "user" and random.Random(f"{seed}:{call.call_id}:{idx}").random() < brief.unclear_rate
+        if is_unclear:
+            unclear.add(idx)
+        turns.append(
+            Turn(
+                idx=idx,
+                speaker=speaker,
+                start_sec=start,
+                end_sec=start + SEC_PER_TURN,
+                text=text,
+                audio_unclear=True if is_unclear else None,
+            )
+        )
         if speaker == "bot" and _flag(out, "end_call"):
             ended_by = "end_call"
             break

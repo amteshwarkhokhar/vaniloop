@@ -392,3 +392,21 @@ def test_cache_refresh_skips_the_warm_up(tmp_path, capsys, monkeypatch):
     assert not any(t.startswith("warm") for t, *_ in stubs.log)
     text = capsys.readouterr().out
     assert "warm-up skipped" in text and "VANILOOP_CACHE=refresh" in text and "warm-up done" not in text
+
+
+def test_real_replay_fn_builds_the_brief_from_the_fork_turn(monkeypatch):
+    """The real replay function must hand the fork turn to buyer_brief, so unclear_rate counts post-fork turns only.
+
+    If the fork were dropped, buyer_brief would count the whole call and a replay forked late would get the noise of
+    the early turns, which makes the replay channel noisier or cleaner than the part of the call it re-runs.
+    """
+    call = make_call("c1")
+    call.turns[1].audio_unclear = True  # user turns are 1, 3, 5, 7; turns 1 and 3 are noisy
+    call.turns[3].audio_unclear = True
+    ledger = Ledger(call_id="c1", scope="bl_collection")
+    briefs = []
+    monkeypatch.setattr(replay, "replay_result", lambda c, f, p, brief, max_turns, seed: briefs.append((f, brief)))
+    fn = prove.real_replay_fn(9)
+    fn(call, ledger, 0, "P", 0)
+    fn(call, ledger, 4, "P", 0)
+    assert [(f, b.unclear_rate) for f, b in briefs] == [(0, 0.5), (4, 0.0)]
