@@ -17,10 +17,18 @@ from pathlib import Path
 from jinja2 import TemplateError
 
 from . import gate, llm, prompt, render, replay
-from .fix import MAX_ATTEMPTS, PATCHES_PATH, PromptPatch, _count_overlapping, apply_patch
+from .fix import (
+    AUDIO_PARAMETERS,
+    MAX_ATTEMPTS,
+    PATCHES_PATH,
+    PromptPatch,
+    _count_overlapping,
+    apply_patch,
+    require_patchable,
+)
 from .gate import AuditFn, Item, ReplayFn
 from .ingest import OUT_PATH as CALLS_PATH
-from .issue import AUDITS_PATH, load_audits, require_fixable
+from .issue import AUDITS_PATH, load_audits
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import AuditRecord, CallRecord, Ledger
@@ -33,7 +41,6 @@ REPLAYS_PATH = RUNS / "replays.jsonl"
 
 PICK_SEED = 0
 CALL_VALUES_HEADING = "Call values"
-AUDIO_PARAMETERS = {"dead_air"}  # judged from audio silences; a text replay has none
 
 
 @dataclass
@@ -363,8 +370,8 @@ def run_prove(
         raise SystemExit(f"--k must be at least 2, got {k}")
     if workers < 1:
         raise SystemExit(f"--workers must be at least 1, got {workers}")
-    if not dry_run:  # a demoted cause keeps its old patch but takes no gate run (causes.json sits beside patches.json)
-        require_fixable(cause_id, causes_path or Path(patches_path).with_name("causes.json"))
+    if not dry_run:  # a demoted, tool or data cause keeps its old patch but takes no gate run
+        require_patchable(cause_id, causes_path or Path(patches_path).with_name("causes.json"))  # sits by patches.json
     old, new = build_prompts(cause_id, prompt_path, patches_path, attempt)
     if not dry_run and any(
         r.get("cause_id") == cause_id and r.get("attempt", 1) == attempt for r in read_jsonl(gates_path)

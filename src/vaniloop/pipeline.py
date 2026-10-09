@@ -1,5 +1,5 @@
 """Pipeline runner. `python -m vaniloop.pipeline <command>`: audit, regrade, issues, categorize, fix, refix, prove,
-grade-sample, golden (build, agreement, check)."""
+rootcause, grade-sample, golden (build, agreement, check)."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord, Ledger
 from .prove import describe, run_prove
+from .rootcause import DEFAULT_PROMPT, ROOTCAUSE_PATH, describe_rootcause, run_rootcause
 from .rules import audit_call
 
 RUNS = AUDITS_PATH.parent
@@ -202,7 +203,8 @@ def cause_lines(causes: list, outliers: list[dict]) -> list[str]:
     failed = {r["cause_id"]: r["failed"] for r in outliers}
     return [
         f"  [{c.status}] {c.parameter}: fatal={len(c.fatal_calls)} nonfatal={len(c.nonfatal_calls)} "
-        f"priority={c.priority:g}" + (f" failed: {', '.join(failed[c.cause_id])}" if c.cause_id in failed else "")
+        f"priority={c.priority:g} symptoms={len(c.symptom_calls)}"
+        + (f" failed: {', '.join(failed[c.cause_id])}" if c.cause_id in failed else "")
         for c in causes
     ]
 
@@ -217,8 +219,9 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("regrade")
     sub.add_parser("categorize")
     f = sub.add_parser("fix")
-    f.add_argument("--prompt", required=True)
+    f.add_argument("--prompt", default=None, help="the VANI prompt file; not needed with --dry-run")
     f.add_argument("--top", type=int, default=3)
+    f.add_argument("--dry-run", action="store_true", help="list patch / ticket / watch per cause; no LLM call")
     rf = sub.add_parser("refix")
     rf.add_argument("--cause", required=True)
     rf.add_argument("--prompt", required=True)
@@ -232,6 +235,13 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--workers", type=int, default=1)
     pv.add_argument("--dry-run", action="store_true")
     pv.add_argument("--attempt", type=int, default=1)
+    rc = sub.add_parser("rootcause")
+    rc.add_argument("--cause", required=True)
+    rc.add_argument("--prompt", default=str(DEFAULT_PROMPT))
+    rc.add_argument("--k", type=int, default=3)
+    rc.add_argument("--max-turns", type=int, default=12)
+    rc.add_argument("--workers", type=int, default=1)
+    rc.add_argument("--dry-run", action="store_true")
     g = sub.add_parser("grade-sample")
     g.add_argument("--n", type=int, default=20)
     gd = sub.add_parser("golden")
@@ -260,10 +270,25 @@ def main(argv: list[str] | None = None) -> None:
             f"-> {CATEGORIES_PATH}"
         )
     elif args.cmd == "fix":
-        r = run_fix(prompt_path=Path(args.prompt), top_n=args.top)
-        print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
+        if args.prompt is None and not args.dry_run:
+            ap.error("fix needs --prompt unless --dry-run")
+        kw = {"prompt_path": Path(args.prompt)} if args.prompt else {}
+        r = run_fix(causes_path=CAUSES_PATH, out_path=PATCHES_PATH, top_n=args.top, dry_run=args.dry_run, **kw)
+        if args.dry_run:
+            for x in r["plan"]:
+                print(f"  {x['action']:6} {x['cause_id']} [{x['status']}] type={x['type']} "
+                      f"suspected={x['suspected_type'] or '-'}: {x['why']}")  # fmt: skip
+            return
+        print(
+            f"{len(r['patches'])} patches, {len(r['rejected'])} rejected, {len(r['tickets'])} tickets, "
+            f"{len(r['watched'])} watched -> {PATCHES_PATH}"
+        )
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")
+        for cid in r["tickets"]:
+            print(f"  ticket {cid}: runs/tickets/{cid}.md")
+        for cid in r["watched"]:
+            print(f"  watch {cid}")
     elif args.cmd == "refix":
         r = run_refix(args.cause, Path(args.prompt))
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
@@ -282,8 +307,21 @@ def main(argv: list[str] | None = None) -> None:
             workers=args.workers,
             dry_run=args.dry_run,
             attempt=args.attempt,
+            causes_path=CAUSES_PATH,
         )
         print("\n".join(describe(out)))
+    elif args.cmd == "rootcause":
+        out = run_rootcause(
+            args.cause,
+            Path(args.prompt),
+            k=args.k,
+            max_turns=args.max_turns,
+            workers=args.workers,
+            dry_run=args.dry_run,
+        )
+        print("\n".join(describe_rootcause(args.cause, out)))
+        if not args.dry_run:
+            print(f"rows -> {ROOTCAUSE_PATH}")
     elif args.cmd == "grade-sample":
         ids = run_grade_sample(n=args.n)
         print(f"{len(ids)} calls -> {GRADE_SAMPLE_PATH}")

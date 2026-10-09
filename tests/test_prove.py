@@ -377,7 +377,8 @@ def test_pipeline_prove_subcommand_passes_its_options_and_prints(monkeypatch, ca
     monkeypatch.setattr(pipeline, "run_prove", fake)
     argv = ["prove", "--cause", CAUSE, "--prompt", "p.md", "--n", "4", "--k", "2", "--guards", "6", "--max-turns", "9"]
     pipeline.main([*argv, "--workers", "3", "--dry-run"])
-    assert seen == dict(cause=CAUSE, prompt="p.md", n=4, k=2, guards=6, max_turns=9, workers=3, dry_run=True, attempt=1)
+    want = dict(cause=CAUSE, prompt="p.md", n=4, k=2, guards=6, max_turns=9, workers=3, dry_run=True, attempt=1)
+    assert seen == {**want, "causes_path": pipeline.CAUSES_PATH}  # run_prove enforces the ticket and status guards
     assert f"cause {CAUSE}" in capsys.readouterr().out
     pipeline.main(argv)
     assert seen["workers"] == 1 and seen["dry_run"] is False  # the default keeps today's sequential run
@@ -731,6 +732,21 @@ def test_product_change_target_with_no_bot_turn_after_the_change_is_skipped_and_
     items, cand = prove.select_targets(calls, ledgers, audits, "product_change", 4)
     assert sorted(c.call_id for c, _, _ in items) == ["a", "b", "c"] and "late" not in cand
     assert "no bot turn after the product change: late" in capsys.readouterr().out
+
+
+def test_run_prove_refuses_a_ticket_cause_before_any_replay_but_a_dry_run_still_plans(tmp_path):
+    """run_prove itself must stop on a tool or data cause before any replay or LLM call, not only the CLI.
+
+    Without it a caller other than `pipeline prove` could gate a leftover patch on a data cause with paid replays
+    that prove nothing (#88 review, finding 3). A dry run still plans.
+    """
+    pf, paths = write_inputs(tmp_path)
+    row = {"cause_id": CAUSE, "status": "ranked", "type": "flow_logic", "suspected_type": "data"}
+    (tmp_path / "causes.json").write_text(json.dumps({"causes": [row]}))
+    with pytest.raises(SystemExit, match="data cause"):
+        prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, replay_fn=raising, audit_fn=raising, **paths)
+    assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
+    prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, dry_run=True, replay_fn=raising, audit_fn=raising, **paths)
 
 
 def test_prove_refuses_a_demoted_cause_before_any_replay_but_a_dry_run_still_plans(tmp_path):
