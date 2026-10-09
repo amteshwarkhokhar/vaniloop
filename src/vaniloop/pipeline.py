@@ -1,4 +1,4 @@
-"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|refix|prove|grade-sample`."""
+"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|categorize|fix|refix|prove|grade-sample`."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from .categorize import CATEGORIES_PATH, run_categorize
 from .fix import PATCHES_PATH, run_fix, run_refix
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
@@ -146,6 +147,7 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--limit", type=int, default=None)
     sub.add_parser("issues")
     sub.add_parser("regrade")
+    sub.add_parser("categorize")
     f = sub.add_parser("fix")
     f.add_argument("--prompt", required=True)
     f.add_argument("--top", type=int, default=3)
@@ -171,6 +173,12 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "regrade":
         s = run_regrade()
         print(f"regraded={s['regraded']} verdicts={s['verdicts']}")
+    elif args.cmd == "categorize":
+        s = run_categorize(ledgers_path=LEDGERS_PATH)
+        print(
+            f"names={s['names']} labelled={s['labelled']} cached={s['cached']} errors={s['errors']} "
+            f"-> {CATEGORIES_PATH}"
+        )
     elif args.cmd == "fix":
         r = run_fix(prompt_path=Path(args.prompt), top_n=args.top)
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
