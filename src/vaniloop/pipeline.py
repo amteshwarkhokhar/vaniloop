@@ -1,5 +1,5 @@
 """Pipeline runner. `python -m vaniloop.pipeline <command>`: audit, regrade, issues, categorize, fix, refix, prove,
-grade-sample, golden."""
+grade-sample, golden (build, agreement, check)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .categorize import CATEGORIES_PATH, run_categorize
-from .fix import PATCHES_PATH, run_fix, run_refix
-from .golden import GOLDEN_DIR, build_golden, golden_agreement, latest_golden, load_golden
+from .fix import GATES_PATH, PATCHES_PATH, run_fix, run_refix
+from .golden import (
+    GOLDEN_DIR,
+    GOLDEN_RUNS_PATH,
+    build_golden,
+    describe_check,
+    golden_agreement,
+    latest_golden,
+    load_golden,
+    run_golden_check,
+)
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
@@ -33,6 +42,15 @@ GOLDEN_INPUTS = {
     "audits.jsonl": AUDITS_PATH,
     "ledgers.jsonl": LEDGERS_PATH,
     "causes.json": CAUSES_PATH,
+}
+GOLDEN_CHECK_INPUTS = {  # run_golden_check keyword paths
+    "golden_dir": GOLDEN_DIR,
+    "calls_path": CALLS_PATH,
+    "ledgers_path": LEDGERS_PATH,
+    "audits_path": AUDITS_PATH,
+    "patches_path": PATCHES_PATH,
+    "gates_path": GATES_PATH,
+    "runs_path": GOLDEN_RUNS_PATH,
 }
 
 
@@ -222,6 +240,12 @@ def main(argv: list[str] | None = None) -> None:
     gb.add_argument("--n", type=int, default=150)
     gb.add_argument("--seed", type=int, default=0)
     gsub.add_parser("agreement")
+    gc = gsub.add_parser("check")
+    gc.add_argument("--version", required=True)
+    gc.add_argument("--prompt", required=True)
+    gc.add_argument("--max-turns", type=int, default=12)
+    gc.add_argument("--workers", type=int, default=1)
+    gc.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     if args.cmd == "audit":
         s = run_audit(workers=args.workers, limit=args.limit)
@@ -265,6 +289,16 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{len(ids)} calls -> {GRADE_SAMPLE_PATH}")
         for call_id in ids:
             print(f"  {call_id}")
+    elif args.cmd == "golden" and args.golden_cmd == "check":
+        out = run_golden_check(
+            args.version,
+            Path(args.prompt),
+            dry_run=args.dry_run,
+            max_turns=args.max_turns,
+            workers=args.workers,
+            **GOLDEN_CHECK_INPUTS,
+        )
+        print("\n".join(describe_check(out)))
     elif args.cmd == "golden":
         run_golden(args.golden_cmd, getattr(args, "n", 150), getattr(args, "seed", 0))
     else:

@@ -6,6 +6,7 @@ from collections import Counter
 
 import pytest
 
+from vaniloop import prove
 from vaniloop.golden import (
     BAR_KAPPA,
     BAR_N,
@@ -13,11 +14,13 @@ from vaniloop.golden import (
     cohen_kappa,
     golden_agreement,
     load_golden,
+    run_golden_check,
     select_golden,
     sha_of,
 )
-from vaniloop.models import AuditRecord, Finding
+from vaniloop.models import AuditRecord, CallRecord, Finding, Ledger, Turn
 from vaniloop.pipeline import main
+from vaniloop.replay import ReplayResult
 
 
 def row(call_id, verdict, params=(), scope="bl_collection", variant="main", cause="none"):
@@ -308,3 +311,251 @@ def test_short_pass_pool_keeps_a_pass_majority_and_says_so(tmp_path, capsys, mon
     main(["golden", "build", "--n", "10"])
     assert "Pass majority could not be met at full size" in capsys.readouterr().out
     assert load_golden(tmp_path / "golden" / "v1.json")["short_of"] == 10
+
+
+# ---- golden check (#76): stubs only, no LLM call anywhere ----
+
+LOOP, QTY = "cause_looping", "cause_qty_probing"
+TURNS = "bot user bot user bot user bot user"
+
+
+def _anchor(n):
+    return f"line {n}: rule text {n}"
+
+
+def _patch(cause, n, tag, attempt=1):
+    return dict(
+        cause_id=cause, target_start_line=n, target_end_line=n, old_text=_anchor(n),
+        new_text=f"{_anchor(n)} PATCHED_{tag}", rationale="r", risk="low", attempt=attempt,
+    )  # fmt: skip
+
+
+def _gate_row(cause, decision, attempt=1):
+    return {"cause_id": cause, "decision": decision, "attempt": attempt}
+
+
+def _status_audit(cid, loop="Pass", qty="Pass"):
+    findings = [
+        Finding(parameter=p, status=s, reason="s", basis="observed")
+        for p, s in (("looping", loop), ("qty_probing", qty))
+    ]
+    return AuditRecord(call_id=cid, verdict="Pass", scope="bl_collection", findings=findings)
+
+
+def write_check_inputs(tmp_path, patches=None, gates=None):
+    """Write 12 looping, 12 qty and 12 Pass golden calls, their saved audits, a prompt, patches and gate rows.
+
+    The saved audit matches the human label for looping (a gating rule) and misses every qty fault (an advisory rule).
+    """
+
+    def call(cid):
+        turns = [
+            Turn(idx=i, speaker=s, start_sec=6.0 * i, end_sec=6.0 * i + 5, text=f"t{i}")
+            for i, s in enumerate(TURNS.split())
+        ]
+        return CallRecord(call_id=cid, duration_sec=60, turns=turns)
+
+    ids = [(f"lf{i:02d}", "Fatal", ["looping"]) for i in range(12)]
+    ids += [(f"qf{i:02d}", "NonFatal", ["qty_probing"]) for i in range(12)]
+    ids += [(f"gp{i:02d}", "Pass", []) for i in range(12)]
+    golden = [
+        {"call_id": c, "scope": "bl_collection", "variant": "main", "cause": "none", "verdict": v, "parameters": p,
+         "first_fault_turn": None if v == "Pass" else 3}
+        for c, v, p in ids
+    ]  # fmt: skip
+    gdir = tmp_path / "golden"
+    gdir.mkdir(parents=True)
+    (gdir / "v1.json").write_text(
+        json.dumps({"version": 1, "n": len(golden), "sha256": sha_of(golden), "calls": golden})
+    )
+    audits = [_status_audit(c, loop="Fatal" if p == ["looping"] else "Pass") for c, _, p in ids]
+    files = {
+        "calls_path": [call(c) for c, _, _ in ids],
+        "ledgers_path": [Ledger(call_id=c, scope="bl_collection", variant="main") for c, _, _ in ids],
+        "audits_path": audits,
+    }
+    paths = {}
+    for key, rows in files.items():
+        paths[key] = tmp_path / f"{key}.jsonl"
+        paths[key].write_text("".join(r.model_dump_json() + "\n" for r in rows))
+    patches = patches if patches is not None else [_patch(LOOP, 10, "LOOP"), _patch(QTY, 20, "QTY")]
+    gates = gates if gates is not None else [_gate_row(LOOP, "ship"), _gate_row(QTY, "ship")]
+    paths["patches_path"] = tmp_path / "patches.json"
+    paths["patches_path"].write_text(json.dumps({"patches": patches}))
+    paths["gates_path"] = tmp_path / "gates.jsonl"
+    paths["gates_path"].write_text("".join(json.dumps(g) + "\n" for g in gates))
+    paths["runs_path"] = tmp_path / "out" / "golden_runs.jsonl"
+    paths["golden_dir"] = gdir
+    pf = tmp_path / "prompt.md"
+    pf.write_text("\n".join(_anchor(i) for i in range(1, 31)))
+    return pf, paths
+
+
+class CheckStubs:
+    """Stub replay and audit. OLD fails looping on lf calls and qty_probing on qf calls. NEW fixes them unless told not.
+
+    `pass_fatal` is the parameter NEW makes Fatal on the Pass calls, or None. `log` keeps (call id, prompt label, fork).
+    """
+
+    def __init__(self, loop_fixed=True, qty_fixed=True, pass_fatal=None, audit_error_on=None):
+        self.loop_fixed, self.qty_fixed = loop_fixed, qty_fixed
+        self.pass_fatal, self.audit_error_on = pass_fatal, audit_error_on
+        self.log, self.prompts = [], set()
+
+    def replay_fn(self, call, ledger, fork, bot_prompt, seed):
+        tag = "new" if "PATCHED" in bot_prompt else "old"
+        self.log.append((call.call_id, tag, fork))
+        self.prompts.add(bot_prompt)
+        turns = [*call.turns[:fork], Turn(idx=fork, speaker="bot", start_sec=1, end_sec=2, text="x")]
+        res = CallRecord(call_id=f"{call.call_id}__{tag}", duration_sec=60, turns=turns)
+        return ReplayResult(call=res, fork_turn=fork, ended_by="end_call")
+
+    def audit_fn(self, call):
+        base, tag = call.call_id.split("__")
+        if self.audit_error_on == (base, tag):
+            raise RuntimeError("ledger extraction failed")
+        old = tag == "old"
+        status = {"looping": "Pass", "qty_probing": "Pass"}
+        if base.startswith("lf") and (old or not self.loop_fixed):
+            status["looping"] = "Fatal"
+        if base.startswith("qf") and (old or not self.qty_fixed):
+            status["qty_probing"] = "Fatal"
+        if base.startswith("gp") and not old and self.pass_fatal:
+            status[self.pass_fatal] = "Fatal"
+        onset = call.turns[-1].idx  # the fault starts at the generated turn, at the fork
+        findings = [
+            Finding(parameter=p, status=s, reason="s", basis="observed", onset_turn=onset) for p, s in status.items()
+        ]
+        verdict = "Fatal" if "Fatal" in status.values() else "Pass"
+        return AuditRecord(call_id=call.call_id, verdict=verdict, scope="bl_collection", findings=findings)
+
+
+def raising(*_a, **_k):
+    raise AssertionError("an LLM-backed function was called")
+
+
+def check(tmp_path, stubs=None, patches=None, gates=None, **kw):
+    pf, paths = write_check_inputs(tmp_path, patches, gates)
+    stubs = stubs or CheckStubs()
+    out = run_golden_check("v1", pf, replay_fn=stubs.replay_fn, audit_fn=stubs.audit_fn, **{**paths, **kw})
+    return out, paths, stubs
+
+
+def test_all_shipped_patches_apply_together_and_only_shipped_ones(tmp_path):
+    """Every patch whose latest gate row says ship must be in the NEW prompt, and no other patch.
+
+    Testing one patch at a time hides how patches interact, and a rejected patch must never ride along.
+    """
+    patches = [_patch(LOOP, 10, "LOOP"), _patch(QTY, 20, "QTY"), _patch("cause_x", 25, "X"), _patch("cause_y", 5, "Y")]
+    gates = [_gate_row(c, d) for c, d in ((LOOP, "ship"), (QTY, "ship"), ("cause_x", "ship"), ("cause_x", "reject"))]
+    _, _, stubs = check(tmp_path, patches=patches, gates=gates)  # cause_y has no gate row at all
+    old, new = (next(p for p in stubs.prompts if ("PATCHED" in p) == flag) for flag in (False, True))
+    assert "PATCHED" not in old
+    assert "PATCHED_LOOP" in new and "PATCHED_QTY" in new
+    assert "PATCHED_X" not in new and "PATCHED_Y" not in new  # latest row reject, and no row
+
+
+def test_a_rerun_of_the_same_candidate_is_refused_before_any_llm_call(tmp_path, monkeypatch):
+    """A second real run of the same patch set must exit before any replay or audit, and a changed set must run.
+
+    Each extra look at the golden set inflates false passes, so one candidate gets one look.
+    """
+    out, paths, _ = check(tmp_path)
+    assert out.row["passed"] is True and len(read_rows(paths["runs_path"])) == 1
+    monkeypatch.setattr(prove, "real_replay_fn", raising)
+    monkeypatch.setattr(prove, "real_audit_fn", raising)
+    with pytest.raises(SystemExit, match="already checked"):
+        run_golden_check("v1", tmp_path / "prompt.md", **paths)  # default (real) functions would call the LLM
+    with pytest.raises(SystemExit, match="already checked"):
+        run_golden_check("v1", tmp_path / "prompt.md", replay_fn=raising, audit_fn=raising, **paths)
+    assert len(read_rows(paths["runs_path"])) == 1
+    changed = json.loads(paths["patches_path"].read_text())
+    changed["patches"][0]["new_text"] += " AGAIN"
+    paths["patches_path"].write_text(json.dumps(changed))
+    again = CheckStubs()
+    run_golden_check("v1", tmp_path / "prompt.md", replay_fn=again.replay_fn, audit_fn=again.audit_fn, **paths)
+    assert len(read_rows(paths["runs_path"])) == 2 and again.log
+
+
+def read_rows(path):
+    return [json.loads(x) for x in path.read_text().splitlines()]
+
+
+def test_a_fatal_rise_on_golden_pass_calls_fails_the_check(tmp_path):
+    """When NEW makes a non-advisory rule Fatal on golden Pass calls, the check must fail and name the rise.
+
+    A patch that fixes one cause by breaking calls that were fine must never be let through.
+    """
+    out, paths, _ = check(tmp_path, CheckStubs(pass_fatal="looping"))
+    row = out.row
+    assert row["passed"] is False and row["fatal"] == {"old": 0, "new": 12}
+    assert row["causes"]["cause_looping"]["status"] == "dropped"  # the fault dropped, and the check still fails
+    assert "Fatal" in row["reason"]
+    assert read_rows(paths["runs_path"])[0]["passed"] is False
+
+
+def test_a_clean_run_passes_and_a_cause_that_does_not_drop_blocks(tmp_path):
+    """A gating cause that drops with no Fatal rise must pass, and one that does not drop must block.
+
+    The pass rule is the whole point of the check: a wrong sign here ships a patch that does nothing.
+    """
+    ok, _, _ = check(tmp_path)
+    assert ok.row["passed"] is True and ok.row["causes"]["cause_looping"] == {
+        "status": "dropped", "old_fail": 12, "new_fail": 0, "calls": 12
+    }  # fmt: skip
+    blocked, _, _ = check(tmp_path / "b", CheckStubs(loop_fixed=False))
+    assert blocked.row["passed"] is False and blocked.row["causes"]["cause_looping"]["status"] == "not_dropped"
+
+
+def test_advisory_rules_neither_block_nor_pass(tmp_path):
+    """A cause on an advisory rule must not block when it does not drop, nor count as a pass when it does.
+
+    The audit grades such a rule unlike the owner, so its replays say nothing about the patch.
+    """
+    # qty_probing is advisory in the fixture. Not fixed for it, fixed for looping: the check still passes.
+    stubs = CheckStubs(qty_fixed=False, pass_fatal="qty_probing")  # an advisory Fatal on Pass calls is no rise
+    out, _, _ = check(tmp_path / "a", stubs)
+    assert out.row["passed"] is True and out.row["causes"]["cause_qty_probing"]["status"] == "advisory"
+    assert not [c for c, _, _ in stubs.log if c.startswith("qf")]  # no replay is spent on an advisory fault
+    # Only the advisory cause patched: nothing can pass, and the run stops before any LLM call.
+    pf, paths = write_check_inputs(tmp_path / "c", [_patch(QTY, 20, "QTY")], [_gate_row(QTY, "ship")])
+    with pytest.raises(SystemExit, match="gating"):
+        run_golden_check("v1", pf, replay_fn=raising, audit_fn=raising, **paths)
+    assert not paths["runs_path"].exists()
+
+
+def test_failing_calls_fork_at_the_first_fault_and_pass_calls_after_the_greeting(tmp_path):
+    """A failing golden call must fork at its human first-fault turn, a Pass call at the bot turn after the first user.
+
+    A fork before the fault would replay behaviour that was fine, and one after it would miss the fault.
+    """
+    _, _, stubs = check(tmp_path)
+    forks = {c.split("__")[0]: f for c, _, f in stubs.log}
+    assert {forks[f"lf{i:02d}"] for i in range(12)} == {3}
+    assert {forks[f"gp{i:02d}"] for i in range(12)} == {2}
+    assert len(stubs.log) == 2 * (12 + 12)  # each replayed call once under OLD and once under NEW
+
+
+def test_an_unresolved_replay_cannot_pass(tmp_path):
+    """A replay whose audit raised must be counted as unresolved, and the check must not pass on the rest.
+
+    Missing evidence is never a pass: a silent skip would let a patch through on fewer calls than claimed.
+    """
+    out, _, _ = check(tmp_path, CheckStubs(audit_error_on=("lf03", "new")))
+    assert out.row["passed"] is False and out.row["unresolved"] == 1
+
+
+def test_dry_run_prints_the_plan_and_spends_nothing(tmp_path, monkeypatch, capsys):
+    """`pipeline golden check --dry-run` must print the call and replay counts and make no call or file.
+
+    The owner needs the cost before the one allowed look at the golden set, and a dry run must never use it up.
+    """
+    pf, paths = write_check_inputs(tmp_path)
+    monkeypatch.setattr(prove, "real_replay_fn", raising)
+    monkeypatch.setattr(prove, "real_audit_fn", raising)
+    monkeypatch.setattr("vaniloop.pipeline.GOLDEN_CHECK_INPUTS", paths)
+    main(["golden", "check", "--version", "v1", "--prompt", str(pf), "--dry-run"])
+    out = capsys.readouterr().out
+    assert "48 replays" in out and "2 shipped patch" in out and "dry run" in out
+    assert not paths["runs_path"].exists()
+    main(["golden", "check", "--version", "v1", "--prompt", str(pf), "--dry-run"])  # a dry run is repeatable
