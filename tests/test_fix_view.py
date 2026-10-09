@@ -97,3 +97,27 @@ def test_all_views_render_without_error_on_the_fixtures(tmp_path, monkeypatch):
     for view in ("Grade", "Issues", "Fix", "Test", "Audit"):
         at.radio(key="view").set_value(view).run()
         assert not at.exception, view
+
+
+def test_fix_view_marks_the_inserted_sentence_inside_a_long_line(tmp_path, monkeypatch):
+    """A patch that adds one sentence to one line shows only that sentence as added in the Fix view.
+
+    If this breaks, the reader of a real patch sees two whole paragraphs and must find the sentence by eye.
+    """
+    for f in FIX.iterdir():
+        shutil.copy(f, tmp_path / f.name)
+    doc = json.loads((FIX / "synthetic_patches.json").read_text())
+    old = "Synthetic rule E: greet the buyer. Synthetic rule F: ask the product."
+    doc["patches"][0].update(
+        target_start_line=30,
+        target_end_line=30,
+        old_text=old,
+        new_text=old.replace("buyer. ", "buyer. Synthetic rule G: say the city once. "),
+    )
+    (tmp_path / "synthetic_patches.json").write_text(json.dumps(doc))
+    monkeypatch.setenv("VANILOOP_DATA", str(tmp_path))
+    at = AppTest.from_file(str(APP), default_timeout=30).run()
+    at.radio(key="view").set_value("Fix").run()
+    html = _html(at)
+    assert '<ins class="w">Synthetic rule G: say the city once.</ins>' in html
+    assert 'class="ln">L30</span>' in html and "Edits prompt line L30." in html
