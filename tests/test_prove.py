@@ -613,8 +613,8 @@ def test_all_calls_channel_faulted_leave_too_few_targets(tmp_path):
 def test_product_change_forks_at_the_first_bot_turn_after_the_change_in_every_scope():
     """For `product_change` the fork must be the first bot turn after ledger.product_changed_at_turn, also in the
     seller_unavailable_handoff scope where the audit's onset is the later handoff turn, and fall back to the onset
-    when the change turn is missing. When the change turn is set but no bot turn follows it, there is no fork (None). A fork at the handoff would skip the bot's reply to the change, which is the
-    behaviour under test."""
+    when the change turn is missing. When the change turn is set but no bot turn follows it, there is no fork
+    (None). A fork at the handoff would skip the bot's reply to the change, which is the behaviour under test."""
     call = make_call("c1", "bot user bot user bot user bot user bot")  # turns 0..8, bot on even idx
     audit = make_audit("c1", "Fatal", onset=7, parameter="product_change")  # the handoff turn is at 8; onset 7 here
     for scope in ("seller_unavailable_handoff", "bl_collection"):
@@ -628,8 +628,8 @@ def test_product_change_forks_at_the_first_bot_turn_after_the_change_in_every_sc
     after_last = Ledger(call_id="c1", scope="bl_collection", product_changed_at_turn=8)  # no bot turn after it
     assert prove.target_fork(call, audit, "product_change", after_last) is None  # never an earlier fork
     other = make_audit("c1", "Fatal", onset=7, parameter="looping")
-    assert prove.target_fork(call, other, "looping", Ledger(call_id="c1", scope="bl_collection",
-                                                           product_changed_at_turn=3)) == 7  # other parameters keep the onset  # fmt: skip
+    changed = Ledger(call_id="c1", scope="bl_collection", product_changed_at_turn=3)
+    assert prove.target_fork(call, other, "looping", changed) == 7  # other parameters keep the onset
 
 
 def test_call_values_block_is_the_same_in_old_and_new_and_holds_the_ledger_values():
@@ -662,8 +662,8 @@ def test_call_values_block_is_the_same_in_old_and_new_and_holds_the_ledger_value
 
 
 def test_product_change_target_with_no_bot_turn_after_the_change_is_skipped_and_printed(capsys):
-    """A product_change target whose buyer changed product on the last turn must be skipped and printed, not forked at an
-    earlier handoff onset. An earlier fork would drop the change from the replay history, so the replay would test a
+    """A product_change target whose buyer changed product on the last turn must be skipped and printed, not forked at
+    an earlier handoff onset. An earlier fork would drop the change from the replay history, so the replay would test a
     call without the change."""
     calls, ledgers, audits = {}, {}, {}
     for cid, change in (("a", 3), ("b", 3), ("c", 3), ("late", 7)):  # "late": change on the final user turn
