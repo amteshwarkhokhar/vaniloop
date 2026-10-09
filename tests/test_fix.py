@@ -3,7 +3,7 @@ import json
 import pytest
 
 from vaniloop.dashboard import load_patches_doc
-from vaniloop.fix import PromptPatch, _retry_kwargs, apply_patch, propose_patch, run_fix, run_refix
+from vaniloop.fix import MAX_ATTEMPTS, PromptPatch, _retry_kwargs, apply_patch, propose_patch, run_fix, run_refix
 from vaniloop.llm import complete_json
 from vaniloop.models import AuditRecord, Cause, Evidence, Finding
 
@@ -585,25 +585,30 @@ def test_refix_keeps_history_and_stores_the_new_attempt(tmp_path):
     assert (h["cause_id"], h["attempt"], h["decision"], h["new_text"]) == ("cause_qty_probing", 1, "reject", FIRST_NEW)
     patches, _ = load_patches_doc(tmp_path)  # the dashboard ignores history and shows the current patch
     assert [(p.new_text, p.attempt) for p in patches] == [("line 3: better rule", 2)]
-    # a second refix needs a gate row for attempt 2, and appends to history
+
+
+def test_refix_refuses_a_third_attempt_before_any_llm_call(tmp_path):
+    """A rejected attempt 2 patch must not be refixed: MAX_ATTEMPTS is 2, and run_refix must stop with SystemExit
+    before any LLM call and leave patches.json untouched. Each refix is another look at the same data, so without
+    the cap unlimited retries would inflate false ships, and the alpha split across 2 attempts would be wrong."""
+    kw = refix_files(tmp_path)
+    run_refix("cause_qty_probing", llm=stub("line 3: rule text 3", "line 3: better rule"), **kw)
     kw["gates_path"].write_text(
         kw["gates_path"].read_text()
-        + json.dumps(
-            dict(
-                cause_id="cause_qty_probing",
-                decision="reject",
-                attempt=2,
-                p_value=None,
-                old_fail_rate=0.4,
-                new_fail_rate=0.5,
-                reason="again",
-            )
-        )
+        + json.dumps(dict(cause_id="cause_qty_probing", decision="reject", attempt=2, reason="again"))
         + "\n"
     )
-    run_refix("cause_qty_probing", llm=stub("line 5: rule text 5", "line 5: third"), **kw)
-    doc = json.loads(kw["patches_path"].read_text())
-    assert [x["attempt"] for x in doc["history"]] == [1, 2] and doc["patches"][0]["attempt"] == 3
+    before = kw["patches_path"].read_bytes()
+
+    def boom(*_a, **_k):
+        raise AssertionError("an LLM was called")
+
+    with pytest.raises(SystemExit, match="at most 2 attempts"):
+        run_refix("cause_qty_probing", llm=boom, **kw)
+    assert kw["patches_path"].read_bytes() == before
+    doc = json.loads(before)
+    assert [x["attempt"] for x in doc["history"]] == [1] and doc["patches"][0]["attempt"] == 2
+    assert MAX_ATTEMPTS == 2
 
 
 def test_patch_attempt_defaults_to_one():

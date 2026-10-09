@@ -17,7 +17,7 @@ from pathlib import Path
 from jinja2 import TemplateError
 
 from . import gate, llm, prompt, render, replay
-from .fix import PATCHES_PATH, PromptPatch, _count_overlapping, apply_patch
+from .fix import MAX_ATTEMPTS, PATCHES_PATH, PromptPatch, _count_overlapping, apply_patch
 from .gate import AuditFn, Item, ReplayFn
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, load_audits
@@ -206,6 +206,11 @@ def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path, attempt:
     patch = PromptPatch.model_validate(rows[-1]) if rows else None  # the latest patch for the cause
     if patch is None:
         raise SystemExit(f"no patch for {cause_id} in {patches_path}; run `pipeline fix` first")
+    if max(attempt, patch.attempt) > MAX_ATTEMPTS:
+        raise SystemExit(
+            f"at most {MAX_ATTEMPTS} attempts per cause: the current patch for {cause_id} is attempt "
+            f"{patch.attempt} and --attempt is {attempt}"
+        )
     if patch.attempt != attempt:
         raise SystemExit(
             f"the current patch for {cause_id} is attempt {patch.attempt}, not {attempt}; "
@@ -344,7 +349,8 @@ def run_prove(
     A run writes one gates row and one replays row per replay. A dry run makes no LLM call and writes no file.
     With workers > 1 the first-round replays are computed in a thread pool before the gate starts (see warm_cache);
     the gate and the rows stay the same, only the wall time shrinks. With VANILOOP_CACHE=refresh the gate cannot read
-    the cache, so the warm-up is skipped.
+    the cache, so the warm-up is skipped. Attempts above MAX_ATTEMPTS stop here, and each attempt's gate runs at
+    alpha / MAX_ATTEMPTS.
     """
     if not cause_id.startswith("cause_"):
         raise SystemExit(f"cause id '{cause_id}' does not look like cause_<parameter>")
@@ -441,6 +447,7 @@ def run_prove(
         replay_fn=record_replay,
         audit_fn=record_audit,
         attempt=attempt,
+        alpha=gate.DEFAULT_ALPHA / MAX_ATTEMPTS,
     )
     gates_path = Path(gates_path)
     gates_path.parent.mkdir(parents=True, exist_ok=True)

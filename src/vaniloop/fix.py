@@ -24,6 +24,7 @@ PATCHES_PATH = ROOT / "runs" / "patches.json"
 GATES_PATH = ROOT / "runs" / "gates.jsonl"  # same files as prove.py; fix cannot import prove (prove imports fix)
 REPLAYS_PATH = ROOT / "runs" / "replays.jsonl"
 MAX_CHANGED_LINES = 15
+MAX_ATTEMPTS = 2  # patch attempts per cause; prove gates each at alpha / MAX_ATTEMPTS (Bonferroni over the looks)
 MAX_EXAMPLES = 3  # evidence quotes sent per cause
 EXAMPLE_CHARS = 160
 MAX_REFIX_EVIDENCE = 4  # failing NEW-prompt replay lines sent to a refix
@@ -311,8 +312,8 @@ def run_refix(
     """Write a second patch for a cause whose patch the gate rejected, from what the replays showed.
 
     Stops with SystemExit, before any LLM call, when the cause, its patch or its latest gate row is missing, when
-    the gate shipped the patch, or when that gate row is not for the current patch's attempt. On success the rejected
-    patch moves to `history` (with its gate decision) and the new patch becomes current with attempt + 1. A refused
+    the patch is already attempt MAX_ATTEMPTS, when the gate shipped the patch, or when that gate row is not for
+    the current patch's attempt. On success the rejected patch moves to `history` (with its gate decision) and the new patch becomes current with attempt + 1. A refused
     proposal writes nothing and comes back in `rejected`. Returns {"patches": [new patch] or [], "rejected": [...]}.
     """
     patches_path = Path(patches_path)
@@ -321,6 +322,11 @@ def run_refix(
     if not slots:
         raise SystemExit(f"no patch for {cause_id} in {patches_path}; run `pipeline fix` first")
     current = PromptPatch.model_validate(doc["patches"][slots[-1]])
+    if current.attempt >= MAX_ATTEMPTS:
+        raise SystemExit(
+            f"{cause_id} is at attempt {current.attempt}: at most {MAX_ATTEMPTS} attempts per cause, "
+            f"so refix will not write attempt {current.attempt + 1}"
+        )
     gate_row = next((r for r in reversed(read_jsonl(gates_path)) if r.get("cause_id") == cause_id), None)
     if gate_row is None:
         raise SystemExit(f"no gate row for {cause_id} in {gates_path}; run `pipeline prove` first")
