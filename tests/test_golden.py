@@ -397,9 +397,9 @@ class CheckStubs:
     `pass_fatal` is the parameter NEW makes Fatal on the Pass calls, or None. `log` keeps (call id, prompt label, fork).
     """
 
-    def __init__(self, loop_fixed=True, qty_fixed=True, pass_fatal=None, audit_error_on=None):
+    def __init__(self, loop_fixed=True, qty_fixed=True, pass_fatal=None, odd_new=None):
         self.loop_fixed, self.qty_fixed = loop_fixed, qty_fixed
-        self.pass_fatal, self.audit_error_on = pass_fatal, audit_error_on
+        self.pass_fatal, self.odd_new = pass_fatal, odd_new
         self.log, self.prompts = [], set()
 
     def replay_fn(self, call, ledger, fork, bot_prompt, seed):
@@ -412,8 +412,6 @@ class CheckStubs:
 
     def audit_fn(self, call):
         base, tag = call.call_id.split("__")
-        if self.audit_error_on == (base, tag):
-            raise RuntimeError("ledger extraction failed")
         old = tag == "old"
         status = {"looping": "Pass", "qty_probing": "Pass"}
         if base.startswith("lf") and (old or not self.loop_fixed):
@@ -427,6 +425,12 @@ class CheckStubs:
             Finding(parameter=p, status=s, reason="s", basis="observed", onset_turn=onset) for p, s in status.items()
         ]
         verdict = "Fatal" if "Fatal" in status.values() else "Pass"
+        if self.odd_new and (base, tag) == ("lf00", "new"):  # (looping status, onset turn or None, verdict)
+            st, on, verdict = self.odd_new
+            if st == "raise":
+                raise RuntimeError("ledger extraction failed")
+            findings = [f.model_copy(update={"onset_turn": on}) if f.parameter == "looping" else f for f in findings]
+            findings = [f.model_copy(update={"status": st}) if f.parameter == "looping" else f for f in findings]
         return AuditRecord(call_id=call.call_id, verdict=verdict, scope="bl_collection", findings=findings)
 
 
@@ -536,15 +540,6 @@ def test_failing_calls_fork_at_the_first_fault_and_pass_calls_after_the_greeting
     assert len(stubs.log) == 2 * (12 + 12)  # each replayed call once under OLD and once under NEW
 
 
-def test_an_unresolved_replay_cannot_pass(tmp_path):
-    """A replay whose audit raised must be counted as unresolved, and the check must not pass on the rest.
-
-    Missing evidence is never a pass: a silent skip would let a patch through on fewer calls than claimed.
-    """
-    out, _, _ = check(tmp_path, CheckStubs(audit_error_on=("lf03", "new")))
-    assert out.row["passed"] is False and out.row["unresolved"] == 1
-
-
 def test_dry_run_prints_the_plan_and_spends_nothing(tmp_path, monkeypatch, capsys):
     """`pipeline golden check --dry-run` must print the call and replay counts and make no call or file.
 
@@ -559,3 +554,103 @@ def test_dry_run_prints_the_plan_and_spends_nothing(tmp_path, monkeypatch, capsy
     assert "48 replays" in out and "2 shipped patch" in out and "dry run" in out
     assert not paths["runs_path"].exists()
     main(["golden", "check", "--version", "v1", "--prompt", str(pf), "--dry-run"])  # a dry run is repeatable
+
+
+@pytest.mark.parametrize(
+    "odd",
+    [
+        ("raise", 0, ""),
+        ("Unknown", 7, "NeedsReview"),
+        ("NotApplicable", 7, "Pass"),
+        ("Fatal", None, "Fatal"),
+        ("Fatal", 0, "Fatal"),
+    ],
+)
+def test_missing_evidence_in_a_replay_blocks_the_pass(tmp_path, odd):
+    """NEW replays that raised, are Unknown, NotApplicable, NeedsReview or have no usable onset must be unresolved.
+
+    Reading them as fault-free would let a patch pass on a call where the audit could not tell if it worked.
+    """
+    out, _, _ = check(tmp_path, CheckStubs(odd_new=odd))
+    assert out.row["passed"] is False and out.row["unresolved"] == 1
+    assert out.row["causes"]["cause_looping"]["status"] == "dropped"  # 11 resolved calls dropped: only the gap blocks
+
+
+def _edit_new_audit(stubs, base, edit):
+    """Make `edit(findings)` rewrite the NEW audit of golden call `base`. Other audits stay as the stub makes them."""
+    inner = stubs.audit_fn
+
+    def audit_fn(call):
+        rec = inner(call)
+        if call.call_id == f"{base}__new":
+            rec = rec.model_copy(update={"findings": edit(rec.findings)})
+        return rec
+
+    stubs.audit_fn = audit_fn
+    return stubs
+
+
+def test_a_pass_call_with_no_gating_finding_is_unresolved_not_clean(tmp_path):
+    """A NEW replay of a Pass call that has no finding for a gating parameter must be unresolved, not fault-free.
+
+    A Pass call patches no parameter, so only the gating Fatal guard can see it. Without a finding, the guard would
+    read the gap as clean and let a patch pass on a call the audit could not judge.
+    """
+    stubs = _edit_new_audit(CheckStubs(), "gp00", lambda fs: [f for f in fs if f.parameter != "looping"])
+    out, _, _ = check(tmp_path, stubs)
+    assert out.row["passed"] is False and out.row["unresolved"] == 1
+    assert "unresolved replay" in out.row["reason"]
+
+
+def test_an_advisory_fatal_with_no_onset_does_not_block(tmp_path):
+    """A Fatal on an advisory parameter whose onset cannot be placed must not block the check.
+
+    Advisory rules grade unlike the owner, so they never block. Only a gating Fatal needs a placeable onset.
+    """
+
+    def drop_onset(fs):
+        return [f.model_copy(update={"onset_turn": None}) if f.parameter == "qty_probing" else f for f in fs]
+
+    stubs = _edit_new_audit(CheckStubs(pass_fatal="qty_probing"), "gp00", drop_onset)
+    out, _, _ = check(tmp_path, stubs)
+    assert out.row["passed"] is True and out.row["unresolved"] == 0
+
+
+def test_a_golden_call_that_cannot_be_replayed_blocks_the_check(tmp_path):
+    """With the Pass calls missing from the call input, the check must stop before any replay and write no row.
+
+    Skipping them would pass with a Fatal count of 0 over calls that were never run.
+    """
+    pf, paths = write_check_inputs(tmp_path)
+    keep = [x for x in paths["calls_path"].read_text().splitlines() if not x.startswith('{"call_id":"gp')]
+    paths["calls_path"].write_text("\n".join(keep) + "\n")
+    with pytest.raises(SystemExit, match="cannot be replayed"):
+        run_golden_check("v1", pf, replay_fn=raising, audit_fn=raising, **paths)
+    assert not paths["runs_path"].exists()
+
+
+def test_channel_fault_calls_are_reported_as_unverified(tmp_path):
+    """A failing call whose fork is a mishearing must not be replayed, and the row must list it as unverified.
+
+    A text replay cannot reproduce a mishearing, and the owner must see which golden calls the check did not cover.
+    """
+    pf, paths = write_check_inputs(tmp_path)
+    rows = [json.loads(x) for x in paths["calls_path"].read_text().splitlines()]
+    next(r for r in rows if r["call_id"] == "lf00")["turns"][3]["bot_misheard"] = True
+    paths["calls_path"].write_text("".join(json.dumps(r) + "\n" for r in rows))
+    stubs = CheckStubs()
+    out = run_golden_check("v1", pf, replay_fn=stubs.replay_fn, audit_fn=stubs.audit_fn, **paths)
+    assert out.row["unverified"] == ["lf00"] and out.row["passed"] is True
+    assert "lf00" not in {c.split("__")[0] for c, _, _ in stubs.log}
+
+
+def test_overlapping_patch_anchors_are_refused_before_any_replay(tmp_path):
+    """Two shipped patches whose anchors intersect in the clean prompt must stop the check before any LLM call.
+
+    Applied in turn both would succeed, and the NEW prompt would hold text no gate ever tested.
+    """
+    inner = {**_patch(QTY, 20, "QTY"), "old_text": "rule text 10", "new_text": "rule text 10 PATCHED_IN"}
+    pf, paths = write_check_inputs(tmp_path, [_patch(LOOP, 10, "LOOP"), inner])
+    with pytest.raises(SystemExit, match="overlap"):
+        run_golden_check("v1", pf, replay_fn=raising, audit_fn=raising, **paths)
+    assert not paths["runs_path"].exists()

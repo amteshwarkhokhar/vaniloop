@@ -31,7 +31,7 @@ from pathlib import Path
 from jinja2 import TemplateError
 
 from . import gate, llm, prove
-from .fix import GATES_PATH, PATCHES_PATH, PromptPatch, _count_overlapping, apply_patch
+from .fix import GATES_PATH, PATCHES_PATH, PromptPatch, _count_overlapping
 from .grading import FAILING, HAND_VERDICTS, _decided, failing_parameters, load_grades
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits
@@ -43,6 +43,7 @@ RUNS = AUDITS_PATH.parent
 GOLDEN_DIR = RUNS / "golden"
 GOLDEN_RUNS_PATH = RUNS / "golden_runs.jsonl"
 LEDGERS_PATH = RUNS / "ledgers.jsonl"
+CHANNEL_FAULT = "channel fault"  # a skip that is reported as unverified coverage; every other skip blocks the check
 BAR_KAPPA = 0.6  # a rule needs kappa at or above this to gate a fix
 BAR_N = 10  # and at least this many calls the audit decided
 MAX_CALLS = 150
@@ -303,15 +304,24 @@ def candidate_hash(patches: list[PromptPatch]) -> str:
 
 
 def apply_all(old: str, patches: list[PromptPatch]) -> str:
-    """Apply every patch to the clean prompt. Stops when an anchor does not occur once, or when patches overlap."""
-    new = old
+    """Apply every patch to the clean prompt. Stops when an anchor does not occur once or two anchors intersect.
+
+    Each anchor's interval is found in the clean prompt first, so overlap is judged before any patch is applied.
+    """
+    spans = []
     for p in patches:
         n = _count_overlapping(old, p.old_text)
         if n != 1:
             raise SystemExit(f"the patch for {p.cause_id} does not fit the old prompt: old_text occurs {n} times")
-        if new.count(p.old_text) != 1:
-            raise SystemExit(f"the patch for {p.cause_id} overlaps another shipped patch; they cannot apply together")
-        new = apply_patch(new, p)
+        start = old.find(p.old_text)
+        spans.append((start, start + len(p.old_text), p))
+    spans.sort(key=lambda x: x[:2])
+    for (_, end, a), (start, _, b) in zip(spans, spans[1:], strict=False):
+        if start < end:
+            raise SystemExit(f"the patches for {a.cause_id} and {b.cause_id} overlap; they cannot apply together")
+    new = old
+    for start, end, p in reversed(spans):
+        new = new[:start] + p.new_text + new[end:]
     if new == old:
         raise SystemExit("the shipped patches leave the prompt unchanged; there is nothing to check")
     return new
@@ -333,12 +343,36 @@ def golden_fork(call: CallRecord, audit: AuditRecord | None, row: dict, paramete
 
 
 def _arm(res, audit: AuditRecord, params: list[str], gating: set[str]) -> dict:
-    """One replay's result: the patched parameters that fail from the fork on, and the gating parameters Fatal."""
-    after = lambda f: gate._after_fork(res, f)  # noqa: E731  (None: the onset has no turn)
-    faults = [p for p in params if any(f.parameter == p and f.status in FAILING and after(f) for f in audit.findings)]
-    fatal = {
-        f.parameter for f in audit.findings if f.status == "Fatal" and f.parameter in gating and after(f) is not False
-    }
+    """One replay's result: the patched parameters that fail from the fork on, and the gating parameters Fatal.
+
+    Missing evidence is an error, never a fault-free result: a NeedsReview verdict, a missing, Unknown or
+    NotApplicable finding for a patched parameter, a fault that starts before the fork or has no placeable onset,
+    and, for every gating parameter, a missing or Unknown finding or a Fatal with no placeable onset. An advisory
+    parameter never blocks, whatever its finding says.
+    """
+
+    def after(f):
+        return gate._after_fork(res, f)  # None: the onset has no turn
+
+    found = {f.parameter: f for f in audit.findings}
+    bad = []
+    for p in params:
+        status = found[p].status if p in found else "missing"
+        if status in ("missing", "Unknown", "NotApplicable"):
+            bad.append(f"{p} finding {status}")
+        elif status in FAILING and after(found[p]) is not True:
+            bad.append(f"{p} fault not after the fork")
+    for g in sorted(gating - set(found) - set(params)):
+        bad.append(f"{g} finding missing")  # a Pass guard call patches nothing: its Fatal check needs this finding
+    for f in audit.findings:
+        if f.parameter in gating and (f.status == "Unknown" or (f.status == "Fatal" and after(f) is None)):
+            bad.append(f"{f.parameter} {f.status} without evidence")
+    if audit.verdict == "NeedsReview":
+        bad.append("verdict NeedsReview")
+    if bad:
+        return {"error": "unresolved: " + ", ".join(bad)}
+    faults = [p for p in params if found[p].status in FAILING]
+    fatal = {f.parameter for f in audit.findings if f.status == "Fatal" and f.parameter in gating and after(f)}
     return {"faults": sorted(faults), "fatal": sorted(fatal), "ended_by": res.ended_by}
 
 
@@ -400,7 +434,7 @@ def plan_check(
         if fork is None:
             skipped[cid] = "no fork turn"
         elif row["verdict"] != "Pass" and prove.channel_fault(call, fork):
-            skipped[cid] = "channel fault"  # a mishearing: a text replay cannot reproduce it
+            skipped[cid] = CHANNEL_FAULT  # a mishearing: a text replay cannot reproduce it
         else:
             items.append((call, ledger, fork, row))
     cand = candidate_hash(patches)
@@ -476,6 +510,9 @@ def run_golden_check(
         return CheckOutcome(plan)
     if plan.already_checked:
         raise SystemExit(f"candidate {plan.candidate[:12]} was already checked: one run per patch set")
+    blocked = {c: why for c, why in plan.skipped.items() if why != CHANNEL_FAULT}
+    if blocked:
+        raise SystemExit(f"{len(blocked)} golden call(s) cannot be replayed, so the check cannot judge them: {blocked}")
     if "gating" not in plan.causes.values():
         raise SystemExit("no patched cause has a gating rule on this golden set, so the check could not pass")
     replay_fn = replay_fn or prove.real_replay_fn(max_turns)
@@ -501,7 +538,7 @@ def run_golden_check(
         "golden_sha256": plan.golden_sha256,
         "patches": [{"cause_id": p.cause_id, "attempt": p.attempt} for p in plan.patches],
         **summarise(plan, results),
-        "skipped": plan.skipped,
+        "unverified": sorted(plan.skipped),  # channel-fault calls the check did not replay (others block the run)
         "replays": plan.replays,
         "calls": results,
     }
@@ -518,13 +555,15 @@ def describe_check(outcome: CheckOutcome) -> list[str]:
     kinds = [r["verdict"] == "Pass" for *_, r in plan.items]
     lines.append(f"{len(plan.items)} golden call(s): {sum(kinds)} Pass, {len(kinds) - sum(kinds)} failing")
     lines += [f"  skipped {cid}: {why}" for cid, why in sorted(plan.skipped.items())]
+    if any(why != CHANNEL_FAULT for why in plan.skipped.values()):
+        lines.append("a skipped call other than a channel fault blocks a real run")
     if plan.already_checked:
         lines.append("this candidate was already checked: a real run is refused")
     if outcome.row is None:
         lines.append(f"{plan.replays} replays (dry run: no LLM call made, no file written)")
         return lines
     r = outcome.row
-    lines.append(f"{'PASS' if r['passed'] else 'FAIL'}: {r['reason']}")
+    lines.append(f"{'PASS' if r['passed'] else 'FAIL'}: {r['reason']} ({len(r['unverified'])} unverified)")
     lines += [f"  {c}: {v}" for c, v in r["causes"].items()]
     lines.append(f"  Fatal on golden Pass calls: old {r['fatal']['old']}, new {r['fatal']['new']}")
     lines.append(f"{plan.replays} replays, LLM cost this run ${outcome.cost_usd:.4f} (replay turns only)")
