@@ -613,3 +613,39 @@ def test_patch_attempt_defaults_to_one():
         cause_id="c", target_start_line=1, target_end_line=1, old_text="a", new_text="b", rationale="r", risk="l"
     )
     assert PromptPatch(**row).attempt == 1
+
+
+def test_refix_keeps_a_parallel_write_to_another_cause_and_stops_on_a_changed_patch(tmp_path):
+    """When patches.json changes while the LLM call runs, run_refix must re-read it under a lock: a change to another
+    cause is kept, and a change to the refixed cause's own patch gives SystemExit and no write. A stale write would
+    erase the other run's patch and history."""
+    other = PromptPatch(cause_id="cause_other", target_start_line=5, target_end_line=5, old_text="line 5: rule text 5",
+                        new_text="line 5: other", rationale="r", risk="low")  # fmt: skip
+
+    def writes(edit):
+        def llm(system, user, **kw):
+            doc = json.loads(kw_["patches_path"].read_text())
+            edit(doc)
+            kw_["patches_path"].write_text(json.dumps(doc))
+            return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
+
+        return llm
+
+    kw_ = refix_files(tmp_path)
+    run_refix("cause_qty_probing", llm=writes(lambda d: d["patches"].append(other.model_dump())), **kw_)
+    doc = json.loads(kw_["patches_path"].read_text())
+    assert [(p["cause_id"], p["attempt"]) for p in doc["patches"]] == [("cause_qty_probing", 2), ("cause_other", 1)]
+    assert len(doc["history"]) == 1 and (tmp_path / "patches.json.lock").exists()
+
+    (tmp_path / "b").mkdir()
+    kw_ = refix_files(tmp_path / "b")
+
+    def change_own(d):
+        d["patches"].append(other.model_dump())
+        d["patches"][0]["new_text"] = "changed by a parallel run"
+
+    with pytest.raises(SystemExit, match="changed during refix"):
+        run_refix("cause_qty_probing", llm=writes(change_own), **kw_)
+    doc = json.loads(kw_["patches_path"].read_text())
+    assert [p["cause_id"] for p in doc["patches"]] == ["cause_qty_probing", "cause_other"]
+    assert doc["patches"][0]["new_text"] == "changed by a parallel run" and "history" not in doc

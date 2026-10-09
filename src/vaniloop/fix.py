@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import fcntl
 import inspect
 import json
 import math
@@ -352,8 +353,18 @@ def run_refix(
     if new is None:
         return {"patches": [], "rejected": rejected}
     new = new.model_copy(update={"attempt": current.attempt + 1})
-    patches = list(doc["patches"])
-    patches[slots[-1]] = new.model_dump()
-    history = [*doc.get("history", []), {**current.model_dump(), "decision": decision}]
-    _write_doc(patches_path, {**doc, "patches": patches, "history": history})
+    lock_path = patches_path.with_name(patches_path.name + ".lock")
+    with lock_path.open("a") as lf:  # the LLM call is slow: re-read under the lock so a parallel run's write is kept
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            fresh = json.loads(patches_path.read_text(encoding="utf-8"))
+            rows = fresh.get("patches", [])
+            slot = max((i for i, x in enumerate(rows) if x.get("cause_id") == cause_id), default=None)
+            if slot is None or PromptPatch.model_validate(rows[slot]) != current:
+                raise SystemExit(f"patch for {cause_id} changed during refix; rerun")
+            rows[slot] = new.model_dump()
+            history = [*fresh.get("history", []), {**current.model_dump(), "decision": decision}]
+            _write_doc(patches_path, {**fresh, "patches": rows, "history": history})
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
     return {"patches": [new.model_dump()], "rejected": []}
