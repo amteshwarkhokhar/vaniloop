@@ -39,8 +39,10 @@ class Trial(BaseModel):
     prompt: Literal["old", "new"]
     seed: int
     failed: bool  # the cause finding is Fatal or NonFatal from the fork on, or the replay was invalid_output
-    fatal: bool  # a guard: the audit verdict is Fatal. A target: some finding is Fatal with its onset at or after the fork
-    unresolved: bool = False  # evidence is missing: Unknown, absent, NotApplicable or pre-fork cause finding, NeedsReview, invalid_output
+    # a guard: the audit verdict is Fatal. A target: some finding is Fatal with its onset at or after the fork
+    fatal: bool
+    # evidence is missing: Unknown, absent, NotApplicable or pre-fork cause finding, NeedsReview, invalid_output
+    unresolved: bool = False
     outcome: str  # how the replay ended: end_call | hang_up | max_turns | invalid_output
 
 
@@ -163,8 +165,8 @@ def decide(
     and at least min_calls matched calls. Reject on a confirmed guard break, a Fatal on a NEW target
     replay, or lift <= 0. If OLD never fails (0 failures in every old trial), the replay did not
     reproduce the fault, and the result is inconclusive before the lift rule runs. Target trials
-    count only findings that start at or after the fork (see _trial). A guard Fatal under BOTH prompts is flaky and does not reject. Everything
-    else is inconclusive with its reason.
+    count only findings that start at or after the fork (see _trial). A guard Fatal under BOTH prompts
+    is flaky and does not reject. Everything else is inconclusive with its reason.
     """
     k = k if k is not None else max((t.seed for t in [*old, *new]), default=-1) + 1
     old_k = [t for t in old if t.seed < k]
