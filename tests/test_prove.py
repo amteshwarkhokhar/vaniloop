@@ -105,7 +105,8 @@ class Stubs:
         if n == self.fail_audit_at:
             raise RuntimeError("ledger extraction failed")
         bad = call.call_id.startswith("t") and ("__old_" in call.call_id or self.new_fails)
-        return make_audit(call.call_id, "NonFatal" if bad else "Pass")
+        # the fault starts at the generated turn (the last one), at the fork: the gate counts only post-fork findings
+        return make_audit(call.call_id, "NonFatal" if bad else "Pass", onset=call.turns[-1].idx)
 
 
 def raising(*_a, **_k):

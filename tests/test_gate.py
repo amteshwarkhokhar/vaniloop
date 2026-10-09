@@ -21,9 +21,13 @@ from vaniloop.models import AuditRecord, CallRecord, Finding, Ledger, Turn
 from vaniloop.replay import ReplayResult
 
 
-def audit(status="Pass", verdict="Pass", parameter="looping") -> AuditRecord:
-    f = Finding(parameter=parameter, status=status, reason="r", basis="observed")
-    return AuditRecord(call_id="x", verdict=verdict, scope="bl_collection", findings=[f])
+def audit(status="Pass", verdict="Pass", parameter="looping", onset=3) -> AuditRecord:
+    """An audit with one finding at onset turn 3 (after mk's fork at 2). A Fatal verdict without a Fatal status
+    adds a Fatal finding on another parameter, because the gate reads findings, not the verdict, for a target."""
+    findings = [Finding(parameter=parameter, status=status, reason="r", basis="observed", onset_turn=onset)]
+    if verdict == "Fatal" and status != "Fatal":
+        findings.append(Finding(parameter="dead_air", status="Fatal", reason="r", basis="observed", onset_turn=onset))
+    return AuditRecord(call_id="x", verdict=verdict, scope="bl_collection", findings=findings)
 
 
 def trials(prompt, fails_by_call, fatal=False, unresolved=False, k=2):
@@ -729,3 +733,126 @@ def test_noise_floor_is_gone():
     import vaniloop.gate as g
 
     assert not hasattr(g, "PERCENTILE")
+
+
+# ---- the gate judges only what a patch can change: findings from the fork on ----
+def _res(fork=2):
+    return ReplayResult(call=mk("a")[0], fork_turn=fork, ended_by="end_call")
+
+
+def test_pre_fork_fatal_does_not_trigger_the_new_fatal_reject():
+    """A target replay whose only Fatal starts before the fork is not a NEW-Fatal reject.
+
+    Protects the decision-18 reject rule from a fault in the copied prefix: that turn is the same in every
+    replay under both prompts, so a patch cannot change it. If the rule counted it, one looping call forced a
+    reject on a patch that fixed the cause (the real case was call 439).
+    """
+    pre = audit("Pass", "Fatal", onset=1)  # the cause passes, a Fatal on dead_air starts at turn 1 < fork 2
+    t = _trial("a", "new", 0, _res(), lambda _c: pre, "looping")
+    assert not t.fatal and not t.unresolved
+    post = audit("Pass", "Fatal")  # the same Fatal at turn 3 >= fork 2 does count
+    assert _trial("a", "new", 0, _res(), lambda _c: post, "looping").fatal
+
+    # Through run_gate: OLD fails every replay, one NEW replay has a Fatal that starts before the fork.
+    def b2(cid, prompt, seed):
+        if cid.startswith("g"):
+            return "Pass", "Pass", "end_call"
+        if prompt == "OLD":
+            return "Fatal", "Fatal", "max_turns"
+        return ("Pass", "Fatal", "end_call") if (cid, seed) == ("a", 1) else ("Pass", "Pass", "end_call")
+
+    rf2, af2, _log = make_fns(b2)
+
+    def af2_pre(rec):
+        a = af2(rec)
+        if "|Pass|Fatal" in rec.call_id:
+            a.findings[1].onset_turn = 1
+        return a
+
+    r = run_gate("c1", "looping", [mk(c) for c in "abc"], [], "OLD", "NEW", 3, rf2, af2_pre)
+    assert r.decision == "ship" and not r.guard_breaks
+
+
+def test_cause_finding_before_the_fork_or_not_applicable_is_unresolved():
+    """A cause finding that starts before the fork, or is NotApplicable, makes the trial unresolved.
+
+    Protects the failure counts from faults a patch cannot touch. A pre-fork onset sits in the copied prefix
+    and fails under both prompts. NotApplicable means the replay never reached the situation, and counting it
+    as a pass would credit the patch with a fix it did not make. A post-fork fault still counts as failed.
+    """
+    for status in ("Fatal", "NonFatal"):
+        pre = _trial("a", "old", 0, _res(), lambda _c, s=status: audit(s, s, onset=1), "looping")
+        assert pre.unresolved and not pre.failed
+        none = _trial("a", "old", 0, _res(), lambda _c, s=status: audit(s, s, onset=None), "looping")
+        assert none.unresolved and not none.failed  # onset with no placeable turn
+        post = _trial("a", "old", 0, _res(), lambda _c, s=status: audit(s, s, onset=2), "looping")
+        assert post.failed and not post.unresolved  # onset == fork counts
+    na = _trial("a", "new", 0, _res(), lambda _c: audit("NotApplicable", "Pass"), "looping")
+    assert na.unresolved and not na.failed
+    # One unresolved trial holds the whole decision at inconclusive.
+    old = trials("old", {"a": True, "b": True, "c": True})
+    new = trials("new", {"a": False, "b": False, "c": False})
+    new[0] = new[0].model_copy(update={"unresolved": True})
+    assert decide(old, new, GUARD_OK, k=2).decision == "inconclusive"
+
+
+def test_fork_is_a_position_and_onset_is_a_turn_idx():
+    """The fork position is compared with the position of the onset turn, not with its raw idx.
+
+    Protects calls whose Turn.idx does not equal the list position. target_fork maps an idx to a position, so a
+    raw `onset_turn >= fork_turn` would misjudge such a call. Here idx runs 10, 11, 12, 13 and the fork is
+    position 2: onset idx 11 is position 1 (before), idx 12 is position 2 (at the fork).
+    """
+    rec = ReplayResult(
+        call=mk("a")[0].model_copy(
+            update={"turns": [t.model_copy(update={"idx": t.idx + 10}) for t in mk("a")[0].turns]}
+        ),
+        fork_turn=2,
+        ended_by="end_call",
+    )
+    assert _trial("a", "old", 0, rec, lambda _c: audit("Fatal", "Fatal", onset=11), "looping").unresolved
+    assert _trial("a", "old", 0, rec, lambda _c: audit("Fatal", "Fatal", onset=12), "looping").failed
+
+
+def test_old_never_failing_is_inconclusive_not_reproduced_not_reject():
+    """When OLD fails 0 times over all trials, the decision is inconclusive with the 'not reproduced' reason.
+
+    Protects the reading of a replay that did not reproduce the fault (looping, qty_missed and category_isq
+    were 0/15 under OLD). Before this rule the gate said 'reject: no improvement', which blamed the patch for a
+    replay that never showed the problem. The rule runs before the lift rule and never ships.
+    """
+    old = trials("old", {"a": False, "b": False, "c": False})
+    new = trials("new", {"a": False, "b": False, "c": False})
+    r = decide(old, new, GUARD_OK, k=2)
+    assert r.decision == "inconclusive" and r.reason == "replay did not reproduce the fault (old 0/6)"
+
+    def b(cid, prompt, seed):
+        return "Pass", "Pass", "end_call"
+
+    r2, _log = gate(b, guards=())
+    assert r2.decision == "inconclusive" and "did not reproduce the fault (old 0/9)" in r2.reason
+    # One OLD failure is enough to reach the lift rule again.
+    old[0] = old[0].model_copy(update={"failed": True})
+    assert "reproduce" not in decide(old, new, GUARD_OK, k=2).reason
+
+
+def test_fatal_on_another_parameter_with_no_onset_is_unresolved():
+    """A target replay that passes the cause but has a Fatal elsewhere with no placeable onset is unresolved.
+
+    Protects the NEW-Fatal reject from a silent miss. Some rules give a Fatal with onset None (a wrong
+    quantity with no handoff). Such a Fatal cannot be placed before or after the fork, and if it counted as
+    neither fatal nor unresolved the gate could ship a patch with a possible post-fork Fatal. A pre-fork
+    Fatal with a placeable onset stays resolved, and so does a Fatal with an onset after the fork (fatal).
+    """
+    unplaced = audit("Pass", "Fatal", onset=3)
+    unplaced.findings[1].onset_turn = None
+    t = _trial("a", "new", 0, _res(), lambda _c: unplaced, "looping")
+    assert t.unresolved and not t.fatal and not t.failed
+    absent = audit("Pass", "Fatal", onset=3)
+    absent.findings[1].onset_turn = 99  # no turn has this idx
+    assert _trial("a", "new", 0, _res(), lambda _c: absent, "looping").unresolved
+    pre = audit("Pass", "Fatal", onset=1)
+    assert not _trial("a", "new", 0, _res(), lambda _c: pre, "looping").unresolved
+    new = trials("new", {"a": False, "b": False, "c": False})
+    new[0] = new[0].model_copy(update={"unresolved": t.unresolved})
+    assert decide(OLD3, new, GUARD_OK, k=2).decision == "inconclusive"
