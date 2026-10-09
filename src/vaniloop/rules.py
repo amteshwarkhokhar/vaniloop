@@ -28,6 +28,7 @@ MIN_COVERAGE = 0.8
 LOOP_SLOTS = ("product", "quantity", "unit", "name", "city")
 ENRICH_FORBIDDEN_SLOTS = ("quantity", "unit", "spec", "name", "city", "handoff")  # collecting for the new product
 BL_SCOPES = ("bl_collection", "oncall_astbuy")
+INTENT_COLLECT_SLOTS = ("quantity", "unit", "spec", "confirm", "handoff")  # a bot turn that collects for a lead
 # Assumption: quantity is a defined field for every category in a BL call. If False, qty_probing is Unknown.
 QTY_ALWAYS_DEFINED = True
 QTY_MINOR_ABS = 20.0  # matrix minor band: abs diff <= 20 AND relative diff <= 20%
@@ -455,6 +456,35 @@ def _handoff_turn(led: Ledger) -> int | None:
     return h[0] if h else None
 
 
+def rule_intent(call: CallRecord, led: Ledger) -> Finding:
+    """Matrix row "Outcome Accuracy / buying intent" (always Fatal). A refusal call (the buyer has no requirement or
+    declines) must not be collected into a lead. The refusal is approximated by the first user turn: a later bot turn
+    that collects quantity, unit, spec, a confirm or a handoff is the onset. The ledger has no per-turn refusal label.
+    """
+    if led.scope != "refusal":
+        if led.scope in BL_SCOPES:
+            return Finding(parameter="intent", status="Pass", reason="lead call, no refusal", basis="spoken_proxy")
+        return Finding(parameter="intent", status="NotApplicable", reason=f"scope is {led.scope}", basis="spoken_proxy")
+    users = sorted(t.idx for t in call.turns if t.speaker == "user")
+    first_user = users[0] if users else -1
+    collecting = sorted(b.idx for b in led.bot_turns if b.slot in INTENT_COLLECT_SLOTS and b.idx > first_user)
+    if collecting:
+        return Finding(
+            parameter="intent",
+            status="Fatal",
+            basis="spoken_proxy",
+            onset_turn=collecting[0],
+            evidence=[_ev(call, collecting[0])],
+            reason="buyer refused or has no requirement, but the bot kept collecting for a lead",
+        )
+    return Finding(
+        parameter="intent",
+        status="Pass",
+        basis="spoken_proxy",
+        reason="buyer refused and the bot closed without collecting",
+    )
+
+
 def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
     if led.scope not in BL_SCOPES:
         return Finding(
@@ -819,6 +849,7 @@ def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
 
 
 RULES = [
+    rule_intent,
     rule_category_isq,
     rule_product_accuracy,
     rule_qty_probing,
