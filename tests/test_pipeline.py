@@ -67,3 +67,23 @@ def test_error_is_captured_and_run_continues(tmp_path, monkeypatch):
     # failed call is retried on the next run
     monkeypatch.setattr(ledger, "complete_json", lambda *a, **k: dict(FAKE))
     assert pipeline.run_audit(**p)["processed"] == 1
+
+
+def test_regrade_rescores_saved_ledgers_without_any_llm_call(tmp_path, monkeypatch):
+    """regrade re-applies the rules to saved ledgers, rewrites one audit per call and never calls the model.
+
+    If this breaks, each calibration round pays for a new LLM pass, or old audit rows survive a rule change.
+    """
+    monkeypatch.setattr(ledger, "complete_json", lambda *a, **k: dict(FAKE))
+    p = paths(tmp_path)
+    pipeline.run_audit(**p)
+    (tmp_path / "a.jsonl").write_text('{"call_id": "stale", "verdict": "Pass"}\n')
+
+    def no_llm(*a, **k):
+        raise AssertionError("regrade must not call the model")
+
+    monkeypatch.setattr(ledger, "complete_json", no_llm)
+    s = pipeline.run_regrade(p["calls_path"], p["ledgers_path"], p["audits_path"])
+    rows = lines(tmp_path / "a.jsonl")
+    assert s["regraded"] == 3 and len(rows) == 3
+    assert "stale" not in {r["call_id"] for r in rows}

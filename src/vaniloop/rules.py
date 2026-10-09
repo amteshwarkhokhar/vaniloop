@@ -398,9 +398,12 @@ def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
             basis="spoken_proxy",
             reason=f"bot never asked for quantity; cannot tell if it is defined for this category {note}",
         )
+    # NonFatal, not Fatal: IndiaMART's human audit (VANI Call Vital report, 23 Aug-26 Sep 2026) grades
+    # "Qty Probe" mostly Non-Fatal, and fails it only when quantity is defined on the category, which a
+    # transcript cannot show. The Fatal parameters are wrong or missed captured values (qty_missed).
     return Finding(
         parameter="qty_probing",
-        status="Fatal",
+        status="NonFatal",
         basis="spoken_proxy",
         onset_turn=_handoff_turn(led),
         reason=f"bot never asked for quantity and the buyer did not give one {note}",
