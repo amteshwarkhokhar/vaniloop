@@ -25,7 +25,9 @@ def full(call, led):
 
 
 def bot(idx, slot, fits=None, opts=()):
-    return BotTurnLabel(idx=idx, slot=slot, fits_confirmed_product=fits, options_offered=list(opts))
+    return BotTurnLabel(
+        idx=idx, slot=slot, fits_confirmed_product=fits, question_fits_product=fits, options_offered=list(opts)
+    )
 
 
 def test_282_camera_call_is_fatal_for_wrong_category_and_name_loop():

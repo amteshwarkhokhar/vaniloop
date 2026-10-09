@@ -11,7 +11,7 @@ import json
 from .llm import complete_json, model_name
 from .models import CallRecord, Ledger
 
-PROMPT_VERSION = "4"  # bump whenever SYSTEM / INSTRUCTIONS / _normalise change; part of the cache key
+PROMPT_VERSION = "5"  # bump whenever SYSTEM / INSTRUCTIONS / _normalise change; part of the cache key
 
 SYSTEM = """You label IndiaMART voice-bot call transcripts. The bot (VANI) calls a buyer who showed
 interest in a product, confirms the requirement (product, quantity + unit, specs, city, name) to post
@@ -38,7 +38,10 @@ INSTRUCTIONS = """Return JSON with exactly these keys:
                  "spec_name": for spec questions only: the specification being asked (e.g. "brand", "resolution"), else null,
                  "options_offered": list of example options the bot offered (e.g. ["DJI","MI"]), else [],
                  "fits_confirmed_product": for spec questions only: true if the question and its options make sense
-                     for the product the buyer has confirmed AT THAT POINT, false if they belong to another category; null otherwise} ],
+                     for the product the buyer has confirmed AT THAT POINT, false if they belong to another category; null otherwise,
+                 "question_fits_product": for spec questions only: judge the specification being asked WITHOUT its options.
+                     true if that specification makes sense for the product the buyer has confirmed AT THAT POINT (even when
+                     some offered options are wrong), false only if the specification itself belongs to another category; null otherwise} ],
  "user_turns": [ {"idx": turn index of a user turn,
                   "frustrated": probability 0..1 that the buyer is irritated, confused or repeating themselves,
                   "asks_for_human": probability 0..1 that the buyer asks for a person,
@@ -126,6 +129,7 @@ def _normalise(d: dict, call: CallRecord) -> dict:
                 "slot": slot,
                 "options_offered": [str(o) for o in opts] if isinstance(opts, list) else [],
                 "fits_confirmed_product": _bool(b.get("fits_confirmed_product")) if spec else None,
+                "question_fits_product": _bool(b.get("question_fits_product")) if spec else None,
                 "spec_name": name.lower() if spec and name else None,
             }
         )
