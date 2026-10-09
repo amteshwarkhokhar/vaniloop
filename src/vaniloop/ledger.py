@@ -34,7 +34,9 @@ INSTRUCTIONS = """Return JSON with exactly these keys:
  "bot_confirmed": {slot: value the BOT read back or accepted and moved on from, with or without a read-back}
      (the "shadow Buy Lead"). For a buyer range, store the value the bot kept (the bot keeps the maximum),
  "bot_turns": [ {"idx": turn index of a bot turn,
-                 "slot": what the turn asks for, one of product|quantity|unit|spec|name|city|confirm|handoff|greeting|other,
+                 "slot": what the turn asks for, one of product|quantity|unit|spec|name|city|confirm|handoff|greeting|other.
+                     confirm = the bot reads back requirement details or asks to post the lead. A bot question that
+                     checks the buyer does NOT need anything ("so you don't need this?") is other,
                  "spec_name": for spec questions only: the specification being asked (e.g. "brand", "resolution"), else null,
                  "options_offered": list of example options the bot offered (e.g. ["DJI","MI"]), else [],
                  "fits_confirmed_product": for spec questions only: true if the question and its options make sense

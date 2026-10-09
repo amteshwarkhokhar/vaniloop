@@ -464,8 +464,8 @@ def rule_intent(call: CallRecord, led: Ledger) -> Finding:
     - a user turn with declined=True sets the state to declined;
     - a user turn that gives a product, quantity, unit or spec value clears it (the buyer renewed consent);
     - the first bot turn with slot quantity, unit, spec, confirm or handoff while the state is declined is Fatal,
-      and that turn is the onset. A confirm whose next user turn declines again confirms the refusal, not a lead,
-      so it is skipped;
+      and that turn is the onset. The ledger labels a bot check that the buyer needs nothing ("so you don't need
+      this?") as slot other, so only a lead read-back or a post request is a confirm;
     - a bot ask before any decline is not a fault, because VANI's normal opening asks before the buyer refuses.
     The walk runs on lead scopes too, because a late cancel need not change the whole-call scope.
     With no declining turn: refusal scope is Unknown, lead scopes Pass, other scopes are NotApplicable.
@@ -493,9 +493,6 @@ def rule_intent(call: CallRecord, led: Ledger) -> Finding:
             elif t.gave_value_for in INTENT_VALUE_SLOTS:
                 declined_at = None
         elif declined_at is not None and t.slot in INTENT_COLLECT_SLOTS:
-            nxt = next((u for u in users if u.idx > idx), None)
-            if t.slot == "confirm" and nxt is not None and nxt.declined:
-                continue  # "you don't need this?" -> "correct": the bot confirms the refusal
             return Finding(
                 parameter="intent",
                 status="Fatal",

@@ -223,13 +223,23 @@ def test_intent_does_not_change_older_findings_on_a_lead_call():
     assert not [f.parameter for f in a.findings if f.status in ("Fatal", "NonFatal")]
 
 
-def test_bot_confirming_the_refusal_after_a_decline_is_not_fatal():
-    """After "I don't need it", a bot that asks "you don't need this?" and hears "correct" confirms the refusal.
+def test_bot_checking_the_refusal_after_a_decline_is_not_fatal():
+    """After "I don't need it", a bot that asks "so you don't need this?" (labelled other) and hears "correct" passes.
 
-    Grading that confirm as Fatal would punish the correct close (Codex round 2, high).
+    Grading that check as Fatal would punish the correct close (Codex round 2, high).
+    """
+    call, led = _refusal(bt(2, "other"), bt(4, "other"), users=_u(1, 3, declined=True))
+    assert rule_intent(call, led).status == "Pass"
+
+
+def test_lead_confirm_after_a_decline_is_fatal_even_when_the_buyer_declines_again():
+    """A read-back such as "ten pumps, shall I post it?" after a decline is Fatal, even if the buyer says no again.
+
+    A rule that skipped any confirm followed by a decline let this lead confirmation pass (Codex round 3, high).
     """
     call, led = _refusal(bt(2, "confirm"), bt(4, "other"), users=_u(1, 3, declined=True))
-    assert rule_intent(call, led).status == "Pass"
+    f = rule_intent(call, led)
+    assert f.status == "Fatal" and f.onset_turn == 2
 
 
 def test_confirm_after_a_decline_with_no_second_decline_is_fatal():
@@ -255,3 +265,16 @@ def test_late_cancel_on_a_lead_scope_is_still_graded(scope):
     )
     f = rule_intent(call, led)
     assert f.status == "Fatal" and f.onset_turn == 4
+
+
+def test_ledger_prompt_defines_deferrals_and_the_refusal_check():
+    """The ledger prompt must name deferrals as declines and label a "you don't need this?" check as other.
+
+    Without these lines the labeller can miss a "call me later" refusal (false Pass) or label a refusal check as a
+    lead confirm (false Fatal). The rule trusts both labels.
+    """
+    from vaniloop import ledger
+
+    text = " ".join(ledger.INSTRUCTIONS.split())
+    for phrase in ('"not now"', '"maybe later"', '"call me later"', "does not.", "is other"):
+        assert phrase in text, phrase
