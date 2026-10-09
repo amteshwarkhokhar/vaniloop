@@ -1,6 +1,9 @@
 import json
 
-from vaniloop.fix import PromptPatch, _retry_kwargs, apply_patch, propose_patch, run_fix
+import pytest
+
+from vaniloop.dashboard import load_patches_doc
+from vaniloop.fix import PromptPatch, _retry_kwargs, apply_patch, propose_patch, run_fix, run_refix
 from vaniloop.llm import complete_json
 from vaniloop.models import AuditRecord, Cause, Evidence, Finding
 
@@ -401,3 +404,248 @@ def test_new_text_with_mixed_line_numbering_is_rejected_and_unnumbered_is_kept()
     p = propose_patch(cause(), [], PROMPT, llm=stub(old, plain))
     assert isinstance(p, PromptPatch)
     assert p.old_text == "line 10: rule text 10" and p.new_text == plain
+
+
+OLD_ANCHOR = "line 10: rule text 10"
+FIRST_NEW = "line 10: rule text 10 FIRST"
+
+
+def refix_files(tmp_path, decision="reject", gate_attempt=1, replay_rows=None, with_gate=True):
+    """Write synthetic causes, prompt, patches (attempt 1), gates and replays files; return the run_refix kwargs."""
+    kw = dict(
+        prompt_path=tmp_path / "prompt.md",
+        causes_path=tmp_path / "causes.json",
+        patches_path=tmp_path / "patches.json",
+        gates_path=tmp_path / "gates.jsonl",
+        replays_path=tmp_path / "replays.jsonl",
+    )
+    kw["prompt_path"].write_text(PROMPT)
+    kw["causes_path"].write_text(json.dumps({"causes": [cause().model_dump()]}))
+    first = PromptPatch(
+        cause_id="cause_qty_probing",
+        target_start_line=10,
+        target_end_line=10,
+        old_text=OLD_ANCHOR,
+        new_text=FIRST_NEW,
+        rationale="first rationale",
+        risk="low",
+    )
+    kw["patches_path"].write_text(json.dumps({"patches": [first.model_dump()], "rejected": []}))
+    gate = dict(
+        cause_id="cause_qty_probing",
+        decision=decision,
+        attempt=gate_attempt,
+        p_value=0.75,
+        alpha=0.05,
+        old_fail_rate=0.444,
+        new_fail_rate=0.556,
+        reason="new fails more than old",
+    )
+    if with_gate:
+        kw["gates_path"].write_text(
+            json.dumps({**gate, "cause_id": "cause_other", "decision": "ship"}) + "\n" + json.dumps(gate) + "\n"
+        )
+    rows = replay_rows if replay_rows is not None else [replay_row()]
+    kw["replays_path"].write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return kw
+
+
+def replay_row(
+    prompt_name="new",
+    role="target",
+    status="Fatal",
+    reason="Bot never asked the quantity",
+    bot="Okay noted",
+    attempt=1,
+    onset=2,
+):
+    """A replays.jsonl row of the shape prove writes: the replayed call and its audit."""
+    turns = [
+        dict(idx=0, speaker="bot", start_sec=0, end_sec=1, text="hello"),
+        dict(idx=1, speaker="user", start_sec=1, end_sec=2, text="need pipes"),
+        dict(idx=2, speaker="bot", start_sec=2, end_sec=3, text=bot),
+    ]
+    finding = dict(parameter="qty_probing", status=status, reason=reason, basis="observed", onset_turn=onset)
+    audit = dict(call_id="c__new_0", verdict=status, scope="bl_collection", findings=[finding])
+    return dict(
+        cause_id="cause_qty_probing",
+        attempt=attempt,
+        role=role,
+        prompt=prompt_name,
+        seed=0,
+        fork_turn=2,
+        ended_by="end_call",
+        call=dict(call_id="c__new_0", duration_sec=60, turns=turns),
+        audit=audit,
+    )
+
+
+def test_refix_sends_the_rejected_patch_gate_numbers_and_failing_new_replays(tmp_path):
+    """The refix message must hold the rejected patch, the gate reason, p-value and fail rates, and up to 4 failing
+    NEW-target replay lines of one line and 160 characters at most, all inside <data>. Passing replays, OLD replays,
+    guard replays and other attempts must stay out. Without this the model would guess and repeat the same edit."""
+    long = "x" * 300
+    rows = [
+        replay_row(reason=f"fatal reason {i}\nsecond line {long}", bot=f"bot line {i} {long}") for i in range(6)
+    ] + [
+        replay_row(prompt_name="old", reason="OLD-ARM-REASON"),
+        replay_row(role="guard", reason="GUARD-REASON"),
+        replay_row(status="Pass", reason="PASSING-REASON"),
+        replay_row(attempt=2, reason="OTHER-ATTEMPT-REASON"),
+    ]
+    kw = refix_files(tmp_path, replay_rows=rows)
+    calls: list = []
+    run_refix("cause_qty_probing", llm=stub("line 3: rule text 3", "line 3: other rule", calls), **kw)
+    system, user, _ = calls[0]
+    assert "did not pass the gate" in system and "different anchor or a different rule" in system
+    data = json.loads(user.split("<data>\n")[1].split("\n</data>")[0])
+    prev = data["previous_attempt"]
+    assert (prev["old_text"], prev["new_text"], prev["rationale"]) == (OLD_ANCHOR, FIRST_NEW, "first rationale")
+    assert (prev["gate_decision"], prev["p_value"], prev["old_fail_rate"], prev["new_fail_rate"]) == (
+        "reject",
+        0.75,
+        0.444,
+        0.556,
+    )
+    assert prev["gate_reason"] == "new fails more than old"
+    lines = prev["failing_replays"]
+    assert len(lines) == 4 and all(len(x) <= 160 and "\n" not in x for x in lines)
+    assert lines[0].startswith("fatal reason 0 second line") and "| bot: bot line 0 " in lines[0]
+    assert not {"OLD-ARM-REASON", "GUARD-REASON", "PASSING-REASON", "OTHER-ATTEMPT-REASON"} & set(user.split("\n\n")[0])
+
+
+def test_refix_stops_before_any_llm_call_without_a_rejecting_gate(tmp_path):
+    """A shipped gate, a missing gate row, a gate row of another attempt, a missing patch and an unknown cause must
+    each stop run_refix with SystemExit before any LLM call. Otherwise paid calls would rewrite a patch that works
+    or one that was never tested."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("the LLM was called")
+
+    cases = {
+        "shipped": dict(decision="ship"),
+        "no_gate": dict(with_gate=False),
+        "stale_gate": dict(gate_attempt=2),
+    }
+    for name, opts in cases.items():
+        (tmp_path / name).mkdir()
+        with pytest.raises(SystemExit):
+            run_refix("cause_qty_probing", llm=boom, **refix_files(tmp_path / name, **opts))
+    (tmp_path / "ok").mkdir()
+    kw = refix_files(tmp_path / "ok")
+    with pytest.raises(SystemExit):
+        run_refix("cause_unknown", llm=boom, **kw)
+    kw["causes_path"].write_text(json.dumps({"causes": [cause("cause_nopatch").model_dump()]}))
+    with pytest.raises(SystemExit):
+        run_refix("cause_nopatch", llm=boom, **kw)
+    assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW  # nothing was written
+
+
+def test_refix_accepts_an_inconclusive_gate(tmp_path):
+    """An inconclusive gate decision must be allowed to refix, like a reject. If it were refused, a patch the gate
+    could not judge would have no next step."""
+    kw = refix_files(tmp_path, decision="inconclusive")
+    r = run_refix("cause_qty_probing", llm=stub("line 3: rule text 3", "line 3: other rule"), **kw)
+    assert r["patches"][0]["attempt"] == 2
+    assert json.loads(kw["patches_path"].read_text())["history"][0]["decision"] == "inconclusive"
+
+
+def test_refix_refuses_a_repeat_of_the_rejected_new_text(tmp_path):
+    """A proposal whose new_text equals the rejected patch's new_text must give no new patch and leave patches.json
+    unchanged. A repeat would spend a full paid proof on the edit the gate already rejected."""
+    kw = refix_files(tmp_path)
+    before = kw["patches_path"].read_text()
+    r = run_refix("cause_qty_probing", llm=stub(OLD_ANCHOR, FIRST_NEW), **kw)
+    assert r["patches"] == [] and "repeats the rejected patch" in r["rejected"][0]["reason"]
+    assert kw["patches_path"].read_text() == before
+
+
+def test_refix_applies_the_same_checks_as_propose_patch(tmp_path):
+    """A refix proposal with an anchor that is missing or a diff over 15 lines must be refused like in a first fix.
+    A weaker check on the second try would let an unanchored patch reach the proof."""
+    kw = refix_files(tmp_path)
+    assert run_refix("cause_qty_probing", llm=stub("not in prompt", "x"), **kw)["patches"] == []
+    big_old = "\n".join(f"line {i}: rule text {i}" for i in range(1, 11))
+    big_new = "\n".join(f"changed {i}" for i in range(1, 11))
+    r = run_refix("cause_qty_probing", llm=stub(big_old, big_new), **kw)
+    assert r["patches"] == [] and "max 15" in r["rejected"][0]["reason"]
+
+
+def test_refix_keeps_history_and_stores_the_new_attempt(tmp_path):
+    """On success patches.json must keep the rejected patch in history with its attempt and gate decision, and hold
+    the new patch as the current one with attempt 2. Without history the owner loses what was tried, and without
+    the attempt number prove cannot tell the new patch from the old. The Fix view loader must still read the file."""
+    kw = refix_files(tmp_path)
+    r = run_refix("cause_qty_probing", llm=stub("line 3: rule text 3", "line 3: better rule"), **kw)
+    doc = json.loads(kw["patches_path"].read_text())
+    assert doc["rejected"] == [] and not list(tmp_path.glob("*.tmp"))
+    assert len(doc["patches"]) == 1 and doc["patches"][0] == r["patches"][0]
+    assert (doc["patches"][0]["attempt"], doc["patches"][0]["new_text"]) == (2, "line 3: better rule")
+    h = doc["history"][0]
+    assert (h["cause_id"], h["attempt"], h["decision"], h["new_text"]) == ("cause_qty_probing", 1, "reject", FIRST_NEW)
+    patches, _ = load_patches_doc(tmp_path)  # the dashboard ignores history and shows the current patch
+    assert [(p.new_text, p.attempt) for p in patches] == [("line 3: better rule", 2)]
+    # a second refix needs a gate row for attempt 2, and appends to history
+    kw["gates_path"].write_text(
+        kw["gates_path"].read_text()
+        + json.dumps(
+            dict(
+                cause_id="cause_qty_probing",
+                decision="reject",
+                attempt=2,
+                p_value=None,
+                old_fail_rate=0.4,
+                new_fail_rate=0.5,
+                reason="again",
+            )
+        )
+        + "\n"
+    )
+    run_refix("cause_qty_probing", llm=stub("line 5: rule text 5", "line 5: third"), **kw)
+    doc = json.loads(kw["patches_path"].read_text())
+    assert [x["attempt"] for x in doc["history"]] == [1, 2] and doc["patches"][0]["attempt"] == 3
+
+
+def test_patch_attempt_defaults_to_one():
+    """A patch row without an attempt field must load as attempt 1. Old patches.json files carry no attempt, and
+    they would fail to load or fail `prove --attempt 1` if the default changed."""
+    row = dict(
+        cause_id="c", target_start_line=1, target_end_line=1, old_text="a", new_text="b", rationale="r", risk="l"
+    )
+    assert PromptPatch(**row).attempt == 1
+
+
+def test_refix_keeps_a_parallel_write_to_another_cause_and_stops_on_a_changed_patch(tmp_path):
+    """When patches.json changes while the LLM call runs, run_refix must re-read it under a lock: a change to another
+    cause is kept, and a change to the refixed cause's own patch gives SystemExit and no write. A stale write would
+    erase the other run's patch and history."""
+    other = PromptPatch(cause_id="cause_other", target_start_line=5, target_end_line=5, old_text="line 5: rule text 5",
+                        new_text="line 5: other", rationale="r", risk="low")  # fmt: skip
+
+    def writes(edit):
+        def llm(system, user, **kw):
+            doc = json.loads(kw_["patches_path"].read_text())
+            edit(doc)
+            kw_["patches_path"].write_text(json.dumps(doc))
+            return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
+
+        return llm
+
+    kw_ = refix_files(tmp_path)
+    run_refix("cause_qty_probing", llm=writes(lambda d: d["patches"].append(other.model_dump())), **kw_)
+    doc = json.loads(kw_["patches_path"].read_text())
+    assert [(p["cause_id"], p["attempt"]) for p in doc["patches"]] == [("cause_qty_probing", 2), ("cause_other", 1)]
+    assert len(doc["history"]) == 1 and (tmp_path / "patches.json.lock").exists()
+
+    (tmp_path / "b").mkdir()
+    kw_ = refix_files(tmp_path / "b")
+
+    def change_own(d):
+        d["patches"].append(other.model_dump())
+        d["patches"][0]["new_text"] = "changed by a parallel run"
+
+    with pytest.raises(SystemExit, match="changed during refix"):
+        run_refix("cause_qty_probing", llm=writes(change_own), **kw_)
+    doc = json.loads(kw_["patches_path"].read_text())
+    assert [p["cause_id"] for p in doc["patches"]] == ["cause_qty_probing", "cause_other"]
+    assert doc["patches"][0]["new_text"] == "changed by a parallel run" and "history" not in doc

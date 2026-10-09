@@ -1,4 +1,4 @@
-"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|prove|grade-sample`."""
+"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|refix|prove|grade-sample`."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .fix import PATCHES_PATH, run_fix
+from .fix import PATCHES_PATH, run_fix, run_refix
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
@@ -149,6 +149,9 @@ def main(argv: list[str] | None = None) -> None:
     f = sub.add_parser("fix")
     f.add_argument("--prompt", required=True)
     f.add_argument("--top", type=int, default=3)
+    rf = sub.add_parser("refix")
+    rf.add_argument("--cause", required=True)
+    rf.add_argument("--prompt", required=True)
     pv = sub.add_parser("prove")
     pv.add_argument("--cause", required=True)
     pv.add_argument("--prompt", required=True)
@@ -158,6 +161,7 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--max-turns", type=int, default=12)
     pv.add_argument("--workers", type=int, default=1)
     pv.add_argument("--dry-run", action="store_true")
+    pv.add_argument("--attempt", type=int, default=1)
     g = sub.add_parser("grade-sample")
     g.add_argument("--n", type=int, default=20)
     args = ap.parse_args(argv)
@@ -172,6 +176,13 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")
+    elif args.cmd == "refix":
+        r = run_refix(args.cause, Path(args.prompt))
+        print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
+        for x in r["rejected"]:
+            print(f"  rejected {x['cause_id']}: {x['reason']}")
+        for p in r["patches"]:
+            print(f"  new patch for {p['cause_id']}: attempt {p['attempt']}; next: prove --attempt {p['attempt']}")
     elif args.cmd == "prove":
         out = run_prove(
             args.cause,
@@ -182,6 +193,7 @@ def main(argv: list[str] | None = None) -> None:
             max_turns=args.max_turns,
             workers=args.workers,
             dry_run=args.dry_run,
+            attempt=args.attempt,
         )
         print("\n".join(describe(out)))
     elif args.cmd == "grade-sample":
