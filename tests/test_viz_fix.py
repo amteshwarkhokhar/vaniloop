@@ -1,5 +1,6 @@
 """Fix drawings: the patch diff and the fix cards. Pure HTML, no Streamlit."""
 
+import html
 import re
 from pathlib import Path
 
@@ -190,3 +191,23 @@ def test_an_insert_next_to_repeated_words_starts_at_the_sentence_start():
     assert _words(patch_diff(_patch(target_end_line=69, old_text=new, new_text=old))) == [
         ("del", "Synthetic rule G: say the city once.")
     ]
+
+
+def test_word_marks_never_drop_duplicate_or_reorder_words_on_repeated_words():
+    """With the markup removed, each shown line equals the real line. Repeats and extra spaces survive.
+
+    Two slides that overlapped once drew "A C A C A" as "A CA C A C A", so the diff showed text the patch never had.
+    """
+    cases = [
+        ("A A", "A C A C A"),
+        ("A  A", "A  C  A  C  A"),
+        ("go A. go B.", "go A. go X. go B."),
+        ("x a a a y", "x a b a a a c y"),
+    ]
+    for old, new in cases:
+        out = patch_diff(_patch(target_end_line=69, old_text=old, new_text=new))
+        shown = {
+            k: t for k, t in re.findall(r'<div class="row (del|add) part">.*?<span class="tx">(.*?)</span></div>', out)
+        }
+        plain = {k: html.unescape(re.sub(r"</?(?:ins|del)[^>]*>", "", t)) for k, t in shown.items()}
+        assert plain == {"del": old, "add": new}, (old, new, shown)

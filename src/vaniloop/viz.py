@@ -473,8 +473,12 @@ def _word_diff(old: str, new: str) -> tuple[str, str] | None:
     ops = [o for o in matcher.get_opcodes() if o[0] != "equal"]
     if not ops or matcher.ratio() < 0.5:
         return None
-    gone = [_slide(a, i1, i2) if op == "delete" else (i1, i2) for op, i1, i2, _, _ in ops if op != "insert"]
-    came = [_slide(b, j1, j2) if op == "insert" else (j1, j2) for op, _, _, j1, j2 in ops if op != "delete"]
+    gone = [(i1, i2) for op, i1, i2, _, _ in ops if op != "insert"]
+    came = [(j1, j2) for op, _, _, j1, j2 in ops if op != "delete"]
+    if len(ops) == 1 and ops[0][0] == "insert":  # slide only a lone insert or delete: two slides can overlap
+        came = [_slide(b, *came[0])]
+    elif len(ops) == 1 and ops[0][0] == "delete":
+        gone = [_slide(a, *gone[0])]
     return _mark_words(old, a_spans, gone, "del"), _mark_words(new, b_spans, came, "ins")
 
 
