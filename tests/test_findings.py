@@ -190,6 +190,29 @@ def test_f2_idx_rules():
     assert ledger._normalise(d, call)["product_changed_at_turn"] == 3
 
 
+def test_normalise_declined_accepts_true_and_the_string_true_only():
+    """The declined label must pass through as True for a real true or the string "true", and be False otherwise.
+
+    A string "false" read as truthy would give a false Fatal on intent. A string "true" dropped to False would hide a
+    late cancel and give a false Pass (Codex round 2).
+    """
+    call = mk_call()
+    d = {
+        "scope": "refusal",
+        "user_turns": [
+            {"idx": 1, "declined": True},
+            {"idx": 3, "declined": "false"},
+            {"idx": 5, "declined": 1},
+            {"idx": 7},
+            {"idx": 9, "declined": " True "},
+        ],
+    }
+    out = ledger._normalise(d, call)
+    got = [(u["idx"], u["declined"]) for u in out["user_turns"]]
+    assert got == [(1, True), (3, False), (5, False), (7, False), (9, True)]
+    assert UserTurnLabel(idx=1).declined is False
+
+
 def test_f2_evidence_resolves_by_idx_field_and_never_raises():
     """Regression for review round 1 finding: evidence must resolve by the turn idx field, not by list position.
 

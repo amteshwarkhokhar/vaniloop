@@ -28,6 +28,8 @@ MIN_COVERAGE = 0.8
 LOOP_SLOTS = ("product", "quantity", "unit", "name", "city")
 ENRICH_FORBIDDEN_SLOTS = ("quantity", "unit", "spec", "name", "city", "handoff")  # collecting for the new product
 BL_SCOPES = ("bl_collection", "oncall_astbuy")
+INTENT_COLLECT_SLOTS = ("quantity", "unit", "spec", "confirm", "handoff")  # a bot turn that collects for a lead
+INTENT_VALUE_SLOTS = ("product", "quantity", "unit", "spec")  # a buyer answer that renews consent
 # Assumption: quantity is a defined field for every category in a BL call. If False, qty_probing is Unknown.
 QTY_ALWAYS_DEFINED = True
 QTY_MINOR_ABS = 20.0  # matrix minor band: abs diff <= 20 AND relative diff <= 20%
@@ -455,6 +457,58 @@ def _handoff_turn(led: Ledger) -> int | None:
     return h[0] if h else None
 
 
+def rule_intent(call: CallRecord, led: Ledger) -> Finding:
+    """Matrix row "Outcome Accuracy / buying intent" (always Fatal). A buyer who declines must not be collected into a
+    lead. The ledger labels the declining user turn (`declined`). On a refusal or lead scope with a declining turn,
+    walk the turns in idx order with one state flag:
+    - a user turn with declined=True sets the state to declined;
+    - a user turn that gives a product, quantity, unit or spec value clears it (the buyer renewed consent);
+    - the first bot turn with slot quantity, unit, spec, confirm or handoff while the state is declined is Fatal,
+      and that turn is the onset. The ledger labels a bot check that the buyer needs nothing ("so you don't need
+      this?") as slot other, so only a lead read-back or a post request is a confirm;
+    - a bot ask before any decline is not a fault, because VANI's normal opening asks before the buyer refuses.
+    The walk runs on lead scopes too, because a late cancel need not change the whole-call scope.
+    With no declining turn: refusal scope is Unknown, lead scopes Pass, other scopes are NotApplicable.
+    Unknown forces NeedsReview only when no Fatal or NonFatal finding outranks it.
+    """
+    walk = led.scope == "refusal" or led.scope in BL_SCOPES
+    if not walk or not any(u.declined for u in led.user_turns):
+        if led.scope == "refusal":
+            return Finding(
+                parameter="intent",
+                status="Unknown",
+                basis="spoken_proxy",
+                reason="refusal scope but no declining turn is labelled",
+            )
+        if led.scope in BL_SCOPES:
+            return Finding(parameter="intent", status="Pass", reason="lead call, no refusal", basis="spoken_proxy")
+        return Finding(parameter="intent", status="NotApplicable", reason=f"scope is {led.scope}", basis="spoken_proxy")
+    users = sorted(led.user_turns, key=lambda u: u.idx)
+    turns = [("user", u.idx, u) for u in users] + [("bot", b.idx, b) for b in led.bot_turns]
+    declined_at: int | None = None
+    for kind, idx, t in sorted(turns, key=lambda x: x[1]):
+        if kind == "user":
+            if t.declined:
+                declined_at = idx
+            elif t.gave_value_for in INTENT_VALUE_SLOTS:
+                declined_at = None
+        elif declined_at is not None and t.slot in INTENT_COLLECT_SLOTS:
+            return Finding(
+                parameter="intent",
+                status="Fatal",
+                basis="spoken_proxy",
+                onset_turn=idx,
+                evidence=[_ev(call, declined_at), _ev(call, idx)],
+                reason="buyer declined, but the bot went on to collect or confirm a lead",
+            )
+    return Finding(
+        parameter="intent",
+        status="Pass",
+        basis="spoken_proxy",
+        reason="buyer declined and the bot did not collect after it",
+    )
+
+
 def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
     if led.scope not in BL_SCOPES:
         return Finding(
@@ -819,6 +873,7 @@ def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
 
 
 RULES = [
+    rule_intent,
     rule_category_isq,
     rule_product_accuracy,
     rule_qty_probing,

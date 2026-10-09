@@ -49,6 +49,11 @@ SPEECH_OWNER = ("speech", "likely", None, None)  # every channel cause: the line
 
 # parameter -> (name, description, type)
 KNOWN = {
+    "intent": (
+        "Refusal call collected into a lead",
+        "Buyer said no or has no requirement, but the bot confirmed or handed off a Buy Lead.",
+        "prompt",
+    ),
     "category_isq": (
         "Spec questions from the wrong category",
         "Bot asks spec questions that belong to another product category.",
