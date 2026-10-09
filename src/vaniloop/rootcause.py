@@ -4,6 +4,11 @@ For each root call of a cause, replay the OLD prompt K times with the call's own
 clean one, on the same seeds. The cause parameter is judged after the fork, as the gate does (gate._trial). A fault
 that shows only under noise is `channel`. A classifier: no gate decision, no patch.
 
+The experiment is buyer text masking: in the noisy arm a share of buyer turns reaches the bot as `[unclear audio]`.
+It never recreates a wrong STT value (a misheard number or word), so `channel` means "fails when buyer text is
+masked" and says nothing about audio attribution beyond that. Every saved row carries `"simulation":
+"buyer_text_masking"` and the CLI output says the same.
+
 Labels, with K seeds per arm, `f` = failed trials and `u` = unresolved trials (no evidence) of an arm:
   channel       noisy f > K/2 (most seeds) and clean f + u <= K/3 (none or few)
   not_channel   noisy f > K/2 and clean f > K/2: it fails with clean audio too, a candidate prompt fault
@@ -36,6 +41,7 @@ ROOTCAUSE_PATH = AUDITS_PATH.parent / "rootcause.jsonl"
 DEFAULT_PROMPT = AUDITS_PATH.parents[1] / "data" / "reference" / "vani_prompt_sarvam.md"
 CHANNEL_CAUSE_PREFIX = "cause_channel_"
 LABELS = ("channel", "not_channel", "not_reproduced", "unresolved")
+SIMULATION = "buyer_text_masking"  # what the noisy arm simulates; saved on every row and printed by the CLI
 
 # The noisy arm must fail on MORE than this share of the K seeds ("most"); the clean arm may fail (or be unresolved)
 # on AT MOST this share ("none or few"). Fractions are compared on integers, so no float rounding decides a label.
@@ -110,7 +116,7 @@ def _run_call(
         for arm, rate in (("noisy", noisy_rate), ("clean", 0.0)):
             res = replay_fn(call, ledger, fork, old_prompt, seed, rate)
             trial = _trial(call.call_id, "old", seed, res, audit_fn, parameter)
-            counts[arm][0] += trial.failed
+            counts[arm][0] += trial.failed and not trial.unresolved  # an invalid trial is no evidence either way
             counts[arm][1] += trial.unresolved
     (nf, nu), (cf, cu) = counts["noisy"], counts["clean"]
     return {
@@ -197,7 +203,6 @@ def run_rootcause(
     replay_fn = replay_fn or real_channel_replay_fn(max_turns)
     audit_fn = audit_fn or real_audit_fn
     costs_before = len(read_jsonl(llm.COSTS_PATH))
-    rows: list[dict] = []
 
     def work(item: Item) -> dict:
         call, ledger, fork = item
@@ -214,12 +219,14 @@ def run_rootcause(
     try:
         futures = [pool.submit(work, item) for item in items]
         for future in as_completed(futures):
-            rows.append(future.result())
+            future.result()  # re-raises a budget stop
     finally:  # a stopped run must not start the calls still queued, and keeps the rows it finished
         pool.shutdown(wait=True, cancel_futures=True)
-        done = sorted(rows, key=lambda r: r["call_id"])
-        _write_rows(out_path, cause_id, [{"cause_id": cause_id, "parameter": parameter, **r} for r in done])
-    rows.sort(key=lambda r: r["call_id"])
+        # read after shutdown: a worker that finishes while the pool stops still has its row kept
+        rows = [f.result() for f in futures if f.done() and not f.cancelled() and f.exception() is None]
+        rows.sort(key=lambda r: r["call_id"])
+        saved = [{"cause_id": cause_id, "parameter": parameter, "simulation": SIMULATION, **r} for r in rows]
+        _write_rows(out_path, cause_id, saved)
     return {"plan": plan, "rows": rows, "skipped": skipped, "cost_usd": _run_cost(costs_before, plan)}
 
 
@@ -227,6 +234,10 @@ def describe_rootcause(cause_id: str, out: dict) -> list[str]:
     """Text lines for the CLI: the plan on a dry run, the labels after a real run."""
     plan: Plan = out["plan"]
     lines = [f"cause {cause_id} (parameter {plan.parameter}), k={plan.k}, max_turns={plan.max_turns}"]
+    lines.append(
+        f"simulation: {SIMULATION}: the noisy arm masks buyer text as [unclear audio] and does not recreate wrong STT "
+        "values, so `channel` is scoped to that simulation"
+    )
     lines += [f"skipped {cid}: {why}" for cid, why in out["skipped"].items()]
     if not out["rows"]:
         lines += [f"  call {c.call_id} fork_turn={fork}" for c, _, fork in plan.targets]

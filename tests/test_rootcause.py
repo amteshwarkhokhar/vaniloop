@@ -64,10 +64,11 @@ def write_inputs(tmp_path, causes=None):
 class Stubs:
     """Stub replay and audit. `mode` decides when the replayed call fails the cause parameter after the fork:
     noisy_only (only a replay with unclear_rate > 0), always, never, pre_fork (a Fatal finding before the fork).
-    `log` keeps (call id, seed, unclear_rate, prompt) per replay call."""
+    `invalid_arms` names the arms whose replay ends as invalid_output. `log` keeps (call id, seed, unclear_rate,
+    prompt) per replay call."""
 
-    def __init__(self, mode="noisy_only", noisy_fail_seeds=None):
-        self.mode, self.noisy_fail_seeds = mode, noisy_fail_seeds
+    def __init__(self, mode="noisy_only", noisy_fail_seeds=None, invalid_arms=()):
+        self.mode, self.noisy_fail_seeds, self.invalid_arms = mode, noisy_fail_seeds, invalid_arms
         self.log = []
         self.lock = threading.Lock()  # --workers calls the stubs from a thread pool
 
@@ -77,7 +78,8 @@ class Stubs:
         arm = "noisy" if unclear_rate > 0 else "clean"
         turns = [*call.turns[:fork], Turn(idx=fork, speaker="bot", start_sec=1, end_sec=2, text=f"reply {seed}")]
         rec = CallRecord(call_id=f"{call.call_id}__{arm}_{seed}", duration_sec=60, turns=turns)
-        return ReplayResult(call=rec, fork_turn=fork, ended_by="end_call")
+        ended_by = "invalid_output" if arm in self.invalid_arms else "end_call"
+        return ReplayResult(call=rec, fork_turn=fork, ended_by=ended_by)
 
     def audit_fn(self, call):
         arm, seed = call.call_id.rsplit("__", 1)[1].split("_")
@@ -162,6 +164,24 @@ def test_label_thresholds(noisy, clean, k, nu, cu, expected):
     """The label thresholds must be exactly: noisy fails on more than half of K, clean fails plus unresolved at most
     a third of K. A loose threshold would label a flaky call channel and send a prompt fault away unfixed."""
     assert rootcause.label_call(noisy, clean, k, nu, cu) == expected
+
+
+def test_invalid_noisy_trials_are_not_a_channel_fault(tmp_path):
+    """A noisy arm whose replays all end as invalid_output must be unresolved, not channel, even when the clean arm
+    passes. An invalid trial is no evidence, so counting it as a failure would blame the audio for malformed output."""
+    out, _, _ = run(tmp_path, Stubs("never", invalid_arms=("noisy",)))
+    assert set(labels(out).values()) == {"unresolved"}
+    row = out["rows"][0]
+    assert (row["noisy_fails"], row["noisy_unresolved"], row["clean_fails"]) == (0, 3, 0)
+
+
+def test_invalid_trials_in_both_arms_are_not_not_channel(tmp_path):
+    """Replays that end as invalid_output in both arms must be unresolved, not not_channel. Counting them as failures
+    would flag a prompt fault that only malformed model output produced."""
+    out, _, _ = run(tmp_path, Stubs("never", invalid_arms=("noisy", "clean")))
+    assert set(labels(out).values()) == {"unresolved"}
+    row = out["rows"][0]
+    assert (row["noisy_fails"], row["clean_fails"], row["noisy_unresolved"], row["clean_unresolved"]) == (0, 0, 3, 3)
 
 
 def test_judges_the_cause_parameter_after_the_fork(tmp_path):
@@ -256,6 +276,36 @@ def test_a_budget_stop_ends_the_run_and_keeps_finished_rows(tmp_path):
         rootcause.run_rootcause(CAUSE, pf, k=3, replay_fn=broke, audit_fn=Stubs().audit_fn, **paths)
     rows = [json.loads(x) for x in paths["out_path"].read_text().splitlines()]
     assert [r["call_id"] for r in rows] == ["a1", "a2"]
+
+
+def test_a_concurrent_budget_stop_keeps_calls_that_finish_during_shutdown(tmp_path):
+    """With several workers, a call that finishes while the pool shuts down after a budget stop must still be
+    written. Dropping it would lose a call that was already paid for."""
+    stop_raised = threading.Event()
+    stubs = Stubs()
+
+    def fake_llm_replay(call, ledger, fork, bot_prompt, seed, rate):
+        if call.call_id == "a3":
+            stop_raised.set()
+            raise llm.BudgetExceeded("cap")
+        assert stop_raised.wait(timeout=10)  # a1 and a2 are still running when the budget stop is raised
+        return stubs.replay_fn(call, ledger, fork, bot_prompt, seed, rate)
+
+    pf, paths = write_inputs(tmp_path)
+    with pytest.raises(llm.BudgetExceeded):
+        rootcause.run_rootcause(CAUSE, pf, k=3, workers=3, replay_fn=fake_llm_replay, audit_fn=stubs.audit_fn, **paths)
+    rows = [json.loads(x) for x in paths["out_path"].read_text().splitlines()]
+    assert [r["call_id"] for r in rows] == ["a1", "a2"]
+
+
+def test_rows_and_cli_say_the_experiment_is_buyer_text_masking(tmp_path, capsys):
+    """Every saved row must carry simulation buyer_text_masking and the CLI output must say it. The noisy arm only
+    masks buyer text and never recreates a wrong STT value, so a bare `channel` label would claim too much."""
+    out, paths, _ = run(tmp_path)
+    rows = [json.loads(x) for x in paths["out_path"].read_text().splitlines()]
+    assert rows and {r["simulation"] for r in rows} == {"buyer_text_masking"}
+    text = "\n".join(rootcause.describe_rootcause(CAUSE, out))
+    assert "simulation: buyer_text_masking" in text and "does not recreate wrong STT" in text
 
 
 def test_workers_give_the_same_rows(tmp_path):
