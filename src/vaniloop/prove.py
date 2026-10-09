@@ -135,14 +135,20 @@ def select_guards(
     return [(calls[c], ledgers[c], forks[c]) for c in pick(list(forks), n)]
 
 
-def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path) -> tuple[str, str]:
-    """(old, new) prompt text. Stop with SystemExit when the cause has no patch or its anchor does not fit."""
+def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path, attempt: int = 1) -> tuple[str, str]:
+    """(old, new) prompt text. Stop with SystemExit when the cause has no patch, the patch is not this attempt or
+    its anchor does not fit."""
     path = Path(patches_path)
     doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     rows = [x for x in doc.get("patches", []) if x.get("cause_id") == cause_id]
     patch = PromptPatch.model_validate(rows[-1]) if rows else None  # the latest patch for the cause
     if patch is None:
         raise SystemExit(f"no patch for {cause_id} in {patches_path}; run `pipeline fix` first")
+    if patch.attempt != attempt:
+        raise SystemExit(
+            f"the current patch for {cause_id} is attempt {patch.attempt}, not {attempt}; "
+            f"pass --attempt {patch.attempt}"
+        )
     old = prompt.load(prompt_path)
     n = _count_overlapping(old, patch.old_text)
     if n != 1:
@@ -270,7 +276,7 @@ def run_prove(
         raise SystemExit(f"--k must be at least 2, got {k}")
     if workers < 1:
         raise SystemExit(f"--workers must be at least 1, got {workers}")
-    old, new = build_prompts(cause_id, prompt_path, patches_path)
+    old, new = build_prompts(cause_id, prompt_path, patches_path, attempt)
     calls = {
         r["call_id"]: CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)
     }

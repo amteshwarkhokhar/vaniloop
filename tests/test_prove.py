@@ -167,6 +167,42 @@ def test_missing_or_misfitting_patch_stops_before_any_llm_call(tmp_path):
         assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
 
 
+def test_prove_attempt_must_match_the_current_patch(tmp_path):
+    """`prove --attempt N` must stop with SystemExit, before any replay, when the current patch has another attempt.
+    Without it a proof of the old patch could be recorded as attempt 2, and the gate row would name the wrong patch.
+    A patch without an attempt field is attempt 1, and the matching attempt runs and is written to the rows."""
+    pf, paths = write_inputs(tmp_path)
+    for attempt in (2, 3):
+        with pytest.raises(SystemExit, match="attempt 1"):
+            prove.run_prove(CAUSE, pf, replay_fn=raising, audit_fn=raising, attempt=attempt, **paths)
+    assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
+    doc = json.loads(paths["patches_path"].read_text())
+    doc["patches"][0]["attempt"] = 2
+    paths["patches_path"].write_text(json.dumps(doc))
+    with pytest.raises(SystemExit, match="attempt 2"):
+        prove.run_prove(CAUSE, pf, replay_fn=raising, audit_fn=raising, **paths)  # the default attempt is 1
+    stubs = Stubs()
+    out = prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, replay_fn=stubs.replay_fn, audit_fn=stubs.audit_fn,
+                          attempt=2, **paths)  # fmt: skip
+    assert out.result.attempt == 2
+    assert {json.loads(ln)["attempt"] for ln in paths["replays_path"].read_text().splitlines()} == {2}
+
+
+def test_pipeline_refix_subcommand_passes_its_options_and_prints(monkeypatch, capsys):
+    """`pipeline refix` must pass the cause and prompt path to run_refix and print the new attempt and the next
+    command. A dropped option would refix the wrong cause or read the wrong prompt."""
+    seen = {}
+
+    def fake(cause, prompt_path, **kw):
+        seen.update(cause=cause, prompt=str(prompt_path), **kw)
+        return {"patches": [dict(cause_id=cause, attempt=2)], "rejected": []}
+
+    monkeypatch.setattr(pipeline, "run_refix", fake)
+    pipeline.main(["refix", "--cause", CAUSE, "--prompt", "p.md"])
+    assert seen == dict(cause=CAUSE, prompt="p.md")
+    assert "prove --attempt 2" in capsys.readouterr().out
+
+
 def test_run_records_gate_result_and_every_replay(tmp_path):
     """One gates row and one replays row per replay must be written, with role, prompt, seed and a matching audit.
     Without them the demo cannot show which replay of which call under which prompt led to a decision."""
@@ -283,10 +319,12 @@ def test_pipeline_prove_subcommand_passes_its_options_and_prints(monkeypatch, ca
     monkeypatch.setattr(pipeline, "run_prove", fake)
     argv = ["prove", "--cause", CAUSE, "--prompt", "p.md", "--n", "4", "--k", "2", "--guards", "6", "--max-turns", "9"]
     pipeline.main([*argv, "--workers", "3", "--dry-run"])
-    assert seen == dict(cause=CAUSE, prompt="p.md", n=4, k=2, guards=6, max_turns=9, workers=3, dry_run=True)
+    assert seen == dict(cause=CAUSE, prompt="p.md", n=4, k=2, guards=6, max_turns=9, workers=3, dry_run=True, attempt=1)
     assert f"cause {CAUSE}" in capsys.readouterr().out
     pipeline.main(argv)
     assert seen["workers"] == 1 and seen["dry_run"] is False  # the default keeps today's sequential run
+    pipeline.main([*argv, "--attempt", "2"])
+    assert seen["attempt"] == 2
 
 
 def test_workers_warm_every_first_round_replay_before_the_gate_starts(tmp_path, capsys):
