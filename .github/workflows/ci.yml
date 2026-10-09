@@ -33,7 +33,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: sudo apt-get install -y ffmpeg
+      # ffprobe only. Without --no-install-recommends apt pulls ~100 packages (GPU drivers, speech models)
+      # and a slow mirror once stalled the job past its 10-minute limit.
+      - run: sudo apt-get install -y --no-install-recommends ffmpeg
+        timeout-minutes: 4
       - run: uv sync
       - run: uv run pytest -q --cov=vaniloop --cov-report=term-missing --cov-fail-under=80
 
