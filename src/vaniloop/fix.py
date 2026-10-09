@@ -26,6 +26,7 @@ GATES_PATH = ROOT / "runs" / "gates.jsonl"  # same files as prove.py; fix cannot
 REPLAYS_PATH = ROOT / "runs" / "replays.jsonl"
 TICKETS_DIR = ROOT / "runs" / "tickets"
 TICKET_TYPES = ("tool", "data")  # suspected_type values that a prompt edit cannot fix: they get a ticket, no patch
+AUDIO_PARAMETERS = {"dead_air"}  # judged from audio silences: a delay is a runtime issue, a text replay has none
 MAX_CHANGED_LINES = 15
 MAX_ATTEMPTS = 2  # patch attempts per cause; prove gates each at alpha / MAX_ATTEMPTS (Bonferroni over the looks)
 MAX_EXAMPLES = 3  # evidence quotes sent per cause
@@ -187,6 +188,8 @@ def propose_patch(
 
     if cause.type == "channel":  # bad audio is never patched, whatever its status says (#71)
         return reject("channel cause: bad audio is not fixed with a prompt patch")
+    if cause.parameter in AUDIO_PARAMETERS:  # prove cannot gate it, so a patch would be unprovable
+        return reject(f"{cause.parameter} is an audio-timing cause: a delay is a runtime issue, not a prompt patch")
     try:
         system = SYSTEM if previous is None else SYSTEM + REFIX_SYSTEM
         out = llm(system, _user_message(cause, examples, prompt_text, previous), **_retry_kwargs(llm))
@@ -242,14 +245,17 @@ def apply_patch(prompt_text: str, patch: PromptPatch) -> str:
 def route(cause: Cause) -> tuple[str, str]:
     """Decide what the fix stage does with a cause. Returns (action, why); action is patch, ticket or watch.
 
-    watch: a channel cause (bad audio), or a status outside FIXABLE_STATUSES (outlier, single_category, watch,
-    isolated). Neither a patch nor a ticket is written.
+    watch: a channel cause (bad audio), an audio-timing cause (dead_air: a delay is a runtime issue and prove has no
+    audio to judge it), or a status outside FIXABLE_STATUSES (outlier, single_category, watch, isolated). Neither a
+    patch nor a ticket is written. run_fix also moves a patch cause with no usable evidence here.
     ticket: a fixable cause whose suspected_type is tool or data. Evidence goes to runs/tickets, no patch.
-    patch: every other fixable cause. That includes flow_logic causes such as looping and dead_air, because
-    `type` alone does not say the prompt is innocent: only suspected_type tool or data does.
+    patch: every other fixable cause. That includes flow_logic causes such as looping, because `type` alone does
+    not say the prompt is innocent: only suspected_type tool or data does.
     """
     if cause.type == "channel":
         return "watch", "channel cause: bad audio"
+    if cause.parameter in AUDIO_PARAMETERS:
+        return "watch", f"{cause.parameter}: a delay is a runtime issue, not a prompt issue"
     if cause.status not in FIXABLE_STATUSES:
         return "watch", f"status {cause.status}"
     if cause.suspected_type in TICKET_TYPES:
@@ -278,6 +284,15 @@ def require_patchable(cause_id: str, causes_path: Path) -> None:
     """require_fixable (status, channel) plus require_not_ticket (tool or data). Both stop before any LLM call."""
     require_not_ticket(cause_id, causes_path)
     require_fixable(cause_id, causes_path)
+
+
+def require_not_audio(cause: Cause) -> None:
+    """Stop with SystemExit when the cause is judged from audio (dead_air): no patch, no refix, no gate run."""
+    if cause.parameter in AUDIO_PARAMETERS:
+        raise SystemExit(
+            f"{cause.cause_id} is an audio-timing cause ({cause.parameter}): a delay is a runtime issue, "
+            "so it takes no patch, no refix and no gate run"
+        )
 
 
 def _ticket_quote(text: str) -> str:
@@ -345,12 +360,23 @@ def run_fix(
 ) -> dict:
     """Route each cause (see `route`): patch the first top_n patch causes, write a ticket per tool or data cause.
 
+    A patch cause with no usable evidence (no member call has a failing quote in the audits) is watched instead.
+
     A dry run only returns {"plan": [...]}: one row per cause with its action, no LLM call and no file written.
     Otherwise returns {"patches", "rejected", "tickets", "watched"} (the last two are lists of cause ids).
     """
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
     causes = [Cause.model_validate(c) for c in doc.get("causes", [])]
-    routed = [(c, *route(c)) for c in causes]
+    audits = {a.call_id: a for a in load_audits(Path(audits_path))}
+    examples: dict[str, list[str]] = {}
+    routed = []
+    for c in causes:
+        action, why = route(c)
+        if action == "patch":
+            examples[c.cause_id] = evidence_examples(c, audits)
+            if not examples[c.cause_id]:  # no quote to anchor a prompt edit on: do not spend an LLM call on a guess
+                action, why = "watch", "no usable evidence: no member call has a failing quote in the audits"
+        routed.append((c, action, why))
     out = Path(out_path)
     existing = _read_doc(out)
     held: dict[str, int] = {}
@@ -369,7 +395,6 @@ def run_fix(
                  "suspected_type": c.suspected_type, "why": why}
             )  # fmt: skip
         return {"plan": plan}
-    audits = {a.call_id: a for a in load_audits(Path(audits_path))}
     tickets = [c for c, action, _ in routed if action == "ticket"]
     if tickets:
         category_of = category_of or _default_category_of(Path(causes_path).parent)
@@ -383,7 +408,7 @@ def run_fix(
         if cause.cause_id in held:  # a rerun must not reset attempts or drop history: only refix moves a patch on
             print(f"cause {cause.cause_id} already has attempt {held[cause.cause_id]}; use refix")
             continue
-        p = propose_patch(cause, evidence_examples(cause, audits), prompt_text, llm=llm, rejected=rejected)
+        p = propose_patch(cause, examples[cause.cause_id], prompt_text, llm=llm, rejected=rejected)
         if p is not None:
             patches.append(p)
     lock_path = out.with_name(out.name + ".lock")
@@ -513,6 +538,7 @@ def run_refix(
     if cause is None:
         raise SystemExit(f"{cause_id} is not in {causes_path}")
     require_fixable(cause_id, Path(causes_path))  # a demoted cause keeps its old patch but takes no new one
+    require_not_audio(cause)  # prove cannot gate it, so a second patch could never be proven
     previous = {
         "old_text": current.old_text,
         "new_text": current.new_text,

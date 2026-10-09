@@ -3,7 +3,16 @@ import json
 import pytest
 
 from vaniloop.dashboard import load_patches_doc
-from vaniloop.fix import MAX_ATTEMPTS, PromptPatch, _retry_kwargs, apply_patch, propose_patch, run_fix, run_refix
+from vaniloop.fix import (
+    MAX_ATTEMPTS,
+    PromptPatch,
+    _retry_kwargs,
+    apply_patch,
+    propose_patch,
+    route,
+    run_fix,
+    run_refix,
+)
 from vaniloop.llm import complete_json
 from vaniloop.models import AuditRecord, Cause, Evidence, Finding
 
@@ -18,7 +27,13 @@ def cause(cid="cause_qty_probing", status="ranked"):
         type="prompt",
         parameter="qty_probing",
         status=status,
+        fatal_calls=[f"call_{cid}"],  # the member call whose audit holds the evidence quote: see ev_audits
     )
+
+
+def ev_audits(causes):
+    """One audit per cause, for the member call that `cause()` and `typed_cause()` name, with one evidence quote."""
+    return [audit(f"call_{c.cause_id}", c.parameter, ["evidence quote"], status="Fatal") for c in causes]
 
 
 def stub(old, new, calls=None):
@@ -123,13 +138,7 @@ def test_run_fix_ranked_only_and_top_n(tmp_path):
     """
     # watch causes sit before and between ranked ones: a naive ranked[:top_n] would pick them.
     causes = [cause("watch0", "watch"), cause("c0"), cause("watch1", "watch"), cause("c1"), cause("c2"), cause("c3")]
-    cp, pp, op = tmp_path / "causes.json", tmp_path / "prompt.md", tmp_path / "out" / "patches.json"
-    cp.write_text(
-        json.dumps(
-            {"denominator": 5, "audited_total": 5, "needs_review": 0, "causes": [c.model_dump() for c in causes]}
-        )
-    )
-    pp.write_text(PROMPT)
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), causes, ev_audits(causes))
 
     seen: list = []
 
@@ -139,7 +148,7 @@ def test_run_fix_ranked_only_and_top_n(tmp_path):
                 seen.append(c.cause_id)
         return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
 
-    r = run_fix(cp, pp, op, top_n=2, llm=llm)
+    r = run_fix(cp, pp, op, top_n=2, llm=llm, audits_path=ap)
     doc = json.loads(op.read_text())
     assert seen == ["c0", "c1"]  # watch causes are never sent to the LLM
     assert [p["cause_id"] for p in doc["patches"]] == ["c0", "c1"] == [p["cause_id"] for p in r["patches"]]
@@ -155,10 +164,8 @@ def test_run_fix_preserves_crlf_prompt(tmp_path):
     crlf = PROMPT.replace("\n", "\r\n")
     old = "line 10: rule text 10\r\nline 11: rule text 11"
     new = "line 10: rule text 10\r\nAlways ask.\r\nline 11: rule text 11"
-    cp, pp, op = tmp_path / "causes.json", tmp_path / "prompt.md", tmp_path / "out" / "patches.json"
-    cp.write_text(json.dumps({"causes": [cause().model_dump()]}))
-    pp.write_bytes(crlf.encode("utf-8"))  # universal-newline read would turn CRLF into LF
-    r = run_fix(cp, pp, op, llm=stub(old, new))
+    cp, pp, ap, op = write_run(tmp_path, crlf.encode("utf-8"), [cause()], ev_audits([cause()]))  # bytes, not text
+    r = run_fix(cp, pp, op, llm=stub(old, new), audits_path=ap)
     assert r["rejected"] == []
     assert r["patches"][0]["old_text"] == old
     assert "\r\n" in apply_patch(crlf, PromptPatch(**r["patches"][0]))
@@ -263,7 +270,7 @@ def test_anchor_copied_without_boms_or_escapes_is_found(tmp_path):
     assert propose_patch(cause(), [], raw, llm=stub(old, new), rejected=rej) is None
     assert "not found" in rej[0]["reason"]
 
-    cp, pp, ap, op = write_run(tmp_path, raw.encode("utf-8"), [cause()])
+    cp, pp, ap, op = write_run(tmp_path, raw.encode("utf-8"), [cause()], ev_audits([cause()]))
     r = run_fix(cp, pp, op, llm=stub(old, new), audits_path=ap)
     assert r["rejected"] == []
     patch = PromptPatch(**r["patches"][0])
@@ -338,25 +345,53 @@ def test_anchor_from_line_1723_onward_is_rejected(tmp_path):
     A patch into a later variant would edit text that 100 of 103 audited calls never use.
     """
     raw = "\n".join(f"row {i}" for i in range(1, 1801)).encode("utf-8")
-    cp, pp, ap, op = write_run(tmp_path, raw, [cause()])
+    cp, pp, ap, op = write_run(tmp_path, raw, [cause()], ev_audits([cause()]))
     r = run_fix(cp, pp, op, llm=stub("row 1723", "row 1723 changed"), audits_path=ap)
     assert r["patches"] == []
     assert "not found" in r["rejected"][0]["reason"]
 
 
-def test_run_fix_without_audits_file_still_runs(tmp_path):
-    """A missing audits file must give no examples, not a crash.
+def test_run_fix_without_audits_file_watches_the_cause_and_makes_no_llm_call(tmp_path):
+    """A missing audits file must watch the cause with no LLM call and no crash.
 
-    Fix must stay usable on a checkout that has causes but no audit rows.
+    A cause with no evidence quote must never reach the model: it would be patched on a guess (#88 review, finding 2).
     """
     c = cause()
     c.fatal_calls = ["f1"]
     cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), [c])
     ap.unlink()
-    calls: list = []
-    r = run_fix(cp, pp, op, llm=stub("line 3: rule text 3", "z", calls), audits_path=ap)
-    assert len(r["patches"]) == 1
-    assert json.loads(calls[0][1].split("</data>")[0].removeprefix("<data>\n"))["examples"] == []
+    r = run_fix(cp, pp, op, llm=_boom, audits_path=ap)
+    assert r["patches"] == [] and r["watched"] == [c.cause_id]
+
+
+def test_cause_without_usable_evidence_is_watched_and_makes_no_llm_call(tmp_path):
+    """A patch cause must reach the LLM only when a member call has a failing quote in the audits. Empty call lists,
+    an audit with no quote and an audit of another parameter all give no evidence, so the cause is watched, takes no
+    top_n slot and gets no patch. Without the check the model patches on a guess and the gate then spends replays on
+    it. The dry run must show the same watch."""
+    empty = cause("cause_empty").model_copy(update={"fatal_calls": []})
+    quoteless = cause("cause_quoteless")  # its audit has a finding but no evidence quote
+    other_param = cause("cause_other_param")  # its audit holds a quote, but for another parameter
+    good = cause("cause_good")
+    audits = [
+        audit("call_cause_quoteless", "qty_probing", []),
+        audit("call_cause_other_param", "looping", ["wrong parameter quote"]),
+        *ev_audits([good]),
+    ]
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), [empty, quoteless, other_param, good], audits)
+    plan = run_fix(cp, pp, op, llm=_boom, audits_path=ap, dry_run=True)["plan"]
+    assert {p["cause_id"]: p["action"] for p in plan} == {
+        "cause_empty": "watch",
+        "cause_quoteless": "watch",
+        "cause_other_param": "watch",
+        "cause_good": "patch",
+    }
+    assert "no usable evidence" in plan[0]["why"]
+    seen: list = []
+    r = run_fix(cp, pp, op, top_n=1, llm=patch_llm(seen), audits_path=ap)
+    assert len(seen) == 1 and "cause_good" in seen[0] and "cause_empty" not in seen[0]
+    assert [p["cause_id"] for p in r["patches"]] == ["cause_good"]
+    assert sorted(r["watched"]) == ["cause_empty", "cause_other_param", "cause_quoteless"]
 
 
 def test_rejected_rows_keep_the_first_300_chars_of_old_text(tmp_path):
@@ -372,7 +407,7 @@ def test_rejected_rows_keep_the_first_300_chars_of_old_text(tmp_path):
     assert propose_patch(cause(), [], PROMPT, llm=stub(dup, "x"), rejected=rej) is None
     assert rej[1]["old_text"] == dup
 
-    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), [cause()])
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), [cause()], ev_audits([cause()]))
     r = run_fix(cp, pp, op, llm=stub(old, "x"), audits_path=ap)
     assert r["rejected"][0]["old_text"] == old[:300]
     assert json.loads(op.read_text())["rejected"][0]["old_text"] == old[:300]
@@ -627,7 +662,9 @@ def test_fix_rerun_keeps_a_cause_that_already_has_a_patch_and_writes_the_others(
         assert cause().name not in user  # the cause with a patch must not reach the LLM
         return {"old_text": "line 5: rule text 5", "new_text": "line 5: fresh", "rationale": "r", "risk": "low"}
 
-    r = run_fix(kw["causes_path"], kw["prompt_path"], kw["patches_path"], top_n=3, llm=llm)
+    ap = tmp_path / "audits.jsonl"
+    ap.write_text("".join(a.model_dump_json() + "\n" for a in ev_audits([cause(), cause("cause_other")])))
+    r = run_fix(kw["causes_path"], kw["prompt_path"], kw["patches_path"], top_n=3, llm=llm, audits_path=ap)
     after = json.loads(kw["patches_path"].read_text())
     assert after["history"] == before["history"]
     assert after["patches"][0] == before["patches"][0] and after["patches"][0]["attempt"] == 2
@@ -742,7 +779,7 @@ def test_fix_never_reads_the_golden_set(tmp_path, monkeypatch):
     golden = tmp_path / "runs" / "golden"
     golden.mkdir(parents=True)
     (golden / "v1.json").write_text("{}")
-    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode(), [cause()])
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode(), [cause()], ev_audits([cause()]))
     tripped = guard_golden_reads(monkeypatch, golden)
     old, new = "line 3: rule text 3", "line 3: better"
     r = run_fix(cp, pp, op, llm=stub(old, new), audits_path=ap)
@@ -782,16 +819,14 @@ def test_run_fix_patches_a_pattern_unconfirmed_cause_but_not_an_outlier(tmp_path
     Without it no cause could ever get a gate row (the gate needs a patch), so every pattern would stay unconfirmed.
     """
     causes = [cause("o", "outlier"), cause("u", "pattern_unconfirmed"), cause("s", "single_category"), cause("r")]
-    cp, pp, op = tmp_path / "causes.json", tmp_path / "prompt.md", tmp_path / "patches.json"
-    cp.write_text(json.dumps({"causes": [c.model_dump() for c in causes]}))
-    pp.write_text(PROMPT)
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), causes, ev_audits(causes))
     seen: list = []
 
     def llm(system, user, **kw):
         seen.extend(c.cause_id for c in causes if c.name in user)
         return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
 
-    run_fix(cp, pp, op, top_n=5, llm=llm)
+    run_fix(cp, pp, op, top_n=5, llm=llm, audits_path=ap)
     assert seen == ["u", "r"]
 
 
@@ -845,6 +880,7 @@ def _boom(*_a, **_k):
 
 
 def typed_cause(cid, status="ranked", ctype="flow_logic", suspected="", parameter="looping", **kw):
+    kw.setdefault("fatal_calls", [f"call_{cid}"])  # typed_files writes an evidence audit for this call
     return Cause(
         cause_id=cid,
         name=f"Name of {cid}",
@@ -870,6 +906,7 @@ def typed_files(tmp_path, causes, audits=(), gates=()):
     )
     kw["causes_path"].write_text(json.dumps({"causes": [c.model_dump() for c in causes]}))
     kw["prompt_path"].write_text(PROMPT)
+    audits = [*audits, *ev_audits(causes)]  # every cause has one evidence quote, so none is watched for lack of it
     kw["audits_path"].write_text("".join(json.dumps(a.model_dump(mode="json")) + "\n" for a in audits))
     kw["gates_path"].write_text("".join(json.dumps(g) + "\n" for g in gates))
     return kw
@@ -955,15 +992,44 @@ def test_channel_and_outlier_causes_get_neither_patch_nor_ticket_and_are_watched
 
 
 def test_flow_logic_cause_stays_patchable_unless_suspected_type_is_tool_or_data(tmp_path):
-    """A flow_logic cause (looping, dead_air) with no suspected_type must still get a patch.
+    """A flow_logic cause (looping) with no suspected_type must still get a patch.
 
     Without it the fix stage would stop patching the loops it patched all day, because they are not type prompt.
     """
-    causes = [typed_cause("cause_looping"), typed_cause("cause_dead_air", parameter="dead_air")]
-    kw = typed_files(tmp_path, causes)
-    seen: list = []
-    r = run_fix(llm=patch_llm(seen), **kw)
-    assert [p["cause_id"] for p in r["patches"]] == ["cause_looping", "cause_dead_air"] and r["tickets"] == []
+    kw = typed_files(tmp_path, [typed_cause("cause_looping")])
+    r = run_fix(llm=patch_llm([]), **kw)
+    assert [p["cause_id"] for p in r["patches"]] == ["cause_looping"] and r["tickets"] == []
+
+
+def test_dead_air_cause_is_watched_not_patched_and_refix_and_propose_patch_refuse_it(tmp_path):
+    """A dead_air cause must route to watch, and propose_patch and run_refix must refuse it, with no LLM call.
+
+    A delay is a runtime issue, and prove refuses dead_air (a text replay has no audio), so a dead_air patch would be
+    unprovable: the fix stage would spend a model call and ship a patch that no gate can judge (#88 review, finding 1).
+    """
+    dead = typed_cause("cause_dead_air", parameter="dead_air")
+    assert route(dead)[0] == "watch" and "runtime" in route(dead)[1]
+    kw = typed_files(tmp_path, [dead, typed_cause("cause_looping")])
+    plan = run_fix(llm=_boom, dry_run=True, **kw)["plan"]
+    assert {p["cause_id"]: p["action"] for p in plan} == {"cause_dead_air": "watch", "cause_looping": "patch"}
+    r = run_fix(llm=patch_llm([]), **kw)
+    assert [p["cause_id"] for p in r["patches"]] == ["cause_looping"] and r["watched"] == ["cause_dead_air"]
+    rej: list = []
+    assert propose_patch(dead, ["a quote"], PROMPT, llm=_boom, rejected=rej) is None
+    assert "runtime issue" in rej[0]["reason"]
+
+
+def test_refix_refuses_a_dead_air_cause_before_any_llm_call(tmp_path):
+    """run_refix must stop on a dead_air cause before any LLM call, even when it has a patch and a rejecting gate.
+
+    Prove refuses dead_air, so a second patch could never be gated: the model call would be wasted (#88 review).
+    """
+    kw = refix_files(tmp_path)
+    dead = cause().model_copy(update={"parameter": "dead_air"})
+    kw["causes_path"].write_text(json.dumps({"causes": [dead.model_dump()]}))
+    with pytest.raises(SystemExit, match="audio-timing"):
+        run_refix("cause_qty_probing", llm=_boom, **kw)
+    assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW
 
 
 def test_fix_dry_run_lists_patch_ticket_watch_with_no_llm_call_and_no_file(tmp_path):
@@ -997,7 +1063,9 @@ def test_pipeline_fix_dry_run_prints_the_plan_without_a_prompt_file(tmp_path, mo
     kw = typed_files(tmp_path, causes)
     monkeypatch.setattr(pipeline, "CAUSES_PATH", kw["causes_path"])
     monkeypatch.setattr(pipeline, "PATCHES_PATH", kw["out_path"])
-    monkeypatch.setattr(pipeline, "run_fix", lambda **k: run_fix(**{**k, "llm": _boom}))
+    monkeypatch.setattr(
+        pipeline, "run_fix", lambda **k: run_fix(**{**k, "llm": _boom, "audits_path": kw["audits_path"]})
+    )
     pipeline.main(["fix", "--dry-run"])
     out = capsys.readouterr().out
     assert "patch" in out and "cause_looping" in out
@@ -1015,19 +1083,3 @@ def test_refix_refuses_a_ticket_cause_before_any_llm_call(tmp_path):
     with pytest.raises(SystemExit, match="ticket"):
         run_refix("cause_qty_probing", llm=_boom, **kw)
     assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW
-
-
-def test_prove_refuses_a_ticket_cause_before_any_llm_call(tmp_path, monkeypatch):
-    """`pipeline prove` must refuse a tool or data cause before run_prove (and so any replay LLM call) starts.
-
-    Without it a leftover patch on a data cause could be gated with paid replays that prove nothing.
-    """
-    from vaniloop import pipeline
-
-    ticket = cause("cause_category_isq").model_copy(update={"suspected_type": "data"})
-    cp = tmp_path / "causes.json"
-    cp.write_text(json.dumps({"causes": [ticket.model_dump()]}))
-    monkeypatch.setattr(pipeline, "CAUSES_PATH", cp)
-    monkeypatch.setattr(pipeline, "run_prove", _boom)
-    with pytest.raises(SystemExit, match="ticket"):
-        pipeline.main(["prove", "--cause", "cause_category_isq", "--prompt", str(tmp_path / "p.md")])

@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .categorize import CATEGORIES_PATH, run_categorize
-from .fix import PATCHES_PATH, require_patchable, run_fix, run_refix
+from .fix import PATCHES_PATH, run_fix, run_refix
 from .golden import GOLDEN_DIR, build_golden, golden_agreement, latest_golden, load_golden
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
@@ -273,8 +273,6 @@ def main(argv: list[str] | None = None) -> None:
         for p in r["patches"]:
             print(f"  new patch for {p['cause_id']}: attempt {p['attempt']}; next: prove --attempt {p['attempt']}")
     elif args.cmd == "prove":
-        if not args.dry_run:  # a tool or data cause takes no gate run: stop before any replay or LLM call
-            require_patchable(args.cause, CAUSES_PATH)
         out = run_prove(
             args.cause,
             Path(args.prompt),
@@ -285,6 +283,7 @@ def main(argv: list[str] | None = None) -> None:
             workers=args.workers,
             dry_run=args.dry_run,
             attempt=args.attempt,
+            causes_path=CAUSES_PATH,
         )
         print("\n".join(describe(out)))
     elif args.cmd == "rootcause":
