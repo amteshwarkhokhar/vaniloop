@@ -1,5 +1,6 @@
 """Fix drawings: the patch diff and the fix cards. Pure HTML, no Streamlit."""
 
+import re
 from pathlib import Path
 
 from vaniloop.dashboard import load_causes, load_patches_doc
@@ -92,3 +93,100 @@ def test_patches_loader_reads_the_fixture_and_reports_a_missing_file_as_none():
     patches, rejected = load_patches_doc(FIX)
     assert [p.cause_id for p in patches] == ["C-01", "C-03"] and rejected[0]["cause_id"] == "C-02"
     assert load_patches_doc(FIX / "nowhere") is None
+
+
+LONG_OLD = "Always confirm the city before you ask the product. Then read the lead back to the buyer."
+LONG_NEW = (
+    "Always confirm the city before you ask the product. Never ask the city twice. "
+    "Then read the lead back to the buyer."
+)
+
+
+def _words(out: str) -> list[tuple[str, str]]:
+    """The (tag, text) of every marked word range in a rendered diff."""
+    return re.findall(r'<(ins|del) class="w">(.*?)</\1>', out)
+
+
+def test_one_sentence_insert_marks_only_the_inserted_words():
+    """A sentence added to one long line is the only marked text. The kept words and the L ref stay as they were.
+
+    If the whole new line were marked again, the reader would compare two paragraphs to find one sentence.
+    """
+    out = patch_diff(_patch(target_start_line=5, target_end_line=5, old_text=LONG_OLD, new_text=LONG_NEW))
+    assert _words(out) == [("ins", "Never ask the city twice.")]
+    plain = re.sub(r'<(ins|del) class="w">.*?</\1>', "", out)
+    assert "Always confirm the city before you ask the product." in plain and "Then read the lead back" in plain
+    assert 'class="ln">L5</span>' in out and 'class="row del part"' in out and 'class="row add part"' in out
+    assert "<del " not in plain and "<ins " not in plain  # no whole-line markup on a word-marked pair
+
+
+def test_replaced_and_removed_words_are_struck_in_the_old_line_and_added_in_the_new_line():
+    """A swapped word is struck in the old line and added in the new line. A deleted word is only struck.
+
+    If the old line never showed what left, the reader would see the new words with nothing to compare them to.
+    """
+    swap = patch_diff(
+        _patch(
+            target_end_line=69,
+            old_text="Ask the city first, then confirm.",
+            new_text="Ask the pincode first, then confirm.",
+        )
+    )
+    assert _words(swap) == [("del", "city"), ("ins", "pincode")]
+    cut = patch_diff(
+        _patch(
+            target_end_line=69,
+            old_text="Ask the city first, never twice, then confirm.",
+            new_text="Ask the city first, then confirm.",
+        )
+    )
+    assert _words(cut) == [("del", "never twice,")]
+
+
+def test_mostly_different_pairs_and_one_sided_lines_keep_the_whole_line_style():
+    """A pair with most words changed, a pair with no word change and lone added or removed lines stay whole.
+
+    If they were word-marked, a rewritten rule would show as a scatter of marks that no reader can follow.
+    """
+    rewrite = patch_diff(
+        _patch(target_end_line=69, old_text="alpha beta gamma delta epsilon", new_text="one two three four five six")
+    )
+    assert not _words(rewrite) and 'class="row del"' in rewrite and 'class="row add"' in rewrite
+    assert '<del class="tx">alpha beta gamma delta epsilon</del>' in rewrite
+    assert '<ins class="tx">one two three four five six</ins>' in rewrite
+    spacing = patch_diff(_patch(target_end_line=69, old_text="same words here", new_text="same  words here "))
+    assert not _words(spacing) and "part" not in spacing
+    added = patch_diff(_patch(old_text="keep A", new_text="keep A\nnew line", target_end_line=69))
+    removed = patch_diff(_patch(old_text="keep A\nold line", new_text="keep A", target_end_line=70))
+    for out, tag in ((added, "ins"), (removed, "del")):
+        assert not _words(out) and f'<{tag} class="tx">' in out and "part" not in out
+    two_for_one = patch_diff(_patch(old_text="one two three", new_text="one two four\nfive", target_end_line=69))
+    assert not _words(two_for_one) and "part" not in two_for_one  # a pair means one old line and one new line
+
+
+def test_word_marked_lines_escape_the_patch_text():
+    """Prompt text with a tag is escaped inside the word marks and in whole-line rows.
+
+    The dashboard renders this string as HTML. An unescaped <script> in a prompt line would run in the owner's browser.
+    """
+    bad = "<script>alert(1)</script>"
+    word = patch_diff(_patch(target_end_line=69, old_text=f"keep {bad} here", new_text=f"keep {bad} here {bad} too"))
+    whole = patch_diff(_patch(target_end_line=69, old_text=bad, new_text=bad + "2"))
+    assert _words(word) == [("ins", "&lt;script&gt;alert(1)&lt;/script&gt; too")]
+    for out in (word, whole):
+        assert "<script>" not in out and "&lt;script&gt;" in out
+
+
+def test_an_insert_next_to_repeated_words_starts_at_the_sentence_start():
+    """When the sentences around an insert start with the same words, the mark covers the new sentence only.
+
+    Without the slide, difflib marks "G: ... once. Synthetic rule" and leaves its first two words plain.
+    """
+    old = "Synthetic rule E: greet the buyer. Synthetic rule F: ask the product."
+    new = old.replace("buyer. ", "buyer. Synthetic rule G: say the city once. ")
+    assert _words(patch_diff(_patch(target_end_line=69, old_text=old, new_text=new))) == [
+        ("ins", "Synthetic rule G: say the city once.")
+    ]
+    assert _words(patch_diff(_patch(target_end_line=69, old_text=new, new_text=old))) == [
+        ("del", "Synthetic rule G: say the city once.")
+    ]

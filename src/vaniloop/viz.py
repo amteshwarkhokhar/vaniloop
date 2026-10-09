@@ -10,6 +10,7 @@ from __future__ import annotations
 import difflib
 import html
 import math
+import re
 from typing import TYPE_CHECKING
 
 from .models import AuditRecord, CallRecord, Cause
@@ -114,6 +115,12 @@ ol.vl-causes, ol.vl-script { padding-left: 0; margin-left: 0; }
 .vl-diff .row.add { border-left-color: #2E7D4F; background: color-mix(in srgb, #2E7D4F 9%, transparent); }
 .vl-diff .row.add .tx { color: #1F5C38; }
 .vl-diff .row.ctx .tx { color: #5E6B6E; }
+.vl-diff .row.part .tx { text-decoration: none; color: #5E6B6E; }
+.vl-diff .row.part .w { border-radius: 2px; }
+.vl-diff .row.part del.w { text-decoration: line-through; color: #8C2F2A;
+  background: color-mix(in srgb, #B3261E 18%, transparent); }
+.vl-diff .row.part ins.w { text-decoration: none; font-weight: 700; color: #1F5C38;
+  background: color-mix(in srgb, #2E7D4F 20%, transparent); }
 .vl-stats { display: flex; flex-wrap: wrap; gap: .4rem 2.25rem; margin: .6rem 0 .8rem; }
 .vl-stats small { display: block; color: #5E6B6E; font-size: .8rem; }
 .vl-stats b { font-size: 1.15rem; font-weight: 700; }
@@ -423,14 +430,77 @@ def diff_rows(patch: PromptPatch) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _mark_words(text: str, spans: list[tuple[int, int]], ranges: list[tuple[int, int]], tag: str) -> str:
+    """`text` as escaped HTML with each word range (a, b) wrapped in <tag class="w">. Spans are the word offsets."""
+    out, pos = [], 0
+    for a, b in ranges:
+        start, end = spans[a][0], spans[b - 1][1]
+        out.append(f'{esc(text[pos:start])}<{tag} class="w">{esc(text[start:end])}</{tag}>')
+        pos = end
+    return "".join(out) + esc(text[pos:])
+
+
+def _slide(words: list[str], s: int, e: int) -> tuple[int, int]:
+    """Move an inserted or deleted block of words [s, e) along its repeats so it starts at a sentence start.
+
+    A block can sit in more than one place when the words next to it repeat ("Rule A. Rule B." with "Rule C." added).
+    Every place shows the same text, so take the one a reader would call the edit: right after a full stop.
+    """
+    places = [(s, e)]
+    a, b = s, e
+    while b < len(words) and words[a] == words[b]:
+        a, b = a + 1, b + 1
+        places.append((a, b))
+    a, b = s, e
+    while a > 0 and words[a - 1] == words[b - 1]:
+        a, b = a - 1, b - 1
+        places.append((a, b))
+    return next((p for p in places if p[0] == 0 or words[p[0] - 1][-1] in ".!?:;"), (s, e))
+
+
+def _word_diff(old: str, new: str) -> tuple[str, str] | None:
+    """Mark the changed words inside one old line and the one new line it became: (old HTML, new HTML).
+
+    Removed words are wrapped in <del>, added words in <ins>, kept words stay plain. Returns None when the
+    whole-line style reads better: no word changed, or more than half of the words did (the lines are mostly
+    different, so a mark on every word would only be noise).
+    """
+    a_spans = [m.span() for m in re.finditer(r"\S+", old)]
+    b_spans = [m.span() for m in re.finditer(r"\S+", new)]
+    a = [old[s:e] for s, e in a_spans]
+    b = [new[s:e] for s, e in b_spans]
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)  # prompt lines repeat words: no junk heuristic
+    ops = [o for o in matcher.get_opcodes() if o[0] != "equal"]
+    if not ops or matcher.ratio() < 0.5:
+        return None
+    gone = [_slide(a, i1, i2) if op == "delete" else (i1, i2) for op, i1, i2, _, _ in ops if op != "insert"]
+    came = [_slide(b, j1, j2) if op == "insert" else (j1, j2) for op, _, _, j1, j2 in ops if op != "delete"]
+    return _mark_words(old, a_spans, gone, "del"), _mark_words(new, b_spans, came, "ins")
+
+
 def patch_diff(patch: PromptPatch) -> str:
     """A line diff of one prompt patch: old lines struck, new lines added, kept lines plain, L refs in the gutter.
 
-    The gutter also carries a minus or plus sign, so the change reads without colour.
+    The gutter also carries a minus or plus sign, so the change reads without colour. When one old line became
+    one new line, the words that changed are marked inside the lines (see _word_diff), so an inserted sentence
+    shows alone instead of two whole paragraphs.
     """
+    diff = diff_rows(patch)
+    marked: dict[int, str] = {}  # row index -> the line's HTML with its changed words marked
+    for k in range(len(diff) - 1):
+        lone_del = diff[k][0] == "del" and (k == 0 or diff[k - 1][0] != "del")
+        lone_add = diff[k + 1][0] == "add" and (k + 2 == len(diff) or diff[k + 2][0] != "add")
+        if lone_del and lone_add and (pair := _word_diff(diff[k][2], diff[k + 1][2])):
+            marked[k], marked[k + 1] = pair
     rows = []
-    for kind, ref, text in diff_rows(patch):
+    for k, (kind, ref, text) in enumerate(diff):
         sign, tag = {"del": ("\u2212", "del"), "add": ("+", "ins"), "ctx": ("", "span")}[kind]
+        if k in marked:
+            rows.append(
+                f'<div class="row {kind} part"><span class="ln">{esc(ref)}</span><span class="sg">{sign}</span>'
+                f'<span class="tx">{marked[k]}</span></div>'
+            )
+            continue
         rows.append(
             f'<div class="row {kind}"><span class="ln">{esc(ref)}</span><span class="sg">{sign}</span>'
             f'<{tag} class="tx">{esc(text)}</{tag}></div>'
