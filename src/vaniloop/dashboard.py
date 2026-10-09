@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from vaniloop.fix import PromptPatch
 from vaniloop.gate import GateResult
@@ -155,6 +156,16 @@ class ReplayRow(BaseModel):
     ended_by: str
     call: CallRecord
     audit: AuditRecord | None = None
+
+    @model_validator(mode="after")
+    def _finite_times(self):
+        """A NaN or infinite time passes float validation but breaks the script's clock, so reject the row."""
+        times = [self.call.duration_sec]
+        times += [x for t in self.call.turns for x in (t.start_sec, t.end_sec)]
+        times += [x for s in self.call.silences for x in (s.start_sec, s.end_sec)]
+        if not all(math.isfinite(x) for x in times):
+            raise ValueError("replay times must be finite")
+        return self
 
     @property
     def target_id(self) -> str:

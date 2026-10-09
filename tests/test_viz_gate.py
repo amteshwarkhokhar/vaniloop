@@ -97,8 +97,33 @@ def test_replay_panel_starts_at_the_fork_turn_and_names_the_cause_check():
     assert "line 3" in out and "line 4" in out and "line 2" not in out
     assert "Old prompt" in out and ">Fatal</span>" in out
     assert "from turn 3" in out and "ended by max turns" in out and "Asks again: fault shown" in out
-    assert "no fault" in replay_panel("New prompt", call, audit, 3, "end_call", 0, "other_parameter")
+    assert "other_parameter: unresolved" in replay_panel("New prompt", call, audit, 3, "end_call", 0, "other_parameter")
     assert "Fatal" not in replay_panel("New prompt", call, None, 3, "end_call")
+
+
+def test_replay_panel_reads_missing_evidence_as_unresolved_never_as_no_fault():
+    """An Unknown or absent finding, a NeedsReview verdict, an invalid_output ending or no audit reads unresolved.
+
+    Found in review: missing evidence showed as "no fault", so a replay nobody could judge looked like a pass.
+    """
+    call = CallRecord(
+        call_id="c__replay_x_0_y", duration_sec=6, turns=[Turn(idx=0, speaker="bot", start_sec=0, end_sec=6, text="hi")]
+    )
+
+    def audit(verdict, status=None):
+        findings = [Finding(parameter="looping", status=status, reason="r", basis="observed")] if status else []
+        return AuditRecord(call_id=call.call_id, verdict=verdict, scope="bl_collection", findings=findings)
+
+    def state(audit_, ended_by="end_call"):
+        return replay_panel("New prompt", call, audit_, 0, ended_by, 0, "looping", {"looping": "Asks again"})
+
+    assert "Asks again: unresolved" in state(audit("Pass", "Unknown"))
+    assert "Asks again: unresolved" in state(audit("Pass"))  # no finding for the parameter
+    assert "Asks again: unresolved" in state(audit("NeedsReview", "Pass"))
+    assert "Asks again: unresolved" in state(audit("Pass", "Pass"), "invalid_output")
+    assert "Asks again: unresolved" in state(None)
+    assert "Asks again: no fault" in state(audit("Pass", "Pass"))
+    assert "Asks again: fault shown" in state(audit("NonFatal", "NonFatal"))
 
 
 def test_gates_loader_keeps_the_latest_gate_per_cause_and_reads_a_null_p_value():

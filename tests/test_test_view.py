@@ -1,9 +1,12 @@
 """The Test view in a headless Streamlit run on synthetic data: gate cards, replays and the empty state."""
 
+import json
 import shutil
 from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
+
+from vaniloop.dashboard import load_replays
 
 FIX = Path(__file__).parent / "fixtures"
 APP = Path(__file__).resolve().parents[1] / "src" / "vaniloop" / "dashboard.py"
@@ -85,6 +88,26 @@ def test_test_view_keeps_the_gate_cards_when_replays_are_missing(tmp_path, monke
     at = _open(tmp_path, monkeypatch, "Test", drop=("synthetic_replays.jsonl",))
     assert 'class="vl-card gate"' in _html(at)
     assert any("No seed-0 replay with the old prompt" in c.value for c in at.caption)
+
+
+def test_replay_rows_with_non_finite_times_are_skipped_and_the_page_survives(tmp_path, monkeypatch):
+    """A replay row with a NaN turn time or an infinite duration is skipped, and the view shows the missing note.
+
+    Found in review: such a row passed validation and crashed the page when selected, because mmss() cannot format it.
+    """
+    for f in FIX.iterdir():
+        shutil.copy(f, tmp_path / f.name)
+    rows = [json.loads(line) for line in (FIX / "synthetic_replays.jsonl").read_text().splitlines()]
+    rows[1]["call"]["turns"][3]["start_sec"] = float("nan")  # the new seed-0 replay of syn_002
+    rows[4]["call"]["duration_sec"] = float("inf")  # the new seed-0 replay of syn_010
+    (tmp_path / "synthetic_replays.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    assert len(load_replays(tmp_path)) == len(rows) - 2
+    monkeypatch.setenv("VANILOOP_DATA", str(tmp_path))
+    at = AppTest.from_file(str(APP), default_timeout=30).run()
+    at.radio(key="view").set_value("Test").run()
+    assert not at.exception
+    assert any("No seed-0 replay with the new prompt" in c.value for c in at.caption)
+    assert "Synthetic old reply that keeps the stale spec." in _html(at)
 
 
 def test_missing_gates_file_keeps_the_directive_empty_state(tmp_path, monkeypatch):

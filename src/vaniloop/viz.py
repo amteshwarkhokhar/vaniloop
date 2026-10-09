@@ -563,17 +563,25 @@ def replay_panel(
 ) -> str:
     """One replay from its fork turn on, as a script. Turns before the fork are the original call and are left out.
 
-    The head names the prompt, the audit verdict and, when `parameter` is given, whether the cause's fault showed up.
+    The head names the prompt and the audit verdict. When `parameter` is given it also says whether the cause's fault
+    showed up: fault shown, no fault, or unresolved when the evidence is missing.
     """
     shown = call.model_copy(update={"turns": call.turns[fork_turn:]})
     head, meta = esc(title), [f"Seed {seed}", f"from turn {fork_turn}", f"ended by {ended_by.replace('_', ' ')}"]
     if audit is not None:
         color, label = VERDICT_COLOR.get(audit.verdict, "#5E6B6E"), VERDICT_LABEL.get(audit.verdict, audit.verdict)
         head += f'<span style="--c:{color}">{esc(label)}</span>'
-        if parameter:
-            bad = any(f.parameter == parameter and f.status in FAILING for f in audit.findings)
-            name = (names or {}).get(parameter, parameter)
-            meta.append(f"{name}: {'fault shown' if bad else 'no fault'}")
+    if parameter:
+        found = next((f for f in audit.findings if f.parameter == parameter), None) if audit else None
+        unresolved = (  # the same rule as gate.Trial.unresolved: missing evidence never reads as success
+            audit is None
+            or audit.verdict == "NeedsReview"
+            or ended_by == "invalid_output"
+            or found is None
+            or found.status == "Unknown"
+        )
+        state = "unresolved" if unresolved else "fault shown" if found.status in FAILING else "no fault"
+        meta.append(f"{(names or {}).get(parameter, parameter)}: {state}")
     return (
         f'<div class="vl vl-replay"><h5>{head}</h5><p class="vl-pass">{esc(", ".join(meta))}.</p>'
         f"{script(shown, audit, names)}</div>"
