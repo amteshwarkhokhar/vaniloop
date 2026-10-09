@@ -123,7 +123,7 @@ def test_f1_precedence_fatal_over_unknown_and_missing_audio_exempt():
         call,
         [
             bt(0, "quantity"),
-            bt(2, "spec", fits_confirmed_product=False, spec_name="x"),
+            bt(2, "spec", fits_confirmed_product=False, question_fits_product=False, spec_name="x"),
             bt(4, "spec", fits_confirmed_product=None, spec_name="y"),
         ],
     )
@@ -402,8 +402,8 @@ def test_f7_onset_and_first_fault():
     bots = [
         bt(0, "quantity"),
         bt(2, "spec", spec_name="a", fits_confirmed_product=True),
-        bt(4, "spec", spec_name="b", fits_confirmed_product=False),
-        bt(6, "spec", spec_name="c", fits_confirmed_product=False),
+        bt(4, "spec", spec_name="b", fits_confirmed_product=False, question_fits_product=False),
+        bt(6, "spec", spec_name="c", fits_confirmed_product=False, question_fits_product=False),
     ] + [bt(i, "name") for i in (10, 12, 14, 16)]
     a = audit_call(call, mk_led(call, bots))
     f = by(a)

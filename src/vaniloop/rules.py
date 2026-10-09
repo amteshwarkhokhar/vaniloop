@@ -343,18 +343,45 @@ def rule_looping(call: CallRecord, led: Ledger) -> Finding:
 
 
 def rule_category_isq(call: CallRecord, led: Ledger) -> Finding:
+    """Human rubric: a wrong spec question is Fatal, a wrong option under a fitting question is NonFatal."""
     specs = [b for b in led.bot_turns if b.slot == "spec"]
     if not specs:
         return Finding(parameter="category_isq", status="NotApplicable", reason="no spec questions", basis="observed")
-    bad = sorted((b for b in specs if b.fits_confirmed_product is False), key=lambda b: b.idx)
-    if bad:
+    wrong_question = sorted((b for b in specs if b.question_fits_product is False), key=lambda b: b.idx)
+    if wrong_question:
         return Finding(
             parameter="category_isq",
             status="Fatal",
             basis="spoken_proxy",
-            reason=f"{len(bad)} spec question(s) belong to another category than '{led.final_product}'",
-            evidence=[_ev(call, b.idx) for b in bad],
-            onset_turn=bad[0].idx,
+            reason=f"{len(wrong_question)} spec question(s) belong to another category than "
+            f"'{led.final_product}' (question level)",
+            evidence=[_ev(call, b.idx) for b in wrong_question],
+            onset_turn=wrong_question[0].idx,
+        )
+    # fits_confirmed_product False without a question-level label: a ledger from before question_fits_product.
+    # It could be a wrong question (Fatal) or wrong options (NonFatal), so it stays Unknown and outranks NonFatal.
+    cannot_tell = sorted(
+        (b for b in specs if b.fits_confirmed_product is False and b.question_fits_product is None), key=lambda b: b.idx
+    )
+    if cannot_tell:
+        return Finding(
+            parameter="category_isq",
+            status="Unknown",
+            basis="spoken_proxy",
+            reason=f"{len(cannot_tell)} spec turn(s) do not fit the product: "
+            "cannot tell question level from option level",
+            evidence=[_ev(call, b.idx) for b in cannot_tell],
+        )
+    wrong_options = sorted((b for b in specs if b.fits_confirmed_product is False), key=lambda b: b.idx)
+    if wrong_options:
+        return Finding(
+            parameter="category_isq",
+            status="NonFatal",
+            basis="spoken_proxy",
+            reason=f"{len(wrong_options)} spec question(s) fit '{led.final_product}' but the options did not "
+            "(option level)",
+            evidence=[_ev(call, b.idx) for b in wrong_options],
+            onset_turn=wrong_options[0].idx,
         )
     unknown = [b for b in specs if b.fits_confirmed_product is None]
     if unknown:

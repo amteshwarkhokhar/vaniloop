@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TRANSCRIPTS_DIR = ROOT / "transcripts"
 AUDIO_DIR = ROOT / "data" / "raw" / "call_recordings"
 OUT_PATH = ROOT / "runs" / "calls.jsonl"
+AUDIO_SIGNALS = ("tone", "overlap", "audio_unclear", "bot_misheard")
 
 _NUM = r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"  # ffmpeg may print e.g. 2.26757e-05
 _START = re.compile(r"silence_start:\s*" + _NUM)
@@ -26,7 +27,10 @@ def load_transcript(path: str | Path, audio_dir: str | Path = AUDIO_DIR) -> Call
     turns = []
     for i, t in enumerate(data["turns"]):
         speaker = "user" if t["speaker"] == "seller" else t["speaker"]
-        turns.append(Turn(idx=i, speaker=speaker, start_sec=t["start_sec"], end_sec=t["end_sec"], text=t["text"]))
+        signals = {k: t.get(k) for k in AUDIO_SIGNALS}
+        turns.append(
+            Turn(idx=i, speaker=speaker, start_sec=t["start_sec"], end_sec=t["end_sec"], text=t["text"], **signals)
+        )
     audio = Path(audio_dir) / f"{data['call_id']}.mp3"
     return CallRecord(
         call_id=data["call_id"],
