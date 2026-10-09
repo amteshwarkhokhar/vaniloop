@@ -796,11 +796,12 @@ def test_95_qty_captured_treats_a_hinglish_filler_as_no_unit(said):
     assert f.status == "NonFatal" and f.onset_turn == 2
 
 
-@pytest.mark.parametrize("said", ["10 boxes", "10 packets", "10 pairs"])
-def test_95_qty_captured_rejects_other_packing_units(said):
-    """Guard: a packing unit other than "set" must also not equal the same number of pieces.
+@pytest.mark.parametrize("said", ["10 boxes", "10 packets", "10 pairs", "10 yards", "10 millimeters"])
+def test_95_qty_captured_rejects_other_unknown_units(said):
+    """A unit the parser does not know (a packing unit, or a length such as yards) must not equal 10 pieces.
 
-    Narrowing unknown words to fillers must not let "10 boxes" match "10 pieces" and hide a quantity error.
+    Review round 4: a packing-unit allowlist let "10 yards" match "10 pieces". Only listed fillers may read as no
+    unit, so an unknown unit word keeps the safe answer, Fatal.
     """
     call = mk_call(12)
     bots = [bt(0, "quantity"), bt(2, "quantity")]

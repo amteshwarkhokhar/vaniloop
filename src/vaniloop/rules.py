@@ -245,20 +245,20 @@ def parse_quantity_full(text: str | None) -> tuple[float, float, str | None] | N
     return low, high, unit
 
 
-# Packing units the parser has no conversion for. Each one can hold several pieces, so a quantity in one of them
-# must not match the same number of pieces. Any other word after the number (a Hinglish filler such as "ka" or
-# "chahiye") is not a unit.
-_OTHER_COUNT_UNITS = frozenset(
-    "set sets box boxes packet packets pack packs carton cartons bundle bundles pair pairs roll rolls bag bags "
-    "case cases crate crates drum drums bottle bottles coil coils sheet sheets".split()
+# Words that often follow a spoken number but are not units ("10 ka", "10 chahiye", "10 only"). They leave the
+# quantity unit-less. Any other word after the number is an attempted unit the parser does not know ("10 sets",
+# "10 yards"), so it must not match the same number of pieces.
+_QTY_FILLERS = frozenset(
+    "ka ki ke hi hai hain chahiye chaiye tak se to only approx approximately lagbhag karib kareeb sir ji madam "
+    "and or bas please pls".split()
 )
 
 
 def _unit_word(text: str | None) -> tuple[str | None, bool]:
     """(canonical unit|None, unrecognised). Reads the unit position parse_quantity_full reads: the word right
     after the number (after the second number for a range). unrecognised is True when a word sits there that is
-    a packing unit the parser cannot convert, so "10 sets" cannot silently equal "10 pieces". A bare "10", or a
-    filler word such as "10 ka", stays no-unit."""
+    a word the parser does not know and that is not a filler, so "10 sets" or "10 yards" cannot silently equal
+    "10 pieces". A bare "10", or a filler such as "10 ka", stays no-unit."""
     if not text:
         return None, False
     toks = _TOKEN.findall(str(text).lower())
@@ -274,9 +274,9 @@ def _unit_word(text: str | None) -> tuple[str | None, bool]:
         tok = toks[i]
         if tok in _UNITS:
             return _UNITS[tok][1], False
-        if tok in _OTHER_COUNT_UNITS:  # a packing unit that is not a piece ("10 sets" != "10 pieces")
+        if tok.isalpha() and tok not in _QTY_FILLERS:  # an attempted unit the parser does not know
             return None, True
-    return None, False  # a filler such as "ka" or "chahiye" after the number is not a unit
+    return None, False  # no word, or a filler such as "ka" or "chahiye": not a unit
 
 
 def _fmt_pct(x: float) -> str:
