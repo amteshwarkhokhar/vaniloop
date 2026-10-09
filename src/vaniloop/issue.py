@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from .jsonl import dedupe_by_call_id, read_jsonl
-from .models import AuditRecord, Cause, Turn
+from .models import AuditRecord, Cause, Ledger, Turn
 
 ROOT = Path(__file__).resolve().parents[2]
 AUDITS_PATH = ROOT / "runs" / "audits.jsonl"
@@ -27,6 +27,25 @@ STATUS_ORDER = {"ranked": 0, "pattern_unconfirmed": 0, "watch": 1, "outlier": 2,
 FIXABILITY = {"prompt": 1.0, "flow_logic": 0.5, "asr": 0.25, "channel": 0.0}
 CHANNEL_FLAGS = ("bot_misheard", "audio_unclear")  # Turn fields that say the line, not the prompt, failed
 SUSPECTED_TYPE = {"product_change": "tool", "category_isq": "data"}  # flagged only: a real verdict needs traces
+# parameter -> the ledger slot whose spoken value a channel rule (b) compares (#90). qty_unit is not here: it
+# compares units, not a slot value (see _unit_mismatch); looping and dead_air have no slot: rule (a) only.
+SLOT_OF = {
+    "qty_missed": "quantity",
+    "qty_accuracy": "quantity",
+    "qty_probing": "quantity",
+    "product_change": "product",
+    "category_isq": "spec",
+}
+# parameter -> (owner, owner_evidence, suspect, owner_note) (#90). No trace fields exist yet, so nothing here
+# is proof. Every parameter not listed is owned by the prompt with likely evidence, as the type usually says.
+OWNER_OF = {
+    "dead_air": ("runtime", "likely", None, None),
+    "category_isq": ("unresolved", "missing", "data", None),
+    "product_change": ("unresolved", "missing", "tool", None),
+    "qty_probing": ("prompt", "likely", None, "applicability assumed: unit list not visible"),
+}
+OTHER_OWNER = ("prompt", "likely", None, None)  # every other prompt or flow_logic cause
+SPEECH_OWNER = ("speech", "likely", None, None)  # every channel cause: the line, not the prompt, failed
 
 # parameter -> (name, description, type)
 KNOWN = {
@@ -82,11 +101,102 @@ def _dedupe(audits: list[AuditRecord]) -> list[AuditRecord]:
     return list({a.call_id: a for a in audits}.values())
 
 
-def _channel_turn(turns: Sequence[Turn], onset: int) -> bool:
-    """True if the onset turn, or the nearest user turn before it, has bot_misheard or audio_unclear set."""
+def _norm_value(text: str | None) -> str:
+    """A slot value compared for equality: stripped, lowercased, inner whitespace collapsed to one space.
+
+    A missing value is the empty string (str(None) would read 'none', a stated value, and hide a capture gap).
+    """
+    if text is None:
+        return ""
+    return " ".join(str(text).split()).lower()
+
+
+def _unit_of(facts: Mapping[str, str]) -> str | None:
+    """The canonical unit one ledger side states: its `unit` slot when it has one, else the unit word in its
+    quantity, parsed with rules.py's parse_quantity_full ('50 kg' states kg even with no unit slot)."""
+    # lazy: rules imports only models today, issue must not import it first
+    from .rules import norm_unit, parse_quantity_full
+
+    unit = norm_unit(facts.get("unit"))
+    if unit:
+        return unit
+    pa = parse_quantity_full(facts.get("quantity"))
+    return pa[2] if pa else None
+
+
+def _unit_mismatch(led: Ledger) -> bool:
+    """True when both sides name a unit and the units differ (canonical names, so 'kilos' and 'kg' agree).
+
+    Numbers alone are never a unit mismatch, and a unit on one side only stays a prompt fault: rule_qty_unit
+    fails a unit only when both sides state one (#90 review).
+    """
+    ua, ub = _unit_of(led.buyer_facts), _unit_of(led.bot_confirmed)
+    return ua is not None and ub is not None and ua != ub
+
+
+def _qty_mismatch(led: Ledger) -> bool:
+    """True when the buyer's and the bot's quantities both state a value and differ (rule_qty_accuracy's parse).
+
+    Both sides are parsed with rules.py's parse_quantity_full. When a quantity string has no parsed unit, that
+    side's separate unit slot is the fallback (#90 review round 2). The bot side is converted into the buyer's
+    unit only when both units are known and of the same kind, exactly as rule_qty_accuracy does; with a unit on
+    one side only the raw numbers compare (range maxima, a range counts as its maximum) with math.isclose, so
+    '50 kg' and '50' agree while '2-3 kg' and '2-9 kg' differ. Units that differ in kind are qty_unit's fault,
+    not a quantity mismatch (rule_qty_accuracy calls that Unknown). A side that parses no number falls back to
+    the normalised text.
+    """
+    # lazy: rules imports only models today, issue must not import it first
+    from .rules import norm_unit, parse_quantity_full, to_base, unit_group
+
+    said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
+    if not _norm_value(said) or not _norm_value(kept):
+        return False
+    pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
+    if pa is None or pb is None:
+        return _norm_value(said) != _norm_value(kept)
+    ahi, bhi = pa[1], pb[1]
+    ua = pa[2] or norm_unit(led.buyer_facts.get("unit"))
+    ub = pb[2] or norm_unit(led.bot_confirmed.get("unit"))
+    ga, gb = unit_group(ua), unit_group(ub)
+    if ga and gb and ga != gb:
+        return False  # units differ in kind: qty_unit owns that, and the numbers say nothing about it
+    if ua and ub:  # both known, same kind: convert the bot value into the buyer's unit
+        bhi *= to_base(1, ub) / to_base(1, ua)
+    return not math.isclose(ahi, bhi, rel_tol=1e-9, abs_tol=1e-9)
+
+
+def _value_mismatch(param: str, led: Ledger) -> bool:
+    """True when rule (b)'s ledger values differ: NON-EMPTY values on BOTH sides that differ (#90 review).
+
+    qty_* quantity parameters compare quantities (see _qty_mismatch), qty_unit compares the units each side
+    states (see _unit_mismatch), product and spec compare the normalised texts. A value on only one side — the
+    buyer said it and the bot never captured it — is a capture gap, not a spoken mismatch, so it stays a prompt
+    fault; a missing confirmation turns speech-owned only through audio_unclear (rule (a)) (#90 review).
+    """
+    if param == "qty_unit":
+        return _unit_mismatch(led)
+    slot = SLOT_OF.get(param)
+    if slot == "quantity":
+        return _qty_mismatch(led)
+    said, kept = led.buyer_facts.get(slot, ""), led.bot_confirmed.get(slot, "")
+    if not _norm_value(said) or not _norm_value(kept):
+        return False
+    return _norm_value(said) != _norm_value(kept)
+
+
+def _channel_turn(turns: Sequence[Turn], onset: int, param: str, led: Ledger | None) -> bool:
+    """True only when the audio, not the prompt, failed at or before the onset turn.
+
+    (a) audio_unclear on the onset turn or the nearest user turn before it, or (b) bot_misheard on one of them AND
+    the ledger shows a spoken value mismatch for the parameter (see _value_mismatch). A re-ask alone, even with
+    bot_misheard, is not channel: Gemini sets bot_misheard on every re-ask (#90). Without the call's ledger, (b)
+    cannot show and only (a) makes the cause channel.
+    """
     near = [t for t in turns if t.idx == onset]
     near += sorted((t for t in turns if t.speaker == "user" and t.idx < onset), key=lambda t: t.idx)[-1:]
-    return any(getattr(t, f) is True for t in near for f in CHANNEL_FLAGS)
+    if any(t.audio_unclear is True for t in near):
+        return True  # (a): the audio there is unclear, so the words may never have arrived
+    return led is not None and any(t.bot_misheard is True for t in near) and _value_mismatch(param, led)
 
 
 def decide_roots(audit: AuditRecord) -> dict[str, dict]:
@@ -116,17 +226,27 @@ def decide_roots(audit: AuditRecord) -> dict[str, dict]:
     return found
 
 
-def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] | None = None) -> list[Cause]:
+def build_causes(
+    audits: list[AuditRecord],
+    turns: Mapping[str, Sequence[Turn]] | None = None,
+    ledgers: Mapping[str, Ledger] | None = None,
+) -> list[Cause]:
     """One cause per failing parameter, counted on the calls where that parameter is the call's root finding.
 
     A call where the parameter failed but an earlier finding is the root goes to `symptom_calls` and counts for
     nothing. A cause with no root call is not listed. See decide_roots for the tie rule.
-    A root finding whose onset turn, or the nearest user turn before it, has bot_misheard or audio_unclear set in
-    `turns` (call_id -> turns, from calls.jsonl) is a channel fault. Channel roots are grouped per parameter into
-    causes with type "channel", cause_id `cause_channel_<parameter>`, status watch and fixability 0: bad audio is
-    not patched in the prompt. With `turns` None or without the call, no root is a channel fault.
+    A root is a channel fault only when the audio, not the prompt, failed at its onset (see _channel_turn): the
+    onset turn or the nearest user turn before it has audio_unclear, or it has bot_misheard and the call's ledger
+    shows a spoken value mismatch for the parameter (values stated on BOTH sides that differ: quantities parsed
+    and converted, units as units; see _value_mismatch). A re-ask alone, even with bot_misheard, is a prompt
+    fault (#90). With `turns` or `ledgers` None, or without the call, the missing part is out and the
+    other rule still applies.
+    Every cause gets an owner, an owner_evidence, a suspect (for unresolved ones) and an owner_note from
+    OWNER_OF and the type (channel -> speech, dead_air -> runtime). No cause is ever marked proof: no trace
+    fields exist yet.
     """
     calls = turns or {}
+    leds = ledgers or {}
     audits = _dedupe(audits)
     audited = [a for a in audits if a.verdict != "NeedsReview"]
     n = len(audited)
@@ -134,7 +254,10 @@ def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] 
     groups: dict[tuple[bool, str], dict[str, set[str]]] = {}
     for a in audited:
         for param, d in decide_roots(a).items():
-            channel = d["root"] and d["onset"] is not None and _channel_turn(calls.get(a.call_id, ()), d["onset"])
+            led = leds.get(a.call_id)
+            channel = (
+                d["root"] and d["onset"] is not None and _channel_turn(calls.get(a.call_id, ()), d["onset"], param, led)
+            )
             g = groups.setdefault((channel, param), {"Fatal": set(), "NonFatal": set(), "symptom": set()})
             g[d["status"] if d["root"] else "symptom"].add(a.call_id)
     causes: list[Cause] = []
@@ -154,6 +277,7 @@ def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] 
         fix = FIXABILITY[typ] if typ in FIXABILITY else 1.0
         lo, hi = wilson(affected, n)
         status = "watch" if channel else "ranked" if affected >= MIN_SUPPORT else "watch" if fatal else "isolated"
+        owner, owner_ev, suspect, owner_note = SPEECH_OWNER if channel else OWNER_OF.get(param, OTHER_OWNER)
         causes.append(
             Cause(
                 cause_id=f"cause_channel_{param}" if channel else f"cause_{param}",
@@ -171,6 +295,10 @@ def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] 
                 freq_ci_low=lo,
                 freq_ci_high=hi,
                 status=status,
+                owner=owner,
+                owner_evidence=owner_ev,
+                suspect=suspect,
+                owner_note=owner_note,
             )
         )
     causes.sort(key=lambda c: (STATUS_ORDER[c.status], -c.rank_score, -c.priority))
@@ -330,6 +458,20 @@ def _call_turns(runs: Path) -> dict[str, list[Turn]]:
     return out
 
 
+def _call_ledgers(runs: Path) -> dict[str, Ledger]:
+    """call_id -> ledger from `<runs>/ledgers.jsonl` (last row wins). A malformed row is skipped.
+
+    The channel rule (b) reads the buyer's value and the bot's confirmed value from the ledger (#90).
+    """
+    out: dict[str, Ledger] = {}
+    for r in dedupe_by_call_id(read_jsonl(runs / "ledgers.jsonl"), last_wins=True):
+        try:
+            out[r["call_id"]] = Ledger.model_validate(r)
+        except Exception:  # one bad row must not stop ranking
+            continue
+    return out
+
+
 def _root_stats(audits: list[AuditRecord]) -> dict[str, int]:
     """Counts that show whether root ordering works on these audits (the stop rule of issue #71).
 
@@ -353,7 +495,9 @@ def run_issues(audits_path: Path = AUDITS_PATH, out_path: Path = CAUSES_PATH) ->
     audits = load_audits(Path(audits_path))
     runs = Path(out_path).parent
     causes, outliers = classify_causes(
-        build_causes(audits, _call_turns(runs)), _call_categories(runs), read_jsonl(runs / "gates.jsonl")
+        build_causes(audits, _call_turns(runs), _call_ledgers(runs)),
+        _call_categories(runs),
+        read_jsonl(runs / "gates.jsonl"),
     )
     review = sum(a.verdict == "NeedsReview" for a in audits)
     doc = {

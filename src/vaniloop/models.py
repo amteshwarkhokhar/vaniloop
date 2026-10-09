@@ -135,3 +135,10 @@ class Cause(BaseModel):
     # issue.classify_causes: single_category (spans < 2 known categories), outlier (the OLD replay did not
     # reproduce it), pattern_unconfirmed (a pattern so far, no gate row yet).
     status: Literal["ranked", "isolated", "watch", "outlier", "single_category", "pattern_unconfirmed"] = "ranked"
+    # Owner and evidence (#90). No trace fields exist yet, so issue.build_causes never claims proof: a cause
+    # needs traces (per-turn speech-to-text, tool calls, call-start values) for that. None = an old causes.json
+    # file before #90; the dashboard hides the chips and fix.route falls back to the suspected_type rule.
+    owner: Literal["speech", "data", "tool", "prompt", "runtime", "unresolved"] | None = None
+    owner_evidence: Literal["proof", "likely", "missing"] | None = None
+    suspect: Literal["data", "tool"] | None = None  # for owner unresolved: which system needs the trace hunt
+    owner_note: str | None = None

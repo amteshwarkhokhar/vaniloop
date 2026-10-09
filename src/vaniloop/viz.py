@@ -104,6 +104,8 @@ ol.vl-causes, ol.vl-script { padding-left: 0; margin-left: 0; }
 .vl-card .vl-note { border-left: 3px solid var(--c); padding-left: .75rem; }
 .vl-badge { display: inline-block; border: 2px solid var(--c); color: var(--c); border-radius: 2px;
   padding: 0 .45rem; margin-right: .6rem; font-size: .85rem; font-weight: 700; vertical-align: .1rem; }
+.vl-chip { display: inline-block; border: 1px solid var(--c); color: var(--c); border-radius: 2px;
+  padding: 0 .3rem; margin-right: .35rem; font-size: .75rem; font-weight: 700; white-space: nowrap; }
 .vl-diff { margin: .5rem 0; max-width: 60rem; font: .85rem/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 .vl-diff .row { display: grid; grid-template-columns: 3.25rem 1.1rem minmax(0, 1fr); padding: 0 .5rem 0 0;
   border-left: 3px solid transparent; }
@@ -373,6 +375,47 @@ STATUS_LABEL = {
 
 
 CHANNEL_LABEL = "Channel fault: the bot misheard the buyer at the root turn"  # replaces the watch label (#71)
+OWNER_LABEL = {  # owner chip text (#90)
+    "speech": "Speech",
+    "data": "Data",
+    "tool": "Tool",
+    "prompt": "Prompt",
+    "runtime": "Runtime",
+    "unresolved": "Unresolved",
+}
+EVIDENCE_COLOR = {
+    "proof": VERDICT_COLOR["Pass"],
+    "likely": VERDICT_COLOR["NonFatal"],
+    "missing": VERDICT_COLOR["NeedsReview"],
+}
+OWNER_COLOR = {
+    "speech": SPEAKER_COLOR["user"],
+    "runtime": "#5E6B6E",
+    "prompt": VERDICT_COLOR["Pass"],
+    "unresolved": VERDICT_COLOR["NonFatal"],
+}
+
+
+def owner_chips(c: Cause) -> str:
+    """Two small chips: who owns the fault and how strong the evidence for it is (#90).
+
+    '' when the cause has no owner (an old causes.json row): the chips must not claim what nobody classified.
+    The owner chip carries the owner_note, if there is one, as its hover title.
+    """
+    if c.owner is None:
+        return ""
+    owner = (
+        f'<span class="vl-chip" style="--c:{OWNER_COLOR.get(c.owner, "#5E6B6E")}"'
+        + (f' title="{esc(c.owner_note)}"' if c.owner_note else "")
+        + f">owner: {esc(OWNER_LABEL.get(c.owner, c.owner))}</span>"
+    )
+    if c.owner_evidence is None:
+        return owner
+    return (
+        owner
+        + f'<span class="vl-chip" style="--c:{EVIDENCE_COLOR.get(c.owner_evidence, "#5E6B6E")}">'
+        + f"evidence: {esc(c.owner_evidence)}</span>"
+    )
 
 
 def cause_list(causes: list[Cause]) -> str:
@@ -410,9 +453,11 @@ def cause_list(causes: list[Cause]) -> str:
             )
             if x
         )
+        chips = owner_chips(c)
         rows.append(
             f'<li><span class="n">{num}</span>'
-            f"<span><b>{esc(c.name)}</b><small>{esc(c.description)}</small>{label}</span>"
+            f"<span><b>{esc(c.name)}</b><small>{esc(c.description)}</small>{label}"
+            f"{f'<br>{chips}' if chips else ''}</span>"
             f"<span>{bar}<small>{c.freq_ci_low:.0%} to {c.freq_ci_high:.0%} of calls</small></span>"
             f"<span>{counts}<br><small>{lever.get(c.type, esc(c.type))}</small></span></li>"
         )

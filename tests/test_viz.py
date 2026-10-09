@@ -157,3 +157,20 @@ def test_cause_list_labels_a_channel_cause_as_channel_not_as_a_small_watch():
     out = cause_list([ch])
     assert "the bot misheard the buyer at the root turn" in out and "no prompt fix" in out
     assert "under 3 calls" not in out and '<span class="n">&ndash;</span>' in out
+
+
+def test_cause_list_shows_owner_and_evidence_chips_and_none_for_a_cause_without_them():
+    """Each cause with an owner must show two small chips, owner and evidence; an old cause shows none.
+
+    Without it the Issues view would not say who owns each fault or how strong the evidence is, so the fix team
+    could patch a speech fault they cannot fix (#90).
+    """
+    ch = Cause(
+        cause_id="cause_x", name="N", description="", type="channel", parameter="x", status="watch",
+        owner="speech", owner_evidence="likely",
+    )  # fmt: skip
+    out = cause_list([ch])
+    assert out.count("vl-chip") == 2 and "owner: Speech" in out and "evidence: likely" in out
+    old = Cause(cause_id="cause_y", name="O", description="", type="prompt", parameter="x", status="ranked")
+    out = cause_list([old])
+    assert "owner:" not in out and "evidence:" not in out
