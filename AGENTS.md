@@ -45,13 +45,21 @@ Data contracts for every stage: `src/vaniloop/models.py`. Change them only in an
 
 ## How work flows
 
-1. Each task is one GitHub issue in the work-order format
-   (`.github/ISSUE_TEMPLATE/work-order.md`): goal, allowed paths, forbidden paths,
-   done-when checks, verify command, stop rule.
-2. One branch per issue: `<issue-number>-<slug>`. Implementers are Sonnet subagents.
-3. Run `bin/check` before you commit. CI runs the same script.
-4. Open a PR that says `Closes #<n>`. Codex reviews (at most 3 rounds). The owner merges.
-5. Update the issue checklist and `docs/DECISIONS.md` when a decision changes.
+Repo: https://github.com/amteshwarkhokhar/vaniloop (private). Milestones are the loop
+stages: `0 Ingest`, `1 Audit`, `2 Issue`, `3 Fix`, `4 Test`, `5 Demo`.
+
+1. Each task is one issue in a stage milestone (`.github/ISSUE_TEMPLATE/work-order.md`).
+   One issue is one PR: at most 600 changed lines and 20 files. Split bigger work.
+2. An issue ends with `## Acceptance`: bullets of the form `- <claim> — done when: <check>`.
+   A check is something a test, a command or a file shows. One bullet says what must not change.
+   `Depends on #n` lines name issues that must merge first.
+3. One branch per issue: `<issue-number>-<slug>`. Implementers are Sonnet subagents.
+   Read the code and tests you touch first, and follow the pattern that is there.
+4. Run `bin/check` before you commit. CI and the pre-push hook run the same script.
+5. The PR body has six headings (`.github/pull_request_template.md`): Task (`Closes #n`),
+   Intent, Why it was needed, Why this approach, What changed (every path), Proof of work.
+6. Codex reviews (at most 3 rounds). The owner merges.
+7. Add a line to `docs/DECISIONS.md` when a decision changes.
 
 ## Commands
 

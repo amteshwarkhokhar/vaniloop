@@ -1,16 +1,32 @@
-Closes #
+<!-- Keep all six headings. Every changed and deleted path must appear under "What changed". No real buyer names, numbers or call quotes. -->
 
-## What changes, on one call
+## Task
 
-Before: (one call, placeholder names only)
-After:
+<!-- Closes #123 -->
 
-## Evidence
+## Intent
 
-- [ ] `bin/check` passes
-- [ ] New or changed rule has a test that fails without the change
-- [ ] Ran on real calls locally (say how many), or say why not
+<!-- At least 1 sentence: what this PR does. -->
 
-## Not covered
+## Why it was needed
 
-What the tests do not show.
+<!-- At least 1 sentence: the problem before this change, on one call if you can. -->
+
+## Why this approach
+
+<!-- At least 2 sentences: why this design, and what alternatives you rejected. -->
+
+## What changed
+
+<!-- One bullet per changed or deleted path. Each bullet starts with a path in backticks. -->
+
+- `path/to/file`: what changed there
+
+## Proof of work
+
+<!-- At least one fenced block with the `$ ` commands you ran and what they printed. bin/check is required. -->
+
+```console
+$ bin/check
+<output>
+```
