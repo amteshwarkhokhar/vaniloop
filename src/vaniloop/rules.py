@@ -43,18 +43,85 @@ def _ev(call: CallRecord, idx: int) -> Evidence:
 
 
 # ---------------------------------------------------------------- quantity parsing
-_ONES = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
-         "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
-         "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
-         "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
-         # Hindi / Hinglish
-         "ek": 1, "do": 2, "teen": 3, "char": 4, "chaar": 4, "paanch": 5, "panch": 5, "chhe": 6, "chhah": 6,
-         "che": 6, "chah": 6, "saat": 7, "aath": 8, "nau": 9, "das": 10, "gyarah": 11, "barah": 12,
-         "terah": 13, "chaudah": 14, "pandrah": 15, "solah": 16, "satrah": 17, "atharah": 18, "unnis": 19,
-         "bees": 20, "pachis": 25, "pachchis": 25, "tees": 30, "chalis": 40, "pachaas": 50, "pachas": 50,
-         "saath": 60, "sattar": 70, "assi": 80, "nabbe": 90, "dedh": 1.5, "dhai": 2.5, "adhai": 2.5}
-_MULT = {"hundred": 100, "sau": 100, "thousand": 1000, "hazaar": 1000, "hazar": 1000, "hajar": 1000,
-         "lakh": 100000, "lac": 100000}
+_ONES = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+    # Hindi / Hinglish
+    "ek": 1,
+    "do": 2,
+    "teen": 3,
+    "char": 4,
+    "chaar": 4,
+    "paanch": 5,
+    "panch": 5,
+    "chhe": 6,
+    "chhah": 6,
+    "che": 6,
+    "chah": 6,
+    "saat": 7,
+    "aath": 8,
+    "nau": 9,
+    "das": 10,
+    "gyarah": 11,
+    "barah": 12,
+    "terah": 13,
+    "chaudah": 14,
+    "pandrah": 15,
+    "solah": 16,
+    "satrah": 17,
+    "atharah": 18,
+    "unnis": 19,
+    "bees": 20,
+    "pachis": 25,
+    "pachchis": 25,
+    "tees": 30,
+    "chalis": 40,
+    "pachaas": 50,
+    "pachas": 50,
+    "saath": 60,
+    "sattar": 70,
+    "assi": 80,
+    "nabbe": 90,
+    "dedh": 1.5,
+    "dhai": 2.5,
+    "adhai": 2.5,
+}
+_MULT = {
+    "hundred": 100,
+    "sau": 100,
+    "thousand": 1000,
+    "hazaar": 1000,
+    "hazar": 1000,
+    "hajar": 1000,
+    "lakh": 100000,
+    "lac": 100000,
+}
 _TOKEN = re.compile(r"\d[\d,]*\.?\d*|\.\d+|[a-z]+|[-\u2013]")
 _RANGE_SEP = {"to", "se", "-", "\u2013"}
 
@@ -178,13 +245,21 @@ def _fmt_pct(x: float) -> str:
 def rule_dead_air(call: CallRecord, led: Ledger) -> Finding:
     gaps = [s for s in call.silences if s.duration > DEAD_AIR_SEC]
     if not call.audio_path:
-        return Finding(parameter="dead_air", status="Unknown", reason="no audio to measure silence", basis="unavailable")
+        return Finding(
+            parameter="dead_air", status="Unknown", reason="no audio to measure silence", basis="unavailable"
+        )
     if not gaps:
-        return Finding(parameter="dead_air", status="Pass", reason=f"no silence over {DEAD_AIR_SEC:.0f} s", basis="observed")
+        return Finding(
+            parameter="dead_air", status="Pass", reason=f"no silence over {DEAD_AIR_SEC:.0f} s", basis="observed"
+        )
     worst = max(gaps, key=lambda s: s.duration)
-    return Finding(parameter="dead_air", status="NonFatal", basis="observed",
-                   reason=f"{len(gaps)} silence(s) over {DEAD_AIR_SEC:.0f} s, longest {worst.duration:.1f} s",
-                   evidence=[Evidence(start_sec=s.start_sec, end_sec=s.end_sec) for s in gaps])
+    return Finding(
+        parameter="dead_air",
+        status="NonFatal",
+        basis="observed",
+        reason=f"{len(gaps)} silence(s) over {DEAD_AIR_SEC:.0f} s, longest {worst.duration:.1f} s",
+        evidence=[Evidence(start_sec=s.start_sec, end_sec=s.end_sec) for s in gaps],
+    )
 
 
 def _end_of_call_within(call: CallRecord, idx: int, n: int) -> bool:
@@ -192,7 +267,11 @@ def _end_of_call_within(call: CallRecord, idx: int, n: int) -> bool:
 
 
 def _limit(key: str) -> int:
-    return SLOT_LIMITS["spec" if key.startswith("spec:") else key] if (key.startswith("spec:") or key in SLOT_LIMITS) else LOOP_MAX_ASKS
+    return (
+        SLOT_LIMITS["spec" if key.startswith("spec:") else key]
+        if (key.startswith("spec:") or key in SLOT_LIMITS)
+        else LOOP_MAX_ASKS
+    )
 
 
 def rule_looping(call: CallRecord, led: Ledger) -> Finding:
@@ -223,26 +302,44 @@ def rule_looping(call: CallRecord, led: Ledger) -> Finding:
         over = idxs[limit]
         irritated = any(u.frustrated >= FRUSTRATED_P for u in led.user_turns if u.idx > over)
         ends = _end_of_call_within(call, over, LOOP_END_TURNS)
-        why = ("buyer irritated after the ask past the limit" if irritated
-               else "call ended right after the ask past the limit" if ends else "no sign of irritation")
+        why = (
+            "buyer irritated after the ask past the limit"
+            if irritated
+            else "call ended right after the ask past the limit"
+            if ends
+            else "no sign of irritation"
+        )
         results.append((irritated or ends, len(idxs), key, idxs, f"limit {limit}; {why}", limit))
     if not results:
         spec_limit = SLOT_LIMITS["spec"]
         for seg, idxs in sorted(unnamed_specs.items()):
             named_max = max((len(v) for (k, sg), v in asks.items() if k.startswith("spec:") and sg == seg), default=0)
             if len(idxs) + named_max > spec_limit:
-                return Finding(parameter="looping", status="Unknown", basis="observed",
-                               reason=f"{len(idxs)} spec question(s) without a spec name (plus {named_max} for the most asked "
-                                      f"named spec) could pass the limit of {spec_limit}; repeats cannot be told apart",
-                               evidence=[_ev(call, i) for i in idxs])
-        return Finding(parameter="looping", status="Pass", basis="observed",
-                       reason="no slot asked more than its limit (product 4, quantity 3, each spec 2, other 3)")
+                return Finding(
+                    parameter="looping",
+                    status="Unknown",
+                    basis="observed",
+                    reason=f"{len(idxs)} spec question(s) without a spec name (plus {named_max} for the most asked "
+                    f"named spec) could pass the limit of {spec_limit}; repeats cannot be told apart",
+                    evidence=[_ev(call, i) for i in idxs],
+                )
+        return Finding(
+            parameter="looping",
+            status="Pass",
+            basis="observed",
+            reason="no slot asked more than its limit (product 4, quantity 3, each spec 2, other 3)",
+        )
     fatal, n, key, idxs, why, _lim = max(results, key=lambda r: (r[0], r[1]))
     label = key.replace("spec:", "spec '") + ("'" if key.startswith("spec:") else "")
     others = f"; {len(results) - 1} other looping slot(s)" if len(results) > 1 else ""
-    return Finding(parameter="looping", status="Fatal" if fatal else "NonFatal", basis="observed",
-                   reason=f"bot asked for {label} {n} times ({why}){others}",
-                   evidence=[_ev(call, i) for i in idxs], onset_turn=min(r[3][r[5]] for r in results))
+    return Finding(
+        parameter="looping",
+        status="Fatal" if fatal else "NonFatal",
+        basis="observed",
+        reason=f"bot asked for {label} {n} times ({why}){others}",
+        evidence=[_ev(call, i) for i in idxs],
+        onset_turn=min(r[3][r[5]] for r in results),
+    )
 
 
 def rule_category_isq(call: CallRecord, led: Ledger) -> Finding:
@@ -251,15 +348,26 @@ def rule_category_isq(call: CallRecord, led: Ledger) -> Finding:
         return Finding(parameter="category_isq", status="NotApplicable", reason="no spec questions", basis="observed")
     bad = sorted((b for b in specs if b.fits_confirmed_product is False), key=lambda b: b.idx)
     if bad:
-        return Finding(parameter="category_isq", status="Fatal", basis="spoken_proxy",
-                       reason=f"{len(bad)} spec question(s) belong to another category than '{led.final_product}'",
-                       evidence=[_ev(call, b.idx) for b in bad], onset_turn=bad[0].idx)
+        return Finding(
+            parameter="category_isq",
+            status="Fatal",
+            basis="spoken_proxy",
+            reason=f"{len(bad)} spec question(s) belong to another category than '{led.final_product}'",
+            evidence=[_ev(call, b.idx) for b in bad],
+            onset_turn=bad[0].idx,
+        )
     unknown = [b for b in specs if b.fits_confirmed_product is None]
     if unknown:
-        return Finding(parameter="category_isq", status="Unknown", basis="spoken_proxy",
-                       reason=f"{len(unknown)} spec question(s) not labelled for fit",
-                       evidence=[_ev(call, b.idx) for b in unknown])
-    return Finding(parameter="category_isq", status="Pass", reason="spec questions fit the product", basis="spoken_proxy")
+        return Finding(
+            parameter="category_isq",
+            status="Unknown",
+            basis="spoken_proxy",
+            reason=f"{len(unknown)} spec question(s) not labelled for fit",
+            evidence=[_ev(call, b.idx) for b in unknown],
+        )
+    return Finding(
+        parameter="category_isq", status="Pass", reason="spec questions fit the product", basis="spoken_proxy"
+    )
 
 
 def _handoff_turn(led: Ledger) -> int | None:
@@ -269,18 +377,34 @@ def _handoff_turn(led: Ledger) -> int | None:
 
 def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
     if led.scope not in BL_SCOPES:
-        return Finding(parameter="qty_probing", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed")
+        return Finding(
+            parameter="qty_probing", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed"
+        )
     asked = sorted(b.idx for b in led.bot_turns if b.slot == "quantity")
     volunteered = "quantity" in led.buyer_facts
     if asked or volunteered:
-        return Finding(parameter="qty_probing", status="Pass", reason="quantity asked or given", basis="observed",
-                       evidence=[_ev(call, asked[0])] if asked else [])
+        return Finding(
+            parameter="qty_probing",
+            status="Pass",
+            reason="quantity asked or given",
+            basis="observed",
+            evidence=[_ev(call, asked[0])] if asked else [],
+        )
     note = "(assumes quantity is a defined field for this category)"
     if not QTY_ALWAYS_DEFINED:
-        return Finding(parameter="qty_probing", status="Unknown", basis="spoken_proxy",
-                       reason=f"bot never asked for quantity; cannot tell if it is defined for this category {note}")
-    return Finding(parameter="qty_probing", status="Fatal", basis="spoken_proxy", onset_turn=_handoff_turn(led),
-                   reason=f"bot never asked for quantity and the buyer did not give one {note}")
+        return Finding(
+            parameter="qty_probing",
+            status="Unknown",
+            basis="spoken_proxy",
+            reason=f"bot never asked for quantity; cannot tell if it is defined for this category {note}",
+        )
+    return Finding(
+        parameter="qty_probing",
+        status="Fatal",
+        basis="spoken_proxy",
+        onset_turn=_handoff_turn(led),
+        reason=f"bot never asked for quantity and the buyer did not give one {note}",
+    )
 
 
 def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
@@ -288,13 +412,19 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     is not a fault. It is a miss only if the bot asked for quantity again after the buyer gave it (ignored)."""
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said:
-        return Finding(parameter="qty_missed", status="NotApplicable", reason="buyer gave no quantity", basis="observed")
+        return Finding(
+            parameter="qty_missed", status="NotApplicable", reason="buyer gave no quantity", basis="observed"
+        )
     gave = sorted(u.idx for u in led.user_turns if u.gave_value_for == "quantity")
     if kept and not gave:
         return Finding(parameter="qty_missed", status="Pass", reason="a quantity was captured", basis="spoken_proxy")
     if not gave:
-        return Finding(parameter="qty_missed", status="Unknown", basis="spoken_proxy",
-                       reason=f"buyer said quantity '{said}' but no turn is labelled as giving it; cannot tell if it was captured")
+        return Finding(
+            parameter="qty_missed",
+            status="Unknown",
+            basis="spoken_proxy",
+            reason=f"buyer said quantity '{said}' but no turn is labelled as giving it; cannot tell if it was captured",
+        )
     change = led.product_changed_at_turn
 
     def seg(i: int) -> int:  # a product change starts a new quantity (L83): compare only inside one segment
@@ -304,33 +434,57 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     for sg in (0, 1):
         first = [g for g in gave if seg(g) == sg]
         if first:
-            reasked += sorted(b.idx for b in led.bot_turns if b.slot == "quantity" and seg(b.idx) == sg and b.idx > first[0])
+            reasked += sorted(
+                b.idx for b in led.bot_turns if b.slot == "quantity" and seg(b.idx) == sg and b.idx > first[0]
+            )
     reasked.sort()
     if reasked:
-        return Finding(parameter="qty_missed", status="Fatal", basis="spoken_proxy", onset_turn=reasked[0],
-                       reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
-                       evidence=[_ev(call, reasked[0])])
-    return Finding(parameter="qty_missed", status="Pass", basis="spoken_proxy",
-                   reason="a quantity was captured and the bot did not ask again" if kept
-                   else "buyer gave a quantity and the bot moved on (no read-back needed)")
+        return Finding(
+            parameter="qty_missed",
+            status="Fatal",
+            basis="spoken_proxy",
+            onset_turn=reasked[0],
+            reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
+            evidence=[_ev(call, reasked[0])],
+        )
+    return Finding(
+        parameter="qty_missed",
+        status="Pass",
+        basis="spoken_proxy",
+        reason="a quantity was captured and the bot did not ask again"
+        if kept
+        else "buyer gave a quantity and the bot moved on (no read-back needed)",
+    )
 
 
 def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said or not kept:
-        return Finding(parameter="qty_accuracy", status="NotApplicable", basis="observed",
-                       reason="needs both a buyer quantity and a bot-confirmed quantity")
+        return Finding(
+            parameter="qty_accuracy",
+            status="NotApplicable",
+            basis="observed",
+            reason="needs both a buyer quantity and a bot-confirmed quantity",
+        )
     pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
     if pa is None or pb is None:
-        return Finding(parameter="qty_accuracy", status="Unknown", basis="spoken_proxy",
-                       reason=f"cannot parse quantity (buyer '{said}', bot '{kept}')")
+        return Finding(
+            parameter="qty_accuracy",
+            status="Unknown",
+            basis="spoken_proxy",
+            reason=f"cannot parse quantity (buyer '{said}', bot '{kept}')",
+        )
     (alo, ahi, ua), (blo, bhi, ub) = pa, pb
     ua = ua or norm_unit((led.buyer_facts or {}).get("unit"))
     ub = ub or norm_unit((led.bot_confirmed or {}).get("unit"))
     ga, gb = unit_group(ua), unit_group(ub)
     if ga and gb and ga != gb:
-        return Finding(parameter="qty_accuracy", status="Unknown", basis="spoken_proxy",
-                       reason=f"units differ in kind (buyer '{ua}', bot '{ub}'); see qty_unit")
+        return Finding(
+            parameter="qty_accuracy",
+            status="Unknown",
+            basis="spoken_proxy",
+            reason=f"units differ in kind (buyer '{ua}', bot '{ub}'); see qty_unit",
+        )
     if ua and ub:  # same group: convert the bot value into the buyer's unit, so the tolerance applies in that unit
         k = to_base(1, ub) / to_base(1, ua)
         blo, bhi = blo * k, bhi * k
@@ -338,14 +492,28 @@ def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
     if (alo, ahi) == (blo, bhi):
         return Finding(parameter="qty_accuracy", status="Pass", reason="quantities match", basis="spoken_proxy")
     if blo == bhi == ahi and alo < ahi:  # VANI prompt L1255: a range is stored as its maximum
-        return Finding(parameter="qty_accuracy", status="Pass", basis="spoken_proxy",
-                       reason=f"range captured as its maximum (buyer said '{said}', bot kept '{kept}')")
+        return Finding(
+            parameter="qty_accuracy",
+            status="Pass",
+            basis="spoken_proxy",
+            reason=f"range captured as its maximum (buyer said '{said}', bot kept '{kept}')",
+        )
     if blo == bhi and alo < ahi and alo <= blo <= ahi:
-        return Finding(parameter="qty_accuracy", status="NonFatal", basis="spoken_proxy", onset_turn=onset,
-                       reason=f"range collapsed to one value (buyer said '{said}', bot confirmed '{kept}')")
+        return Finding(
+            parameter="qty_accuracy",
+            status="NonFatal",
+            basis="spoken_proxy",
+            onset_turn=onset,
+            reason=f"range collapsed to one value (buyer said '{said}', bot confirmed '{kept}')",
+        )
     if blo != bhi and (blo <= ahi and alo <= bhi):  # bot range overlaps the buyer's but is not the same
-        return Finding(parameter="qty_accuracy", status="NonFatal", basis="spoken_proxy", onset_turn=onset,
-                       reason=f"ranges differ (buyer '{said}', bot '{kept}')")
+        return Finding(
+            parameter="qty_accuracy",
+            status="NonFatal",
+            basis="spoken_proxy",
+            onset_turn=onset,
+            reason=f"ranges differ (buyer '{said}', bot '{kept}')",
+        )
     # nearest endpoint of the buyer's range to the bot's value (or nearest bot endpoint for a bot range)
     if blo == bhi:
         a, b = (alo if blo < alo else ahi), blo
@@ -354,30 +522,53 @@ def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
     diff = abs(a - b)
     rel = diff / abs(a) if a else float("inf")
     minor = diff <= QTY_MINOR_ABS and rel <= QTY_MINOR_REL
-    return Finding(parameter="qty_accuracy", status="NonFatal" if minor else "Fatal", basis="spoken_proxy",
-                   reason=f"buyer said '{said}' ({a:g}), bot confirmed '{kept}' ({b:g}); "
-                          f"diff {diff:g} ({_fmt_pct(rel) if rel != float('inf') else 'n/a'})",
-                   onset_turn=onset)
+    return Finding(
+        parameter="qty_accuracy",
+        status="NonFatal" if minor else "Fatal",
+        basis="spoken_proxy",
+        reason=f"buyer said '{said}' ({a:g}), bot confirmed '{kept}' ({b:g}); "
+        f"diff {diff:g} ({_fmt_pct(rel) if rel != float('inf') else 'n/a'})",
+        onset_turn=onset,
+    )
 
 
 def rule_qty_unit(call: CallRecord, led: Ledger) -> Finding:
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said or not kept:
-        return Finding(parameter="qty_unit", status="NotApplicable", basis="observed",
-                       reason="needs both a buyer quantity and a bot-confirmed quantity")
+        return Finding(
+            parameter="qty_unit",
+            status="NotApplicable",
+            basis="observed",
+            reason="needs both a buyer quantity and a bot-confirmed quantity",
+        )
     pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
     ua = (pa[2] if pa else None) or norm_unit(led.buyer_facts.get("unit"))
     ub = (pb[2] if pb else None) or norm_unit(led.bot_confirmed.get("unit"))
     if ua is None and ub is None:
-        return Finding(parameter="qty_unit", status="NotApplicable", basis="spoken_proxy", reason="no unit on either side")
+        return Finding(
+            parameter="qty_unit", status="NotApplicable", basis="spoken_proxy", reason="no unit on either side"
+        )
     if ua is None or ub is None:
-        return Finding(parameter="qty_unit", status="Pass", basis="spoken_proxy",
-                       reason=f"only one side states a unit (buyer '{ua}', bot '{ub}')")
+        return Finding(
+            parameter="qty_unit",
+            status="Pass",
+            basis="spoken_proxy",
+            reason=f"only one side states a unit (buyer '{ua}', bot '{ub}')",
+        )
     if unit_group(ua) != unit_group(ub):
-        return Finding(parameter="qty_unit", status="Fatal", basis="spoken_proxy", onset_turn=_handoff_turn(led),
-                       reason=f"buyer unit '{ua}' ({unit_group(ua)}) but bot confirmed '{ub}' ({unit_group(ub)})")
-    return Finding(parameter="qty_unit", status="Pass", basis="spoken_proxy",
-                   reason="units are the same kind; values are checked by qty_accuracy")
+        return Finding(
+            parameter="qty_unit",
+            status="Fatal",
+            basis="spoken_proxy",
+            onset_turn=_handoff_turn(led),
+            reason=f"buyer unit '{ua}' ({unit_group(ua)}) but bot confirmed '{ub}' ({unit_group(ub)})",
+        )
+    return Finding(
+        parameter="qty_unit",
+        status="Pass",
+        basis="spoken_proxy",
+        reason="units are the same kind; values are checked by qty_accuracy",
+    )
 
 
 def _product_confirmed(led: Ledger) -> bool:
@@ -421,49 +612,115 @@ def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
     if led.scope == "seller_unavailable_handoff":
         # L1175, L1701: a handoff needs a confirmed product first. Pass only with evidence of the confirmation.
         if led.product_match is False:
-            return Finding(parameter="product_change", status="NonFatal", basis="spoken_proxy", evidence=ev,
-                           onset_turn=_handoff_turn(led),
-                           reason=f"wrong product handed off (buyer wants '{led.final_product}', bot confirmed '{kept}')")
+            return Finding(
+                parameter="product_change",
+                status="NonFatal",
+                basis="spoken_proxy",
+                evidence=ev,
+                onset_turn=_handoff_turn(led),
+                reason=f"wrong product handed off (buyer wants '{led.final_product}', bot confirmed '{kept}')",
+            )
         if not _product_confirmed(led):
-            return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
-                           onset_turn=_handoff_turn(led), reason="handoff call with no evidence the bot confirmed a product")
-        return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
-                       reason="handoff call with a confirmed product")
+            return Finding(
+                parameter="product_change",
+                status="Unknown",
+                basis="spoken_proxy",
+                evidence=ev,
+                onset_turn=_handoff_turn(led),
+                reason="handoff call with no evidence the bot confirmed a product",
+            )
+        return Finding(
+            parameter="product_change",
+            status="Pass",
+            basis="spoken_proxy",
+            evidence=ev,
+            reason="handoff call with a confirmed product",
+        )
     if led.scope not in BL_SCOPES:
-        return Finding(parameter="product_change", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed")
+        return Finding(
+            parameter="product_change", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed"
+        )
     if led.variant == "enrich" and led.product_changed_at_turn is not None:
-        collected = sorted(b.idx for b in led.bot_turns
-                           if b.idx > led.product_changed_at_turn and b.slot in ENRICH_FORBIDDEN_SLOTS)
+        collected = sorted(
+            b.idx for b in led.bot_turns if b.idx > led.product_changed_at_turn and b.slot in ENRICH_FORBIDDEN_SLOTS
+        )
         if collected:  # L599-603: the enrich bot must not collect for the new product
-            return Finding(parameter="product_change", status="NonFatal", basis="spoken_proxy", evidence=ev,
-                           onset_turn=collected[0],
-                           reason="enrich variant: bot collected requirements for the new product after the change")
+            return Finding(
+                parameter="product_change",
+                status="NonFatal",
+                basis="spoken_proxy",
+                evidence=ev,
+                onset_turn=collected[0],
+                reason="enrich variant: bot collected requirements for the new product after the change",
+            )
         d = _enrich_deflection(call, led)
         if d:
-            return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
-                           reason="enrich variant: buyer wanted another product and the bot closed the call without collecting it")
+            return Finding(
+                parameter="product_change",
+                status="Pass",
+                basis="spoken_proxy",
+                evidence=ev,
+                reason="enrich variant: buyer wanted another product and the bot closed the call without collecting it",
+            )
         if d is None:
-            return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
-                           reason="enrich variant: bot clarified the product change but the call shows no closing turn")
+            return Finding(
+                parameter="product_change",
+                status="Unknown",
+                basis="spoken_proxy",
+                evidence=ev,
+                reason="enrich variant: bot clarified the product change but the call shows no closing turn",
+            )
     if not kept:
-        return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
-                       reason="bot never confirmed a product")
+        return Finding(
+            parameter="product_change",
+            status="Unknown",
+            basis="spoken_proxy",
+            evidence=ev,
+            reason="bot never confirmed a product",
+        )
     if led.product_match is None:
-        return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
-                       reason="no judgement whether the confirmed product matches what the buyer wants")
+        return Finding(
+            parameter="product_change",
+            status="Unknown",
+            basis="spoken_proxy",
+            evidence=ev,
+            reason="no judgement whether the confirmed product matches what the buyer wants",
+        )
     if led.product_match is False:
-        after = sorted(b.idx for b in led.bot_turns
-                       if led.product_changed_at_turn is not None and b.idx > led.product_changed_at_turn)
+        after = sorted(
+            b.idx
+            for b in led.bot_turns
+            if led.product_changed_at_turn is not None and b.idx > led.product_changed_at_turn
+        )
         confirm = sorted(b.idx for b in led.bot_turns if b.slot == "confirm")
         onset = after[0] if after else confirm[0] if confirm else None
-        return Finding(parameter="product_change", status="Fatal", basis="spoken_proxy", evidence=ev, onset_turn=onset,
-                       reason=f"buyer wants '{led.final_product}' but bot confirmed '{kept}'")
-    return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
-                   reason=f"bot confirmed the product the buyer wants ('{led.final_product}')")
+        return Finding(
+            parameter="product_change",
+            status="Fatal",
+            basis="spoken_proxy",
+            evidence=ev,
+            onset_turn=onset,
+            reason=f"buyer wants '{led.final_product}' but bot confirmed '{kept}'",
+        )
+    return Finding(
+        parameter="product_change",
+        status="Pass",
+        basis="spoken_proxy",
+        evidence=ev,
+        reason=f"bot confirmed the product the buyer wants ('{led.final_product}')",
+    )
 
 
-RULES = [rule_category_isq, rule_product_accuracy, rule_qty_probing, rule_qty_missed, rule_qty_accuracy,
-         rule_qty_unit, rule_looping, rule_dead_air]
+RULES = [
+    rule_category_isq,
+    rule_product_accuracy,
+    rule_qty_probing,
+    rule_qty_missed,
+    rule_qty_accuracy,
+    rule_qty_unit,
+    rule_looping,
+    rule_dead_air,
+]
 
 
 def label_coverage(call: CallRecord, led: Ledger) -> tuple[float, float]:
@@ -484,14 +741,26 @@ def unlabelled_turns(call: CallRecord, led: Ledger) -> list[int]:
 
 def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
     if call.duration_sec < SHORT_CALL_SEC or not any(t.speaker == "user" for t in call.turns):
-        return AuditRecord(call_id=call.call_id, verdict="NeedsReview", scope=led.scope, findings=[],
-                           flags=["low_confidence"], review_reason="call too short or buyer never spoke")
+        return AuditRecord(
+            call_id=call.call_id,
+            verdict="NeedsReview",
+            scope=led.scope,
+            findings=[],
+            flags=["low_confidence"],
+            review_reason="call too short or buyer never spoke",
+        )
     cov = min(label_coverage(call, led))
     scope_missing = led.scope not in ("bl_collection", "seller_unavailable_handoff", "oncall_astbuy", "refusal")
     if cov < MIN_COVERAGE or scope_missing:
-        return AuditRecord(call_id=call.call_id, verdict="NeedsReview", scope=led.scope, findings=[],
-                           flags=["low_confidence"],
-                           review_reason=f"incomplete ledger (coverage {cov * 100:.0f}%)" + ("; scope missing" if scope_missing else ""))
+        return AuditRecord(
+            call_id=call.call_id,
+            verdict="NeedsReview",
+            scope=led.scope,
+            findings=[],
+            flags=["low_confidence"],
+            review_reason=f"incomplete ledger (coverage {cov * 100:.0f}%)"
+            + ("; scope missing" if scope_missing else ""),
+        )
     missing = unlabelled_turns(call, led)
     findings = [r(call, led) for r in RULES]
     flags: list = []
@@ -501,7 +770,11 @@ def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
         flags.append("human_request")
     if any(f.parameter == "looping" and f.status in ("Fatal", "NonFatal") for f in findings):
         flags.append("loops")
-    if any(f.parameter in ("product_change", "qty_missed", "qty_accuracy", "qty_unit", "category_isq") and f.status == "Fatal" for f in findings):
+    if any(
+        f.parameter in ("product_change", "qty_missed", "qty_accuracy", "qty_unit", "category_isq")
+        and f.status == "Fatal"
+        for f in findings
+    ):
         flags.append("wrong_requirement")
     statuses = {f.status for f in findings}
     unknown = [f.parameter for f in findings if f.status == "Unknown" and f.parameter not in UNKNOWN_EXEMPT]
@@ -521,5 +794,12 @@ def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
     else:
         verdict = "Pass"
     onsets = [f.onset_turn for f in findings if f.status in ("Fatal", "NonFatal") and f.onset_turn is not None]
-    return AuditRecord(call_id=call.call_id, verdict=verdict, scope=led.scope, findings=findings, flags=flags,
-                       first_fault_turn=min(onsets) if onsets else None, review_reason=review)
+    return AuditRecord(
+        call_id=call.call_id,
+        verdict=verdict,
+        scope=led.scope,
+        findings=findings,
+        flags=flags,
+        first_fault_turn=min(onsets) if onsets else None,
+        review_reason=review,
+    )

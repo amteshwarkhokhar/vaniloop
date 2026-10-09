@@ -7,9 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Speaker = Literal["bot", "user"]
-Slot = Literal[
-    "product", "quantity", "unit", "spec", "name", "city", "confirm", "handoff", "greeting", "other"
-]
+Slot = Literal["product", "quantity", "unit", "spec", "name", "city", "confirm", "handoff", "greeting", "other"]
 Scope = Literal["bl_collection", "seller_unavailable_handoff", "oncall_astbuy", "refusal", "unclear"]
 Variant = Literal["main", "enrich", "redial", "redial_ast", "unknown"]
 Verdict = Literal["Pass", "Fatal", "NonFatal", "NeedsReview"]

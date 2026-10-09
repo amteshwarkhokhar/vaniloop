@@ -26,9 +26,7 @@ def load_transcript(path: str | Path, audio_dir: str | Path = AUDIO_DIR) -> Call
     turns = []
     for i, t in enumerate(data["turns"]):
         speaker = "user" if t["speaker"] == "seller" else t["speaker"]
-        turns.append(
-            Turn(idx=i, speaker=speaker, start_sec=t["start_sec"], end_sec=t["end_sec"], text=t["text"])
-        )
+        turns.append(Turn(idx=i, speaker=speaker, start_sec=t["start_sec"], end_sec=t["end_sec"], text=t["text"]))
     audio = Path(audio_dir) / f"{data['call_id']}.mp3"
     return CallRecord(
         call_id=data["call_id"],
@@ -41,9 +39,16 @@ def load_transcript(path: str | Path, audio_dir: str | Path = AUDIO_DIR) -> Call
 
 def detect_silences(mp3_path: str | Path, min_sec: float = 2.0, noise_db: float = -35) -> list[Silence]:
     cmd = [
-        "ffmpeg", "-hide_banner", "-nostats", "-i", str(mp3_path),
-        "-af", f"silencedetect=noise={noise_db}dB:d={min_sec}",
-        "-f", "null", "-",
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(mp3_path),
+        "-af",
+        f"silencedetect=noise={noise_db}dB:d={min_sec}",
+        "-f",
+        "null",
+        "-",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if proc.returncode != 0:

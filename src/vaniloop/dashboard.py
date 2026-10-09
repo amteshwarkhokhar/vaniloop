@@ -159,7 +159,8 @@ def render_detail(a: AuditRecord, call: CallRecord | None) -> None:
                 bg = colors.get(ev.idx, "#f3f4f6")
                 st.markdown(
                     f"<div style='background:{bg};color:#111;padding:6px 10px;border-radius:6px;margin:3px 0'>"
-                    f"<b>{ev.speaker}</b> <small>#{ev.idx} @ {ev.start_sec:.1f}s</small><br>{html.escape(ev.text)}</div>",
+                    f"<b>{ev.speaker}</b> <small>#{ev.idx} @ {ev.start_sec:.1f}s</small><br>"
+                    f"{html.escape(ev.text)}</div>",
                     unsafe_allow_html=True,
                 )
     with right:
@@ -190,7 +191,7 @@ def audit_tab(audits: list[AuditRecord], calls: dict[str, CallRecord]) -> None:
     counts = {v: sum(a.verdict == v for a in audits) for v in VERDICTS}
     cols = st.columns(5)
     cols[0].metric("Calls audited", n)
-    for col, v in zip(cols[1:], VERDICTS):
+    for col, v in zip(cols[1:], VERDICTS, strict=False):
         col.metric(v, f"{counts[v]} ({pct(counts[v], n)})")
 
     df = audits_frame(audits)
@@ -226,7 +227,11 @@ def issues_tab(causes: list[Cause], total_calls: int) -> None:
         return
     st.caption(f"Causes in given order. Frequency is over {total_calls} eligible calls.")
     hdr = st.columns([3, 1.2, 1.6, 0.8, 1, 1.6, 1, 1, 1.2])
-    for c, t in zip(hdr, ["Name", "Type", "Parameter", "Fatal", "NonFatal", "Frequency (interval)", "Priority", "Rank score", "Status"]):
+    for c, t in zip(
+        hdr,
+        ["Name", "Type", "Parameter", "Fatal", "NonFatal", "Frequency (interval)", "Priority", "Rank score", "Status"],
+        strict=False,
+    ):
         c.markdown(f"**{t}**")
     for cs in causes:
         freq = (len(set(cs.fatal_calls) | set(cs.nonfatal_calls)) / total_calls) if total_calls else 0.0
@@ -266,7 +271,9 @@ def main() -> None:
         st.code(str(data_dir))
         st.caption(f"{len(audits)} audits, {len(causes)} causes, {len(calls)} calls")
     st.title("vaniloop")
-    view = st.radio("View", ["Audit", "Issues", "Fix", "Test"], horizontal=True, key="view", label_visibility="collapsed")
+    view = st.radio(
+        "View", ["Audit", "Issues", "Fix", "Test"], horizontal=True, key="view", label_visibility="collapsed"
+    )
     if view == "Audit":
         audit_tab(audits, calls)
     elif view == "Issues":

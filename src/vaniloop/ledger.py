@@ -120,15 +120,26 @@ def _normalise(d: dict, call: CallRecord) -> dict:
         opts = b.get("options_offered")
         spec = slot == "spec"
         name = _str(b.get("spec_name"))
-        bots.append({"idx": b["idx"], "slot": slot,
-                     "options_offered": [str(o) for o in opts] if isinstance(opts, list) else [],
-                     "fits_confirmed_product": _bool(b.get("fits_confirmed_product")) if spec else None,
-                     "spec_name": name.lower() if spec and name else None})
+        bots.append(
+            {
+                "idx": b["idx"],
+                "slot": slot,
+                "options_offered": [str(o) for o in opts] if isinstance(opts, list) else [],
+                "fits_confirmed_product": _bool(b.get("fits_confirmed_product")) if spec else None,
+                "spec_name": name.lower() if spec and name else None,
+            }
+        )
     users = []
     for u in _labels(d.get("user_turns"), speakers, "user"):
         g = u.get("gave_value_for")
-        users.append({"idx": u["idx"], "frustrated": _p(u.get("frustrated")), "asks_for_human": _p(u.get("asks_for_human")),
-                      "gave_value_for": g if isinstance(g, str) and g in _SLOTS else None})
+        users.append(
+            {
+                "idx": u["idx"],
+                "frustrated": _p(u.get("frustrated")),
+                "asks_for_human": _p(u.get("asks_for_human")),
+                "gave_value_for": g if isinstance(g, str) and g in _SLOTS else None,
+            }
+        )
     out["bot_turns"], out["user_turns"] = bots, users
     return out
 
