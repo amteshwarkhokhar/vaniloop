@@ -30,11 +30,11 @@ def test_grade_view_hides_the_audit_until_saved_then_reveals_it(tmp_path, monkey
     """
     at, ids = _app(tmp_path, monkeypatch)
     assert not at.exception
-    assert not any("Reveal" in m.value for m in at.markdown)
+    assert not any("Your grade and the audit" in m.value for m in at.markdown)
     at.radio(key=f"grade_verdict_{ids[0]}").set_value("Fatal")
     at.button[0].click().run()
     assert load_grades(tmp_path / "hand_grades.jsonl")[ids[0]]["verdict"] == "Fatal"
-    assert any("Reveal" in m.value for m in at.markdown)
+    assert any("Your grade and the audit" in m.value for m in at.markdown)
     assert any("Agreement" in m.value for m in at.markdown)
 
 
