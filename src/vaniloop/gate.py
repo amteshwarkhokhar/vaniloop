@@ -23,7 +23,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .models import AuditRecord, CallRecord, Ledger
+from .models import AuditRecord, CallRecord, Finding, Ledger
 from .replay import ReplayResult
 
 MIN_CALLS = 3
@@ -38,9 +38,11 @@ class Trial(BaseModel):
     call_id: str
     prompt: Literal["old", "new"]
     seed: int
-    failed: bool  # the cause's parameter is Fatal or NonFatal, or the replay was invalid_output
-    fatal: bool  # the audit verdict is Fatal (used for guards and for NEW target replays)
-    unresolved: bool = False  # evidence is missing: Unknown or absent finding, NeedsReview verdict, or invalid_output
+    failed: bool  # the cause finding is Fatal or NonFatal from the fork on, or the replay was invalid_output
+    # a guard: the audit verdict is Fatal. A target: some finding is Fatal with its onset at or after the fork
+    fatal: bool
+    # evidence is missing: Unknown, absent, NotApplicable or pre-fork cause finding, NeedsReview, invalid_output
+    unresolved: bool = False
     outcome: str  # how the replay ended: end_call | hang_up | max_turns | invalid_output
 
 
@@ -161,8 +163,10 @@ def decide(
     unresolved trial in any arm (old seeds 0..K-1, new, guards), a guard's NEW Fatal always backed by
     a recorded re-check result, no Fatal verdict on any NEW target replay, no confirmed guard break
     and at least min_calls matched calls. Reject on a confirmed guard break, a Fatal on a NEW target
-    replay, or lift <= 0. A guard Fatal under BOTH prompts is flaky and does not reject. Everything
-    else is inconclusive with its reason.
+    replay, or lift <= 0. If OLD never fails (0 failures in every old trial), the replay did not
+    reproduce the fault, and the result is inconclusive before the lift rule runs. Target trials
+    count only findings that start at or after the fork (see _trial). A guard Fatal under BOTH prompts
+    is flaky and does not reject. Everything else is inconclusive with its reason.
     """
     k = k if k is not None else max((t.seed for t in [*old, *new]), default=-1) + 1
     old_k = [t for t in old if t.seed < k]
@@ -224,6 +228,9 @@ def decide(
     elif new_fatals:
         decision = "reject"
         reason = f"NEW replay is Fatal on {len(new_fatals)} target call(s): {', '.join(new_fatals)}"
+    elif old_k and not any(t.failed for t in old_k):
+        decision = "inconclusive"
+        reason = f"replay did not reproduce the fault (old 0/{len(old_k)})"
     elif lift <= 0:
         decision = "reject"
         reason = f"no improvement: lift {lift:.3f} <= 0"
@@ -269,19 +276,62 @@ ReplayFn = Callable[[CallRecord, Ledger, int, str, int], ReplayResult]  # call, 
 AuditFn = Callable[[CallRecord], AuditRecord]
 
 
+def _after_fork(res: ReplayResult, finding: Finding) -> bool | None:
+    """True if the finding starts at or after the fork, False if before it, None if its onset has no turn.
+
+    The fork is a list position, and onset_turn is a Turn.idx, so the idx is mapped to its position first.
+    The turns before the fork are copied verbatim into every replay, under both prompts.
+    """
+    if finding.onset_turn is None:
+        return None
+    pos = next((i for i, t in enumerate(res.call.turns) if t.idx == finding.onset_turn), None)
+    return None if pos is None else pos >= res.fork_turn
+
+
 def _trial(
-    call_id: str, which: Literal["old", "new"], seed: int, res: ReplayResult, audit_fn: AuditFn, parameter: str
+    call_id: str,
+    which: Literal["old", "new"],
+    seed: int,
+    res: ReplayResult,
+    audit_fn: AuditFn,
+    parameter: str,
+    target: bool = True,
 ) -> Trial:
+    """Audit one replay. A target judges only findings from the fork on; a guard keeps the whole-call verdict.
+
+    A target's cause finding that is Fatal or NonFatal counts as a failure only if its onset is at or after
+    the fork. Before the fork (or with no placeable onset) the fault sits in the copied prefix and fails in
+    both arms, and NotApplicable shows the replay never reached the situation, so the trial is unresolved.
+    A target's `fatal` is any Fatal finding, on any parameter, with its onset at or after the fork. A Fatal
+    finding on any parameter with an unplaceable onset makes the trial unresolved.
+    """
     audit = audit_fn(res.call)
     invalid = res.ended_by == "invalid_output"
     finding = next((f for f in audit.findings if f.parameter == parameter), None)
     unresolved = invalid or audit.verdict == "NeedsReview" or finding is None or finding.status == "Unknown"
+    if not target:
+        return Trial(
+            call_id=call_id,
+            prompt=which,
+            seed=seed,
+            failed=invalid or failed(audit, parameter),
+            fatal=audit.verdict == "Fatal",
+            unresolved=unresolved,
+            outcome=res.ended_by,
+        )
+    cause_failed = False
+    if finding is not None and finding.status in ("Fatal", "NonFatal"):
+        cause_failed = _after_fork(res, finding) is True
+        unresolved = unresolved or not cause_failed
+    unresolved = unresolved or (finding is not None and finding.status == "NotApplicable")
+    # A Fatal on any parameter whose onset has no turn cannot be placed before or after the fork: missing evidence.
+    unresolved = unresolved or any(f.status == "Fatal" and _after_fork(res, f) is None for f in audit.findings)
     return Trial(
         call_id=call_id,
         prompt=which,
         seed=seed,
-        failed=invalid or failed(audit, parameter),
-        fatal=audit.verdict == "Fatal",
+        failed=invalid or cause_failed,
+        fatal=any(f.status == "Fatal" and _after_fork(res, f) is True for f in audit.findings),
         unresolved=unresolved,
         outcome=res.ended_by,
     )
@@ -363,11 +413,11 @@ def run_gate(
     new: list[Trial] = []
     replayed: dict[tuple[str, int, str], ReplayResult] = {}  # (call_id, seed, which) -> result
 
-    def run_one(item: Item, prompt: str, seed: int, which: Literal["old", "new"]) -> Trial:
+    def run_one(item: Item, prompt: str, seed: int, which: Literal["old", "new"], target: bool = True) -> Trial:
         call, ledger, fork = item
         res = replay_fn(call, ledger, fork, prompt, seed)
         replayed[(call.call_id, seed, which)] = res
-        return _trial(call.call_id, which, seed, res, audit_fn, parameter)
+        return _trial(call.call_id, which, seed, res, audit_fn, parameter, target)
 
     # Seed-0 pairs first, interleave from there: old s then new s for every call and seed.
     for item in calls:
@@ -407,13 +457,13 @@ def run_gate(
             new.append(run_one(item, new_prompt, seed, "new"))
     checks: list[GuardCheck] = []
     for item in guards:
-        t_new0 = run_one(item, new_prompt, 0, "new")
+        t_new0 = run_one(item, new_prompt, 0, "new", target=False)
         check = GuardCheck(
             call_id=item[0].call_id, unresolved=t_new0.unresolved, fatal_new=t_new0.fatal and not t_new0.unresolved
         )
         if check.fatal_new:
-            t_new1 = run_one(item, new_prompt, 1, "new")
-            t_old1 = run_one(item, old_prompt, 1, "old")
+            t_new1 = run_one(item, new_prompt, 1, "new", target=False)
+            t_old1 = run_one(item, old_prompt, 1, "old", target=False)
             check.fatal_after_recheck = t_new1.fatal and not t_new1.unresolved
             check.fatal_old_seed1 = t_old1.fatal and not t_old1.unresolved
             check.unresolved = check.unresolved or t_new1.unresolved or t_old1.unresolved
