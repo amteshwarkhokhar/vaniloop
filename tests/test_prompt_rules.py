@@ -243,7 +243,7 @@ def test_enrich_without_closing_evidence_is_not_pass():
 
 
 def test_variant_normalise_clamps():
-    """The variant label must accept enrich, clamp bogus or missing values to unknown, and keep prompt version four.
+    """The variant label must accept enrich, clamp bogus or missing values to unknown, and keep prompt version five.
 
     A wrong clamp would feed an unknown variant into rules and change the cached prompt key.
     """
@@ -252,7 +252,7 @@ def test_variant_normalise_clamps():
     assert ledger._normalise({"variant": "bogus"}, call)["variant"] == "unknown"
     assert ledger._normalise({}, call)["variant"] == "unknown"
     assert Ledger(call_id="c", scope="refusal").variant == "unknown"
-    assert ledger.PROMPT_VERSION == "4"
+    assert ledger.PROMPT_VERSION == "5"
 
 
 # ---- 5 handoff needs a confirmed product
