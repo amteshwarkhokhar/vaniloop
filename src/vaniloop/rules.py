@@ -28,8 +28,8 @@ MIN_COVERAGE = 0.8
 LOOP_SLOTS = ("product", "quantity", "unit", "name", "city")
 ENRICH_FORBIDDEN_SLOTS = ("quantity", "unit", "spec", "name", "city", "handoff")  # collecting for the new product
 BL_SCOPES = ("bl_collection", "oncall_astbuy")
-INTENT_POST_SLOTS = ("confirm", "handoff")  # a bot turn that moves a lead towards posting
-INTENT_VALUE_SLOTS = ("product", "quantity", "unit", "spec")  # a buyer answer that suggests a real requirement
+INTENT_COLLECT_SLOTS = ("quantity", "unit", "spec", "confirm", "handoff")  # a bot turn that collects for a lead
+INTENT_VALUE_SLOTS = ("product", "quantity", "unit", "spec")  # a buyer answer that renews consent
 # Assumption: quantity is a defined field for every category in a BL call. If False, qty_probing is Unknown.
 QTY_ALWAYS_DEFINED = True
 QTY_MINOR_ABS = 20.0  # matrix minor band: abs diff <= 20 AND relative diff <= 20%
@@ -459,43 +459,50 @@ def _handoff_turn(led: Ledger) -> int | None:
 
 def rule_intent(call: CallRecord, led: Ledger) -> Finding:
     """Matrix row "Outcome Accuracy / buying intent" (always Fatal). A refusal call (the buyer has no requirement or
-    declines) must not be turned into a lead. The ledger has no per-turn refusal label, so:
-    - a confirm or handoff after the buyer's first turn is the onset (the bot moves the lead towards posting);
-    - a quantity, unit or spec ask alone is not a fault, because VANI's normal opening asks before the buyer refuses;
-    - a buyer answer that fills a product, quantity, unit or spec slot gives NeedsReview, because the buyer may have
-      changed their mind (Unknown, so the call goes to NeedsReview).
+    declines) must not be collected into a lead. The ledger labels the declining user turn (`declined`). Walk the
+    turns in idx order with one state flag:
+    - a user turn with declined=True sets the state to declined;
+    - a user turn that gives a product, quantity, unit or spec value clears it (the buyer renewed consent);
+    - the first bot turn with slot quantity, unit, spec, confirm or handoff while the state is declined is Fatal,
+      and that turn is the onset (the bot collects after the buyer said no);
+    - a bot ask before any decline is not a fault, because VANI's normal opening asks before the buyer refuses;
+    - scope refusal with no declining turn labelled is Unknown (basis spoken_proxy, no onset). Unknown forces
+      NeedsReview only when no Fatal or NonFatal finding outranks it, because the verdict takes the highest severity.
+    Lead scopes Pass and other scopes are NotApplicable.
     """
     if led.scope != "refusal":
         if led.scope in BL_SCOPES:
             return Finding(parameter="intent", status="Pass", reason="lead call, no refusal", basis="spoken_proxy")
         return Finding(parameter="intent", status="NotApplicable", reason=f"scope is {led.scope}", basis="spoken_proxy")
-    users = sorted(t.idx for t in call.turns if t.speaker == "user")
-    first_user = users[0] if users else -1
-    posting = sorted(b.idx for b in led.bot_turns if b.slot in INTENT_POST_SLOTS and b.idx > first_user)
-    if not posting:
-        return Finding(
-            parameter="intent",
-            status="Pass",
-            basis="spoken_proxy",
-            reason="buyer refused and the bot closed without confirming a lead",
-        )
-    gave = sorted(u.idx for u in led.user_turns if u.gave_value_for in INTENT_VALUE_SLOTS)
-    if gave:
+    if not any(u.declined for u in led.user_turns):
         return Finding(
             parameter="intent",
             status="Unknown",
             basis="spoken_proxy",
-            onset_turn=posting[0],
-            evidence=[_ev(call, gave[0]), _ev(call, posting[0])],
-            reason="scope is refusal, but the buyer gave requirement values; the buyer may have changed their mind",
+            reason="refusal scope but no declining turn is labelled",
         )
+    turns = [("user", u.idx, u) for u in led.user_turns] + [("bot", b.idx, b) for b in led.bot_turns]
+    declined_at: int | None = None
+    for kind, idx, t in sorted(turns, key=lambda x: x[1]):
+        if kind == "user":
+            if t.declined:
+                declined_at = idx
+            elif t.gave_value_for in INTENT_VALUE_SLOTS:
+                declined_at = None
+        elif declined_at is not None and t.slot in INTENT_COLLECT_SLOTS:
+            return Finding(
+                parameter="intent",
+                status="Fatal",
+                basis="spoken_proxy",
+                onset_turn=idx,
+                evidence=[_ev(call, declined_at), _ev(call, idx)],
+                reason="buyer declined, but the bot went on to collect or confirm a lead",
+            )
     return Finding(
         parameter="intent",
-        status="Fatal",
+        status="Pass",
         basis="spoken_proxy",
-        onset_turn=posting[0],
-        evidence=[_ev(call, posting[0])],
-        reason="buyer refused or has no requirement, but the bot confirmed or handed off a lead",
+        reason="buyer declined and the bot did not collect after it",
     )
 
 

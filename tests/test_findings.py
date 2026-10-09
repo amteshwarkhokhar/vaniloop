@@ -190,6 +190,26 @@ def test_f2_idx_rules():
     assert ledger._normalise(d, call)["product_changed_at_turn"] == 3
 
 
+def test_normalise_declined_is_a_strict_bool_that_defaults_to_false():
+    """The declined label must pass through only as a real true, and anything else must become False.
+
+    A string "false" read as truthy would mark a buyer declined and give a false Fatal on intent.
+    """
+    call = mk_call()
+    d = {
+        "scope": "refusal",
+        "user_turns": [
+            {"idx": 1, "declined": True},
+            {"idx": 3, "declined": "false"},
+            {"idx": 5, "declined": 1},
+            {"idx": 7},
+        ],
+    }
+    out = ledger._normalise(d, call)
+    assert [(u["idx"], u["declined"]) for u in out["user_turns"]] == [(1, True), (3, False), (5, False), (7, False)]
+    assert UserTurnLabel(idx=1).declined is False
+
+
 def test_f2_evidence_resolves_by_idx_field_and_never_raises():
     """Regression for review round 1 finding: evidence must resolve by the turn idx field, not by list position.
 

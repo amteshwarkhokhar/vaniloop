@@ -11,7 +11,7 @@ import json
 from .llm import complete_json, model_name
 from .models import CallRecord, Ledger
 
-PROMPT_VERSION = "5"  # bump whenever SYSTEM / INSTRUCTIONS / _normalise change; part of the cache key
+PROMPT_VERSION = "6"  # bump whenever SYSTEM / INSTRUCTIONS / _normalise change; part of the cache key
 
 SYSTEM = """You label IndiaMART voice-bot call transcripts. The bot (VANI) calls a buyer who showed
 interest in a product, confirms the requirement (product, quantity + unit, specs, city, name) to post
@@ -45,7 +45,10 @@ INSTRUCTIONS = """Return JSON with exactly these keys:
  "user_turns": [ {"idx": turn index of a user turn,
                   "frustrated": probability 0..1 that the buyer is irritated, confused or repeating themselves,
                   "asks_for_human": probability 0..1 that the buyer asks for a person,
-                  "gave_value_for": slot this answer provides a value for, or null} ]
+                  "gave_value_for": slot this answer provides a value for, or null,
+                  "declined": true when THIS turn says the buyer does not need the product, has no requirement, is not
+                     interested, or wants to stop. A "yes" to a question such as "you don't need this?" counts.
+                     Otherwise false} ]
 }
 Label EVERY bot turn and EVERY user turn. Use the turn indices shown in brackets."""
 
@@ -142,6 +145,7 @@ def _normalise(d: dict, call: CallRecord) -> dict:
                 "frustrated": _p(u.get("frustrated")),
                 "asks_for_human": _p(u.get("asks_for_human")),
                 "gave_value_for": g if isinstance(g, str) and g in _SLOTS else None,
+                "declined": u.get("declined") is True,
             }
         )
     out["bot_turns"], out["user_turns"] = bots, users

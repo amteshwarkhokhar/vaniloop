@@ -61,6 +61,7 @@ class UserTurnLabel(BaseModel):
     frustrated: float = 0.0  # probability 0..1
     asks_for_human: float = 0.0
     gave_value_for: Slot | None = None  # slot this answer fills, if any
+    declined: bool = False  # buyer says they do not need it, have no requirement, are not interested, or want to stop
 
 
 class Ledger(BaseModel):
