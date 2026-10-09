@@ -481,3 +481,59 @@ def test_default_cache_key_unchanged(cost_env):
         json.dumps({"m": "m", "u": "b", "t": "t", "msgs": msgs}, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()[:32]
     assert llm._key("m", msgs, "b", "t") == old
+
+
+def test_broken_marker_is_written_while_the_ledger_lock_is_held(cost_env, monkeypatch):
+    """Final review: a failed cost append must leave its marker before the ledger lock is released.
+
+    If the marker came after the release, another process could admit a request in the gap and keep spending.
+    """
+    import fcntl
+
+    held = []
+    real_mark = llm._mark_broken
+
+    def check_lock_then_mark(exc):
+        with open(llm.COSTS_PATH.with_suffix(".lock"), "a") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(True)
+            else:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                held.append(False)
+        real_mark(exc)
+
+    def boom(path, items):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(llm, "_mark_broken", check_lock_then_mark)
+    monkeypatch.setattr(llm, "append_jsonl", boom)
+    llm._settle("m", "t", None, 0.01, "ok", None)
+    assert held == [True] and llm._marker_path().exists()
+
+
+def test_zero_reservation_is_refused(cost_env, monkeypatch):
+    """A zero LLM_RESERVE_USD is rejected, because it would admit unlimited concurrent requests at the cap.
+
+    Final review found zero was accepted.
+    """
+    monkeypatch.setenv("LLM_RESERVE_USD", "0")
+    with pytest.raises(ValueError, match="> 0"):
+        llm._reserve_usd()
+
+
+def test_client_setup_failure_leaves_no_open_reservation(cost_env, monkeypatch):
+    """If configuring the client fails, no reservation is written, so budget is not consumed without a call.
+
+    Final review found with_options ran after admission and a failure there leaked the reservation.
+    """
+    monkeypatch.setenv("LLM_BUDGET_USD", "1")
+
+    class BadClient:
+        def with_options(self, **kw):
+            raise RuntimeError("bad options")
+
+    with pytest.raises(RuntimeError):
+        llm.metered_create(BadClient(), {"model": "m", "messages": []}, "t")
+    assert llm._open_reservation_usd() == 0.0

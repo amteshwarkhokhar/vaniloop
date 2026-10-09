@@ -99,16 +99,19 @@ def _budget() -> float | None:
 
 
 def _reserve_usd() -> float:
-    """Per-request reservation amount: LLM_RESERVE_USD when set, else RESERVE_USD. Must be finite and >= 0."""
+    """Per-request reservation amount: LLM_RESERVE_USD when set, else RESERVE_USD. Must be finite and > 0.
+
+    Zero would admit unlimited concurrent requests at the cap, so it is refused.
+    """
     raw = os.environ.get("LLM_RESERVE_USD", "").strip()
     if not raw:
         return RESERVE_USD
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        raise ValueError(f"LLM_RESERVE_USD must be a finite number >= 0, got {raw!r}") from None
-    if not math.isfinite(value) or value < 0:
-        raise ValueError(f"LLM_RESERVE_USD must be a finite number >= 0, got {raw!r}")
+        raise ValueError(f"LLM_RESERVE_USD must be a finite number > 0, got {raw!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"LLM_RESERVE_USD must be a finite number > 0, got {raw!r}")
     return value
 
 
@@ -186,6 +189,11 @@ def _admit(budget: float | None) -> str | None:
     a reserve row is appended and its id returned; _settle closes it with a matching reserve_id.
     The lock is released before the provider call, so requests still run concurrently. A marker
     left by an earlier failed write blocks admission in every process that shares this ledger.
+
+    Known limit: a reservation is an estimate, not a hard bound. One request can cost more than
+    RESERVE_USD (ours cost about $0.003-0.004 against $0.05), so spend past the cap is at most the
+    excess of in-flight requests over their reservations. A crash between admit and settle leaves
+    its reservation open; that budget stays blocked until the ledger is reset, which errs safe.
     """
     if _ledger_broken:
         raise BudgetExceeded(f"cost ledger not writable: {_ledger_broken_reason}")
@@ -262,7 +270,10 @@ def _settle(
     }
     try:
         with _ledger_lock():
-            append_jsonl(COSTS_PATH, [row])
+            try:
+                append_jsonl(COSTS_PATH, [row])
+            except Exception as exc:
+                _mark_broken(exc)  # still under the lock: no process can admit before the marker exists
     except Exception as exc:
         # Never mask the request result or its exception: record the break and refuse later requests.
         _mark_broken(exc)
@@ -285,8 +296,8 @@ def metered_create(client, request: dict, cache_tag: str):
     unchanged, so audio content parts and other shapes work too.
     """
     model = request.get("model") or model_name()
+    client = _without_retries(client)  # before admission: a setup failure must not leak a reservation
     reserve_id = _admit(_budget())
-    client = _without_retries(client)
     resp = None
     headers: dict = {}
     status = "ok"
