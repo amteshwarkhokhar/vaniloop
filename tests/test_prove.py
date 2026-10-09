@@ -2,6 +2,7 @@
 
 import json
 import random
+import threading
 
 import pytest
 
@@ -70,28 +71,40 @@ def write_inputs(tmp_path, patch_cause=CAUSE, old_text="rule text 10", new_text=
 
 
 class Stubs:
-    """Stub replay and audit: the old prompt fails `looping` on target calls, the patched prompt passes."""
+    """Stub replay and audit: the old prompt fails `looping` on target calls, the patched prompt passes.
 
-    def __init__(self, fail_after=None, fail_audit_at=None):
+    `new_fails` makes the patched prompt fail too (a futility reject). `fail_replay_at` and `fail_audit_at` raise on
+    that one call only, counted over all calls. `log` keeps (thread name, call id, prompt label, seed) per replay call.
+    """
+
+    def __init__(self, fail_after=None, fail_audit_at=None, fail_replay_at=None, new_fails=False):
         self.replays = self.audits = 0
         self.prompts = set()
-        self.fail_after, self.fail_audit_at = fail_after, fail_audit_at
+        self.fail_after, self.fail_audit_at, self.fail_replay_at = fail_after, fail_audit_at, fail_replay_at
+        self.new_fails = new_fails
+        self.log = []
+        self.lock = threading.Lock()  # the warm-up calls the stubs from a thread pool
 
     def replay_fn(self, call, ledger, fork, bot_prompt, seed):
-        self.replays += 1
-        if self.fail_after is not None and self.replays > self.fail_after:
+        tag = "new" if "PATCHED" in bot_prompt else "old"
+        with self.lock:
+            self.replays += 1
+            n = self.replays
+            self.log.append((threading.current_thread().name, call.call_id, tag, seed))
+        if (self.fail_after is not None and n > self.fail_after) or n == self.fail_replay_at:
             raise RuntimeError("stop mid-run")
         self.prompts.add(bot_prompt)
-        tag = "new" if "PATCHED" in bot_prompt else "old"
         turns = [*call.turns[:fork], Turn(idx=fork, speaker="bot", start_sec=1, end_sec=2, text=f"{tag} reply {seed}")]
         res = CallRecord(call_id=f"{call.call_id}__{tag}_{seed}", duration_sec=60, turns=turns)
         return ReplayResult(call=res, fork_turn=fork, ended_by="end_call")
 
     def audit_fn(self, call):
-        self.audits += 1
-        if self.audits == self.fail_audit_at:
+        with self.lock:
+            self.audits += 1
+            n = self.audits
+        if n == self.fail_audit_at:
             raise RuntimeError("ledger extraction failed")
-        bad = call.call_id.startswith("t") and "__old_" in call.call_id
+        bad = call.call_id.startswith("t") and ("__old_" in call.call_id or self.new_fails)
         return make_audit(call.call_id, "NonFatal" if bad else "Pass")
 
 
@@ -269,6 +282,113 @@ def test_pipeline_prove_subcommand_passes_its_options_and_prints(monkeypatch, ca
 
     monkeypatch.setattr(pipeline, "run_prove", fake)
     argv = ["prove", "--cause", CAUSE, "--prompt", "p.md", "--n", "4", "--k", "2", "--guards", "6", "--max-turns", "9"]
-    pipeline.main([*argv, "--dry-run"])
-    assert seen == dict(cause=CAUSE, prompt="p.md", n=4, k=2, guards=6, max_turns=9, dry_run=True)
+    pipeline.main([*argv, "--workers", "3", "--dry-run"])
+    assert seen == dict(cause=CAUSE, prompt="p.md", n=4, k=2, guards=6, max_turns=9, workers=3, dry_run=True)
     assert f"cause {CAUSE}" in capsys.readouterr().out
+    pipeline.main(argv)
+    assert seen["workers"] == 1 and seen["dry_run"] is False  # the default keeps today's sequential run
+
+
+def test_workers_warm_every_first_round_replay_before_the_gate_starts(tmp_path, capsys):
+    """With --workers 4, all 2*n*k target replays and one NEW seed-0 replay per guard must run in the pool before the
+    gate's first call, and the header must name the trade. If the gate started first the run would stay sequential, and
+    an unmentioned trade would hide that warming can spend on replays a futility stop skips."""
+    out, _, stubs = run(tmp_path, workers=4)
+    n, k, g = 3, 2, 2
+    ids = [c.call_id for c, _, _ in out.plan.targets]
+    assert len(ids) == n and len(out.plan.guards) == g and out.plan.warm_replays == 2 * n * k + g
+    warm, gate = stubs.log[: 2 * n * k + g], stubs.log[2 * n * k + g :]
+    assert all(t.startswith("warm") for t, *_ in warm)  # in the pool
+    assert gate and not any(t.startswith("warm") for t, *_ in gate)  # then the gate, on the main thread
+    expected = {(c, w, s) for c in ids for w in ("old", "new") for s in range(k)}
+    expected |= {(c.call_id, "new", 0) for c, _, _ in out.plan.guards}
+    assert sorted(tuple(x) for _, *x in warm) == sorted(expected)  # every first-round replay, each exactly once
+    assert len(gate) == out.replays == 14 and stubs.audits == 28  # the gate then asks for the same replays again
+    text = capsys.readouterr().out
+    assert "warm-up: 14 replays" in text and "futility" in text and "warm-up done: 14 of 14 ok, 0 failed" in text
+
+
+@pytest.mark.parametrize("new_fails", [False, True], ids=["ship", "futility-reject"])
+def test_warming_changes_neither_the_gate_result_nor_the_replays_rows(tmp_path, new_fails):
+    """The same stubs with workers 1 and 4 must give an equal GateResult and equal replays and gates rows, also when
+    the gate stops early on futility. If warming wrote rows or changed a decision, the speed-up would change what
+    the demo proves."""
+    seen = {}
+    for workers in (1, 4):
+        sub = tmp_path / f"w{workers}"
+        sub.mkdir()
+        out, paths, stubs = run(sub, Stubs(new_fails=new_fails), workers=workers)
+        seen[workers] = (
+            out.result.model_dump_json(),  # not the object: p_value is nan on a futility stop, and nan != nan
+            out.replays,
+            paths["replays_path"].read_text().splitlines(),
+            paths["gates_path"].read_text().splitlines(),
+        )
+        assert stubs.replays == out.replays + (14 if workers > 1 else 0)  # warming adds calls, never rows
+    assert seen[1] == seen[4]
+    assert json.loads(seen[1][0])["decision"] == ("reject" if new_fails else "ship")
+    assert seen[1][1] == (6 if new_fails else 14)
+
+
+@pytest.mark.parametrize("stubs", [Stubs(fail_replay_at=3), Stubs(fail_audit_at=3)], ids=["replay", "audit"])
+def test_a_failed_warm_up_job_does_not_stop_the_run(tmp_path, capsys, stubs):
+    """A warm-up replay or audit that raises must be printed and skipped, and the gate must still end with a result.
+    The gate runs the skipped job again. If one transient LLM error stopped a long parallel run, the operator
+    would lose the warm-up that had already been paid for."""
+    out, paths, _ = run(tmp_path, stubs, workers=4)
+    assert out.result.decision == "ship" and out.replays == 14
+    rows = [json.loads(ln) for ln in paths["replays_path"].read_text().splitlines()]
+    assert len(rows) == 14 and all(r["audit"] is not None for r in rows)  # the gate redid the failed job
+    text = capsys.readouterr().out
+    assert "warm-up failed" in text and "RuntimeError" in text and "warm-up done: 13 of 14 ok, 1 failed" in text
+
+
+def test_workers_1_makes_no_warm_up_call(tmp_path, capsys):
+    """With workers 1 (the default) no replay or audit may run outside the gate's own calls, in no thread pool, and
+    nothing is printed about a warm-up. Any extra call would double the spend of today's sequential run."""
+    for kw in ({}, {"workers": 1}):
+        sub = tmp_path / f"w{len(kw)}"
+        sub.mkdir()
+        out, _, stubs = run(sub, **kw)
+        assert stubs.replays == stubs.audits == out.replays == 14
+        assert {t for t, *_ in stubs.log} == {threading.current_thread().name}
+    assert "warm-up" not in capsys.readouterr().out
+
+
+def test_cost_includes_the_warm_up_spend(tmp_path):
+    """The printed cost must count the replays computed during the warm-up. The gate then reads them from the cache
+    and writes no cost row, so a count that starts at the gate would print $0 for a run that paid for every replay."""
+    stubs, lock, paid = Stubs(), threading.Lock(), set()
+
+    def replay_with_cache(call, ledger, fork, bot_prompt, seed):
+        tag, key = replay.prompt_tag(bot_prompt), (call.call_id, bot_prompt, seed)
+        with lock:
+            if key not in paid:  # like the LLM cache: only the first call for a key costs money
+                paid.add(key)
+                row = {"cache_tag": f"replay:bot:{tag}:{seed}:{call.call_id}:{fork}", "cost_usd": 0.5}
+                llm.COSTS_PATH.open("a").write(json.dumps(row) + "\n")
+        return stubs.replay_fn(call, ledger, fork, bot_prompt, seed)
+
+    out = run(tmp_path, stubs, replay_fn=replay_with_cache, workers=4)[0]
+    assert out.replays == 14 and len(paid) == 14 and out.cost_usd == pytest.approx(0.5 * 14)
+
+
+def test_workers_below_1_stop_before_any_llm_call(tmp_path):
+    """--workers 0 or a negative number must stop with SystemExit before any replay. A pool of zero workers would
+    raise inside the pool, after the plan was made, and a run without a pool would silently skip the warm-up."""
+    pf, paths = write_inputs(tmp_path)
+    for workers in (0, -2):
+        with pytest.raises(SystemExit):
+            prove.run_prove(CAUSE, pf, n=3, k=2, workers=workers, replay_fn=raising, audit_fn=raising, **paths)
+    assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
+
+
+def test_cache_refresh_skips_the_warm_up(tmp_path, capsys, monkeypatch):
+    """With VANILOOP_CACHE=refresh and workers 4, no warm-up call may run and one line must say why. In refresh mode
+    the gate ignores the cache, so every warmed replay and audit would be paid for a second time."""
+    monkeypatch.setenv("VANILOOP_CACHE", "refresh")
+    out, _, stubs = run(tmp_path, workers=4)
+    assert stubs.replays == stubs.audits == out.replays == 14
+    assert not any(t.startswith("warm") for t, *_ in stubs.log)
+    text = capsys.readouterr().out
+    assert "warm-up skipped" in text and "VANILOOP_CACHE=refresh" in text and "warm-up done" not in text
