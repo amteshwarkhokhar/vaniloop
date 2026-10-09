@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Fail when a test function does not state its purpose.
+
+Every function named test_* in tests/test_*.py must carry a docstring of at
+least 8 words. The docstring says what behaviour the test protects and what
+would go wrong for an audit or a call if it failed. Stdlib only.
+"""
+
+from __future__ import annotations
+
+import ast
+import sys
+from pathlib import Path
+
+MIN_WORDS = 8
+
+
+def offenders(path: Path) -> list[tuple[int, str]]:
+    """Return (line, name) for every test_* function without a long-enough docstring."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    bad: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith("test_"):
+            doc = ast.get_docstring(node)
+            if doc is None or len(doc.split()) < MIN_WORDS:
+                bad.append((node.lineno, node.name))
+    return bad
+
+
+def main() -> int:
+    root = Path(__file__).resolve().parent.parent
+    files = sorted((root / "tests").glob("test_*.py"))
+    failed = False
+    for path in files:
+        for line, name in offenders(path):
+            rel = path.relative_to(root)
+            print(f"{rel}:{line} {name}")
+            failed = True
+    if failed:
+        print(f"\nEach test_* function needs a docstring of at least {MIN_WORDS} words.", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -18,7 +18,21 @@ dependencies = [
 requires = ["uv_build>=0.11.17,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# ledger.py holds the literal LLM prompt. Its long lines are inside that string; reflowing
+# them would change the prompt bytes, the cache key and the model input (a behaviour change).
+"src/vaniloop/ledger.py" = ["E501"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.10",
 ]

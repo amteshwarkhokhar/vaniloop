@@ -7,6 +7,9 @@ fail=0
 echo "== tests"
 uv run pytest -q || fail=1
 
+echo "== every test states its purpose"
+bin/test-purpose || fail=1
+
 echo "== no call data tracked"
 bad=$(git ls-files -- transcripts runs data/raw .cache .env 'data/reference/vani_prompt_sarvam.md' '*.mp3' '*.wav')
 if [ -n "$bad" ]; then echo "tracked call data or secrets:"; echo "$bad"; fail=1; fi

@@ -62,6 +62,8 @@ stages: `0 Ingest`, `1 Audit`, `2 Issue`, `3 Fix`, `4 Test`, `5 Demo`.
    CI (`pr-body.yml`) fails a PR without them, without `Closes #n`, or without a `$ ` command line.
 6. Codex reviews (at most 3 rounds). The owner merges.
 7. Add a line to `docs/DECISIONS.md` when a decision changes.
+8. Every test needs a docstring stating its purpose: what it protects and what would break
+   if it failed. `bin/test-purpose` enforces this and `bin/check` runs it.
 
 ## Commands
 
