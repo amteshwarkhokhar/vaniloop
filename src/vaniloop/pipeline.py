@@ -1,4 +1,4 @@
-"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|refix|prove|grade-sample`."""
+"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|refix|prove|grade-sample|golden`."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .fix import PATCHES_PATH, run_fix, run_refix
+from .golden import GOLDEN_DIR, build_golden, golden_agreement, latest_golden, load_golden
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
@@ -25,6 +26,12 @@ RUNS = AUDITS_PATH.parent
 LEDGERS_PATH = RUNS / "ledgers.jsonl"
 ERRORS_PATH = RUNS / "errors.jsonl"
 GRADE_SAMPLE_PATH = RUNS / "grade_sample.json"
+GOLDEN_INPUTS = {
+    "hand_grades.jsonl": RUNS / "hand_grades.jsonl",
+    "audits.jsonl": AUDITS_PATH,
+    "ledgers.jsonl": LEDGERS_PATH,
+    "causes.json": CAUSES_PATH,
+}
 
 
 LOCK_MSG = "another audit run is active"
@@ -138,6 +145,32 @@ def run_regrade(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AU
     return {"regraded": len(audits), "verdicts": dict(Counter(a.verdict for a in audits))}
 
 
+def run_golden(cmd: str, n: int = 150, seed: int = 0) -> None:
+    """`golden build` freezes the next version. `golden agreement` scores the audit on the latest version."""
+    if cmd == "build":
+        path = build_golden(
+            grades_path=GOLDEN_INPUTS["hand_grades.jsonl"],
+            audits_path=GOLDEN_INPUTS["audits.jsonl"],
+            ledgers_path=GOLDEN_INPUTS["ledgers.jsonl"],
+            causes_path=GOLDEN_INPUTS["causes.json"],
+            out_dir=GOLDEN_DIR,
+            n=n,
+            seed=seed,
+        )
+        doc = load_golden(path)
+        print(f"{path.name}: {doc['n']} calls sha256={doc['sha256']} -> {path}")
+        return
+    path = latest_golden(GOLDEN_DIR)
+    if path is None:
+        raise SystemExit("no golden set yet: run `golden build` after grading calls")
+    doc = load_golden(path)
+    rules = golden_agreement(doc, load_audits(Path(GOLDEN_INPUTS["audits.jsonl"])))
+    print(f"{path.name}: {doc['n']} calls (kappa bar 0.6, n bar 10)")
+    for param, r in rules.items():
+        kappa = "n/a" if r["kappa"] is None else f"{r['kappa']:.2f}"
+        print(f"  {r['status']:8} {param}: kappa={kappa} agree={r['agree']}/{r['n']}")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="vaniloop.pipeline")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -164,6 +197,12 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--attempt", type=int, default=1)
     g = sub.add_parser("grade-sample")
     g.add_argument("--n", type=int, default=20)
+    gd = sub.add_parser("golden")
+    gsub = gd.add_subparsers(dest="golden_cmd", required=True)
+    gb = gsub.add_parser("build")
+    gb.add_argument("--n", type=int, default=150)
+    gb.add_argument("--seed", type=int, default=0)
+    gsub.add_parser("agreement")
     args = ap.parse_args(argv)
     if args.cmd == "audit":
         s = run_audit(workers=args.workers, limit=args.limit)
@@ -201,6 +240,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{len(ids)} calls -> {GRADE_SAMPLE_PATH}")
         for call_id in ids:
             print(f"  {call_id}")
+    elif args.cmd == "golden":
+        run_golden(args.golden_cmd, getattr(args, "n", 150), getattr(args, "seed", 0))
     else:
         causes = run_issues()
         print(f"{len(causes)} causes -> {CAUSES_PATH}")

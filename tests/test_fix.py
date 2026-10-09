@@ -649,3 +649,78 @@ def test_refix_keeps_a_parallel_write_to_another_cause_and_stops_on_a_changed_pa
     doc = json.loads(kw_["patches_path"].read_text())
     assert [p["cause_id"] for p in doc["patches"]] == ["cause_qty_probing", "cause_other"]
     assert doc["patches"][0]["new_text"] == "changed by a parallel run" and "history" not in doc
+
+
+def guard_golden_reads(monkeypatch):
+    """Make every file open, read or write that names a golden path raise, and return the list of tripped paths."""
+    import builtins
+    import io
+    import pathlib
+
+    tripped: list[str] = []
+
+    def check(path):
+        if "golden" in pathlib.PurePath(str(path)).parts:
+            tripped.append(str(path))
+            raise AssertionError(f"fix touched a golden path: {path}")
+
+    real_open, real_io_open = builtins.open, io.open
+
+    def guarded_open(file, *a, **k):
+        check(file)
+        return real_open(file, *a, **k)
+
+    def guarded_io_open(file, *a, **k):
+        check(file)
+        return real_io_open(file, *a, **k)
+
+    def wrap(name):
+        real = getattr(pathlib.Path, name)
+
+        def inner(self, *a, **k):
+            check(self)
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(pathlib.Path, name, inner)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(io, "open", guarded_io_open)
+    for name in ("open", "read_text", "read_bytes", "write_text", "write_bytes", "exists", "glob", "iterdir"):
+        wrap(name)
+    return tripped
+
+
+def test_fix_never_reads_the_golden_set(tmp_path, monkeypatch):
+    """run_fix must not open any golden path, and fix.py must not import the golden module.
+
+    If fix could read runs/golden/, a patch could be tuned to the owner's answers and the grader gate would lie.
+    """
+    import pathlib
+
+    import vaniloop.fix as fix_mod
+
+    assert "golden" not in pathlib.Path(fix_mod.__file__).read_text().lower()  # static: no import, no path
+    golden = tmp_path / "runs" / "golden"
+    golden.mkdir(parents=True)
+    (golden / "v1.json").write_text("{}")
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode(), [cause()])
+    tripped = guard_golden_reads(monkeypatch)
+    old, new = "line 3: rule text 3", "line 3: better"
+    r = run_fix(cp, pp, op, llm=stub(old, new), audits_path=ap)
+    assert r["patches"] and not tripped
+
+
+def test_golden_guard_trips_on_a_golden_path(tmp_path, monkeypatch):
+    """The isolation guard must raise when any code opens or reads a golden path.
+
+    Without this control the isolation test could pass because the guard is broken, not because fix is clean.
+    """
+    golden = tmp_path / "runs" / "golden"
+    golden.mkdir(parents=True)
+    (golden / "v1.json").write_text("{}")
+    tripped = guard_golden_reads(monkeypatch)
+    with pytest.raises(AssertionError, match="golden"):
+        open(golden / "v1.json")
+    with pytest.raises(AssertionError, match="golden"):
+        (golden / "v1.json").read_text()
+    assert len(tripped) == 2
