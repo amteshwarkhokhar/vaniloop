@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sarvam-voice-agents": {
+      "type": "http",
+      "url": "https://mcp.sarvam.ai/voice-agents"
+    }
+  }
+}
