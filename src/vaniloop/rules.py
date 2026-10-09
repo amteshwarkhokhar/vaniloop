@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import re
 
-from .models import AuditRecord, CallRecord, Evidence, Finding, Ledger
+from .models import AuditRecord, CallRecord, Evidence, Finding, Ledger, Silence, Turn
 
 DEAD_AIR_SEC = 5.0  # matrix: dead air > 5 s
+# A turn edge and a silence edge for the same moment can differ by this much; treat them as touching.
+DEAD_AIR_SLACK_SEC = 0.5
 # TODO: matrix allows 8 s on noisy lines; noise detection is not built yet, so this is not used.
 DEAD_AIR_NOISY_SEC = 8.0
 LOOP_MAX_ASKS = 3  # default ask limit for slots without their own limit
@@ -242,23 +244,74 @@ def _fmt_pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
 
+def _turn_ending_by(call: CallRecord, at_sec: float) -> Turn | None:
+    """The last turn that ends at or before at_sec, allowing DEAD_AIR_SLACK_SEC of edge drift."""
+    ended = [t for t in call.turns if t.end_sec <= at_sec + DEAD_AIR_SLACK_SEC]
+    return max(ended, key=lambda t: t.end_sec) if ended else None
+
+
+def _turn_starting_from(call: CallRecord, at_sec: float) -> Turn | None:
+    """The first turn that starts at or after at_sec, allowing DEAD_AIR_SLACK_SEC of edge drift."""
+    started = [t for t in call.turns if t.start_sec >= at_sec - DEAD_AIR_SLACK_SEC]
+    return min(started, key=lambda t: t.start_sec) if started else None
+
+
+def _speech_inside(call: CallRecord, s: Silence) -> bool:
+    """True if any turn speaks inside the silence beyond the DEAD_AIR_SLACK_SEC edge slack on both sides.
+
+    A turn that only clips the edge within the slack does not count; a turn that crosses the silence or sits
+    inside it does. Without this, boundary lookups can pair a buyer before with a bot after and call a silence
+    dead air even while someone is speaking through it.
+    """
+    return any(
+        t.start_sec < s.end_sec - DEAD_AIR_SLACK_SEC and t.end_sec > s.start_sec + DEAD_AIR_SLACK_SEC
+        for t in call.turns
+    )
+
+
+def _bot_gaps(call: CallRecord) -> list[tuple[Silence, Turn]]:
+    """Dead air that is VANI's fault: a long silence the buyer finished before and a bot turn answers after.
+
+    The (silence, answering bot turn) pairs. A long silence with a buyer on either side, or one before the
+    first turn or after the last, is a buyer or line pause and is left out. A silence with any turn speaking
+    inside it is not dead air either: someone was talking through it.
+    """
+    gaps: list[tuple[Silence, Turn]] = []
+    for s in call.silences:
+        if s.duration <= DEAD_AIR_SEC:
+            continue
+        before, after = _turn_ending_by(call, s.start_sec), _turn_starting_from(call, s.end_sec)
+        if before is not None and after is not None and before.speaker == "user" and after.speaker == "bot":
+            if not _speech_inside(call, s):
+                gaps.append((s, after))
+    return gaps
+
+
 def rule_dead_air(call: CallRecord, led: Ledger) -> Finding:
-    gaps = [s for s in call.silences if s.duration > DEAD_AIR_SEC]
     if not call.audio_path:
         return Finding(
             parameter="dead_air", status="Unknown", reason="no audio to measure silence", basis="unavailable"
         )
+    long_pauses = [s for s in call.silences if s.duration > DEAD_AIR_SEC]
+    gaps = _bot_gaps(call)
     if not gaps:
-        return Finding(
-            parameter="dead_air", status="Pass", reason=f"no silence over {DEAD_AIR_SEC:.0f} s", basis="observed"
-        )
-    worst = max(gaps, key=lambda s: s.duration)
+        reason = f"no silence over {DEAD_AIR_SEC:.0f} s"
+        if long_pauses:
+            reason = (
+                f"no bot gap over {DEAD_AIR_SEC:.0f} s; {len(long_pauses)} long silence(s) were buyer or line pauses"
+            )
+        return Finding(parameter="dead_air", status="Pass", reason=reason, basis="observed")
+    worst, _ = max(gaps, key=lambda g: g[0].duration)
+    # The earliest counted gap is the root; the longest gap only shapes the reason text. issue.py treats the
+    # earliest onset as the root, so pointing at the longest gap can make an early dead-air fault a symptom.
+    _, first_answer = min(gaps, key=lambda g: g[0].start_sec)
     return Finding(
         parameter="dead_air",
         status="NonFatal",
         basis="observed",
-        reason=f"{len(gaps)} silence(s) over {DEAD_AIR_SEC:.0f} s, longest {worst.duration:.1f} s",
-        evidence=[Evidence(start_sec=s.start_sec, end_sec=s.end_sec) for s in gaps],
+        reason=f"{len(gaps)} bot gap(s) over {DEAD_AIR_SEC:.0f} s, longest {worst.duration:.1f} s",
+        onset_turn=first_answer.idx,
+        evidence=[Evidence(turn_idx=t.idx, start_sec=s.start_sec, end_sec=s.end_sec) for s, t in gaps],
     )
 
 

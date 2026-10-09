@@ -451,11 +451,17 @@ def test_f7_product_and_qty_onsets():
 def test_f8_noisy_constant_defined_no_behaviour_change():
     """Regression for review round 1 finding: the noisy dead-air threshold must stay at eight and the plain one at five.
 
-    A changed constant would regrade every past call and break the stated no-behaviour-change promise.
+    A changed constant would regrade every past call and break the stated no-behaviour-change promise. The silence
+    now sits after a buyer turn and before the bot's answer, because only a buyer-then-bot gap counts as dead air.
     """
     assert rules.DEAD_AIR_NOISY_SEC == 8.0 and rules.DEAD_AIR_SEC == 5.0
-    call = mk_call(audio="x.mp3", silences=[Silence(start_sec=1, end_sec=7)])  # 6 s: fatal-free NonFatal at 5 s
-    assert by(audit_call(call, mk_led(call, [bt(0, "quantity")])))["dead_air"].status == "NonFatal"
+    # 11 s: starts after the buyer turn and ends before the bot answers, with no speech inside, so it is a bot gap
+    call = mk_call(audio="x.mp3", silences=[Silence(start_sec=4.0, end_sec=15.0)])
+    call.turns = [
+        Turn(idx=0, speaker="user", start_sec=0.0, end_sec=4.0, text="buyer"),
+        Turn(idx=1, speaker="bot", start_sec=15.0, end_sec=19.0, text="answer"),
+    ]
+    assert by(audit_call(call, mk_led(call, [bt(1, "quantity")])))["dead_air"].status == "NonFatal"
 
 
 # ---- F9
