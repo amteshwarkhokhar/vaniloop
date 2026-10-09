@@ -14,7 +14,7 @@ APP = Path(__file__).resolve().parents[1] / "src" / "vaniloop" / "dashboard.py"
 
 def _open(tmp_path, monkeypatch, view: str, drop: tuple[str, ...] = ()) -> AppTest:
     """Copy the synthetic fixtures to tmp_path, minus `drop`, and open the dashboard on `view`."""
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         if f.name not in drop:
             shutil.copy(f, tmp_path / f.name)
     monkeypatch.setenv("VANILOOP_DATA", str(tmp_path))
@@ -95,7 +95,7 @@ def test_replay_rows_with_non_finite_times_are_skipped_and_the_page_survives(tmp
 
     Found in review: such a row passed validation and crashed the page when selected, because mmss() cannot format it.
     """
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         shutil.copy(f, tmp_path / f.name)
     rows = [json.loads(line) for line in (FIX / "synthetic_replays.jsonl").read_text().splitlines()]
     rows[1]["call"]["turns"][3]["start_sec"] = float("nan")  # the new seed-0 replay of syn_002

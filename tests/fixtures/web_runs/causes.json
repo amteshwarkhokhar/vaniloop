@@ -1,0 +1,80 @@
+{
+ "causes": [
+  {
+   "cause_id": "C-01",
+   "name": "Bot repeats the same question",
+   "description": "Synthetic cause. The bot asks again for a slot the buyer already gave.",
+   "type": "flow_logic",
+   "parameter": "looping",
+   "fatal_calls": [
+    "web_01",
+    "web_04"
+   ],
+   "nonfatal_calls": [],
+   "symptom_calls": [],
+   "fixability": 0.8,
+   "priority": 0.12,
+   "freq_ci_low": 0.05,
+   "freq_ci_high": 0.2,
+   "status": "ranked",
+   "owner": "Voice platform team",
+   "owner_evidence": "Synthetic evidence: the slot-tracking rule sits in the dialog manager, not the prompt."
+  },
+  {
+   "cause_id": "C-02",
+   "name": "Specs kept after product change",
+   "description": "Synthetic cause. The bot asks spec questions from the wrong category.",
+   "type": "prompt",
+   "parameter": "category_isq",
+   "fatal_calls": [
+    "web_02",
+    "web_03"
+   ],
+   "nonfatal_calls": [
+    "web_08"
+   ],
+   "symptom_calls": [],
+   "fixability": 0.8,
+   "priority": 0.1,
+   "freq_ci_low": 0.04,
+   "freq_ci_high": 0.18,
+   "status": "ranked"
+  },
+  {
+   "cause_id": "C-03",
+   "name": "Long silence before reply",
+   "description": "Synthetic cause. The bot waits more than 5 s before it speaks.",
+   "type": "asr",
+   "parameter": "dead_air",
+   "fatal_calls": [],
+   "nonfatal_calls": [
+    "web_04",
+    "web_06"
+   ],
+   "symptom_calls": [],
+   "fixability": 0.5,
+   "priority": 0.05,
+   "freq_ci_low": 0.02,
+   "freq_ci_high": 0.15,
+   "status": "watch"
+  },
+  {
+   "cause_id": "C-04",
+   "name": "Quantity not asked",
+   "description": "Synthetic cause. The bot posts a lead without a quantity.",
+   "type": "knowledge_gap",
+   "parameter": "qty_probing",
+   "fatal_calls": [],
+   "nonfatal_calls": [
+    "web_05",
+    "web_07"
+   ],
+   "symptom_calls": [],
+   "fixability": 0.7,
+   "priority": 0.04,
+   "freq_ci_low": 0.01,
+   "freq_ci_high": 0.14,
+   "status": "pattern_unconfirmed"
+  }
+ ]
+}

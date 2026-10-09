@@ -14,7 +14,7 @@ APP = Path(__file__).resolve().parents[1] / "src" / "vaniloop" / "dashboard.py"
 
 def _open(tmp_path, monkeypatch, view: str, drop: tuple[str, ...] = ()) -> AppTest:
     """Copy the synthetic fixtures to tmp_path, minus `drop`, and open the dashboard on `view`."""
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         if f.name not in drop:
             shutil.copy(f, tmp_path / f.name)
     monkeypatch.setenv("VANILOOP_DATA", str(tmp_path))
@@ -49,7 +49,7 @@ def test_fix_view_says_when_a_cause_has_no_patch(tmp_path, monkeypatch):
 
     If this breaks, a cause the fix stage skipped looks the same as one that is still loading.
     """
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         shutil.copy(f, tmp_path / f.name)
     doc = json.loads((FIX / "synthetic_patches.json").read_text())
     doc["patches"] = doc["patches"][:1]  # drop the C-03 patch
@@ -65,7 +65,7 @@ def test_a_malformed_rejected_row_is_skipped_and_the_view_still_renders(tmp_path
 
     Found in review: a list cause_id passed the loader and crashed the Fix view with an unhashable-type error.
     """
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         shutil.copy(f, tmp_path / f.name)
     doc = json.loads((FIX / "synthetic_patches.json").read_text())
     doc["rejected"] += [{"cause_id": [], "reason": "bad row"}, {"cause_id": "C-02", "reason": None}, "junk"]
@@ -104,7 +104,7 @@ def test_fix_view_marks_the_inserted_sentence_inside_a_long_line(tmp_path, monke
 
     If this breaks, the reader of a real patch sees two whole paragraphs and must find the sentence by eye.
     """
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         shutil.copy(f, tmp_path / f.name)
     doc = json.loads((FIX / "synthetic_patches.json").read_text())
     old = "Synthetic rule E: greet the buyer. Synthetic rule F: ask the product."
