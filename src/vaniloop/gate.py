@@ -300,7 +300,8 @@ def _trial(
     A target's cause finding that is Fatal or NonFatal counts as a failure only if its onset is at or after
     the fork. Before the fork (or with no placeable onset) the fault sits in the copied prefix and fails in
     both arms, and NotApplicable shows the replay never reached the situation, so the trial is unresolved.
-    A target's `fatal` is any Fatal finding, on any parameter, with its onset at or after the fork.
+    A target's `fatal` is any Fatal finding, on any parameter, with its onset at or after the fork. A Fatal
+    finding on any parameter with an unplaceable onset makes the trial unresolved.
     """
     audit = audit_fn(res.call)
     invalid = res.ended_by == "invalid_output"
@@ -321,6 +322,8 @@ def _trial(
         cause_failed = _after_fork(res, finding) is True
         unresolved = unresolved or not cause_failed
     unresolved = unresolved or (finding is not None and finding.status == "NotApplicable")
+    # A Fatal on any parameter whose onset has no turn cannot be placed before or after the fork: missing evidence.
+    unresolved = unresolved or any(f.status == "Fatal" and _after_fork(res, f) is None for f in audit.findings)
     return Trial(
         call_id=call_id,
         prompt=which,

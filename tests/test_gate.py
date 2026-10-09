@@ -834,3 +834,25 @@ def test_old_never_failing_is_inconclusive_not_reproduced_not_reject():
     # One OLD failure is enough to reach the lift rule again.
     old[0] = old[0].model_copy(update={"failed": True})
     assert "reproduce" not in decide(old, new, GUARD_OK, k=2).reason
+
+
+def test_fatal_on_another_parameter_with_no_onset_is_unresolved():
+    """A target replay that passes the cause but has a Fatal elsewhere with no placeable onset is unresolved.
+
+    Protects the NEW-Fatal reject from a silent miss. Some rules give a Fatal with onset None (a wrong
+    quantity with no handoff). Such a Fatal cannot be placed before or after the fork, and if it counted as
+    neither fatal nor unresolved the gate could ship a patch with a possible post-fork Fatal. A pre-fork
+    Fatal with a placeable onset stays resolved, and so does a Fatal with an onset after the fork (fatal).
+    """
+    unplaced = audit("Pass", "Fatal", onset=3)
+    unplaced.findings[1].onset_turn = None
+    t = _trial("a", "new", 0, _res(), lambda _c: unplaced, "looping")
+    assert t.unresolved and not t.fatal and not t.failed
+    absent = audit("Pass", "Fatal", onset=3)
+    absent.findings[1].onset_turn = 99  # no turn has this idx
+    assert _trial("a", "new", 0, _res(), lambda _c: absent, "looping").unresolved
+    pre = audit("Pass", "Fatal", onset=1)
+    assert not _trial("a", "new", 0, _res(), lambda _c: pre, "looping").unresolved
+    new = trials("new", {"a": False, "b": False, "c": False})
+    new[0] = new[0].model_copy(update={"unresolved": t.unresolved})
+    assert decide(OLD3, new, GUARD_OK, k=2).decision == "inconclusive"
