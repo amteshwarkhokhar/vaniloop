@@ -23,9 +23,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import llm
 from .ingest import AUDIO_DIR, TRANSCRIPTS_DIR
-from .jsonl import append_jsonl
-from .llm import ROOT, model_name
+from .jsonl import append_jsonl, read_jsonl
+from .llm import ROOT, metered_create, model_name
 
 PROMPT_VERSION = "1"
 LOG_PATH = ROOT / "runs" / "transcribe_log.jsonl"
@@ -81,13 +82,10 @@ def _num(x) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def _cost(x) -> float | None:
-    """Parse a cost header tolerantly: a missing, non-numeric or non-finite value gives None, never an exception."""
-    try:
-        value = float(x)
-    except (TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) else None
+def _logged_cost(tag: str) -> float | None:
+    """The cost the shared meter recorded for this request. runs/costs.jsonl is the one record of spend."""
+    rows = [r for r in read_jsonl(llm.COSTS_PATH) if r.get("cache_tag") == tag and "cost_usd" in r]
+    return rows[-1]["cost_usd"] if rows else None
 
 
 def normalise_turns(raw, duration: float) -> list[dict]:
@@ -141,16 +139,24 @@ def _client():
 
 
 def _valid_cache(path: Path, call_id: str) -> bool:
-    """A cache file counts as done only if it parses as a dict with the right call_id and a non-empty turns list."""
+    """A cache file counts as done only if ingest can read it: right call_id, a duration, and well-formed turns."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
+    if not isinstance(data, dict) or data.get("call_id") != call_id or _num(data.get("duration_sec")) is None:
+        return False
+    turns = data.get("turns")
     return (
-        isinstance(data, dict)
-        and data.get("call_id") == call_id
-        and isinstance(data.get("turns"), list)
-        and len(data["turns"]) > 0
+        isinstance(turns, list)
+        and len(turns) > 0
+        and all(
+            isinstance(t, dict)
+            and t.get("speaker") in ("bot", "user")
+            and isinstance(t.get("text"), str)
+            and _num(t.get("start_sec")) is not None
+            for t in turns
+        )
     )
 
 
@@ -167,11 +173,12 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
     duration = audio_duration(mp3)
     b64 = base64.b64encode(mp3.read_bytes()).decode()
     t0 = time.time()
-    raw = client.chat.completions.with_raw_response.create(
-        model=model_name(),
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
+    tag = f"transcribe:{call_id}:{PROMPT_VERSION}"
+    request = {
+        "model": model_name(),
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
             {"role": "system", "content": SYSTEM},
             {
                 "role": "user",
@@ -181,8 +188,9 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
                 ],
             },
         ],
-    )
-    resp = raw.parse()
+    }
+    # The shared meter checks LLM_BUDGET_USD first and records the cost before the reply is parsed.
+    resp = metered_create(client, request, cache_tag=tag)
     content = resp.choices[0].message.content if resp.choices else None
     content = content if isinstance(content, str) else ""
     row = {
@@ -194,7 +202,7 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
         "duration_sec": round(duration, 2),
         "prompt_tokens": getattr(resp.usage, "prompt_tokens", None),
         "completion_tokens": getattr(resp.usage, "completion_tokens", None),
-        "cost_usd": _cost(raw.headers.get("x-litellm-response-cost")),
+        "cost_usd": _logged_cost(tag),
     }
     if not resp.choices:
         row.update(status="error", error="empty choices")
@@ -246,6 +254,9 @@ def select_sample(durations: dict[str, float], n: int, min_sec: float = MIN_SEC,
     for i, g in enumerate(groups):
         k = n // bins + (1 if i < n % bins else 0)
         picks += [c for _, c in rng.sample(g, min(k, len(g)))]
+    if len(picks) < n:  # small populations leave some bins short; fill from the rest with the same RNG
+        taken = set(picks)
+        picks += rng.sample([c for _, c in eligible if c not in taken], n - len(picks))
     return sorted(picks)
 
 

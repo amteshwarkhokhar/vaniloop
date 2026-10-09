@@ -5,8 +5,11 @@ import sys
 from collections import Counter
 from types import SimpleNamespace
 
-from vaniloop import transcribe
+import pytest
+
+from vaniloop import llm, transcribe
 from vaniloop.ingest import load_transcript
+from vaniloop.jsonl import read_jsonl
 from vaniloop.transcribe import normalise_turns, select_sample, transcribe_call
 
 
@@ -103,7 +106,7 @@ def test_valid_cached_transcript_is_skipped_without_a_model_call(tmp_path, monke
     mp3 = _mp3(tmp_path, monkeypatch)
     out = tmp_path / "t"
     out.mkdir()
-    doc = {"call_id": "77_123_ABC", "turns": json.loads(GOOD)["turns"]}
+    doc = {"call_id": "77_123_ABC", "duration_sec": 30.0, "turns": json.loads(GOOD)["turns"]}
     (out / "77_123_ABC.json").write_text(json.dumps(doc))
     stub = StubClient(GOOD)
     assert transcribe_call(mp3, out_dir=out, client=stub, log_path=tmp_path / "log.jsonl")["status"] == "exists"
@@ -111,10 +114,19 @@ def test_valid_cached_transcript_is_skipped_without_a_model_call(tmp_path, monke
 
 
 def test_corrupt_cached_transcript_is_transcribed_again(tmp_path, monkeypatch):
-    """A cache that is not a dict, names another call or has no turns is paid for and overwritten.
+    """A cache that ingest cannot read (not a dict, another call, no duration, no or malformed turns) is redone.
     If this breaks, a corrupt file is skipped forever and the call is silently missing from the audit."""
     mp3 = _mp3(tmp_path, monkeypatch)
-    bad_bodies = ["{}", "not json", json.dumps({"call_id": "other", "turns": []})]
+    turns = json.loads(GOOD)["turns"]
+    bad_bodies = [
+        "{}",
+        "not json",
+        json.dumps({"call_id": "other", "turns": []}),
+        json.dumps({"call_id": "77_123_ABC", "turns": turns}),  # no duration_sec
+        json.dumps({"call_id": "77_123_ABC", "duration_sec": 30, "turns": [None]}),
+        json.dumps({"call_id": "77_123_ABC", "duration_sec": 30, "turns": [{**turns[0], "speaker": "narrator"}]}),
+        json.dumps({"call_id": "77_123_ABC", "duration_sec": 30, "turns": [{**turns[0], "start_sec": "0"}]}),
+    ]
     for i, body in enumerate(bad_bodies):
         out = tmp_path / f"t{i}"
         out.mkdir()
@@ -249,6 +261,29 @@ def test_sample_takes_exactly_two_from_each_equal_count_bin():
     counts = Counter(bin_index(c) for c in picks)
     assert len(picks) == 20
     assert sorted(counts.values()) == [2] * 10
+
+
+def test_sample_fills_bins_that_are_too_small_from_the_other_calls():
+    """With 12 calls and n=11, one bin holds 1 call but owes 2; the shortfall is filled from the rest.
+    If this breaks, a small sample silently returns fewer calls than asked and calibration runs short."""
+    durations = {f"c{i}": float(10 + i) for i in range(12)}
+    picks = select_sample(durations, 11)
+    assert len(picks) == 11 and len(set(picks)) == 11
+    assert picks == select_sample(durations, 11)
+
+
+def test_transcription_goes_through_the_shared_cost_meter(tmp_path, monkeypatch):
+    """Each transcription is admitted by the LLM budget and its cost lands in runs/costs.jsonl.
+    If this breaks, a 713-call batch can spend past LLM_BUDGET_USD and the spend total misses audio calls."""
+    mp3 = _mp3(tmp_path, monkeypatch)
+    stub = StubClient(GOOD)
+    row = transcribe_call(mp3, out_dir=tmp_path / "t", client=stub, log_path=tmp_path / "log.jsonl")
+    cost_rows = [r for r in read_jsonl(llm.COSTS_PATH) if r.get("cache_tag") == "transcribe:77_123_ABC:1"]
+    assert len(cost_rows) == 1 and cost_rows[0]["cost_usd"] == row["cost_usd"] == 0.0006
+    monkeypatch.setenv("LLM_BUDGET_USD", "0.0006")
+    with pytest.raises(llm.BudgetExceeded):
+        transcribe_call(mp3, out_dir=tmp_path / "t2", client=stub, log_path=tmp_path / "log.jsonl")
+    assert len(stub.calls) == 1
 
 
 def test_durations_rebuild_from_an_empty_cache_when_it_is_corrupt(tmp_path, monkeypatch):
