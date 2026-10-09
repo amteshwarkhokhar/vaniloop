@@ -313,8 +313,9 @@ def run_refix(
 
     Stops with SystemExit, before any LLM call, when the cause, its patch or its latest gate row is missing, when
     the patch is already attempt MAX_ATTEMPTS, when the gate shipped the patch, or when that gate row is not for
-    the current patch's attempt. On success the rejected patch moves to `history` (with its gate decision) and the new patch becomes current with attempt + 1. A refused
-    proposal writes nothing and comes back in `rejected`. Returns {"patches": [new patch] or [], "rejected": [...]}.
+    the current patch's attempt. On success the rejected patch moves to `history` (with its gate decision) and
+    the new patch becomes current with attempt + 1. A refused proposal writes nothing and comes back in
+    `rejected`. Returns {"patches": [new patch] or [], "rejected": [...]}.
     """
     patches_path = Path(patches_path)
     doc = json.loads(patches_path.read_text(encoding="utf-8")) if patches_path.exists() else {}
