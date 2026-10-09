@@ -289,9 +289,9 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said:
         return Finding(parameter="qty_missed", status="NotApplicable", reason="buyer gave no quantity", basis="observed")
-    if kept:
-        return Finding(parameter="qty_missed", status="Pass", reason="a quantity was captured", basis="spoken_proxy")
     gave = sorted(u.idx for u in led.user_turns if u.gave_value_for == "quantity")
+    if kept and not gave:
+        return Finding(parameter="qty_missed", status="Pass", reason="a quantity was captured", basis="spoken_proxy")
     if not gave:
         return Finding(parameter="qty_missed", status="Unknown", basis="spoken_proxy",
                        reason=f"buyer said quantity '{said}' but no turn is labelled as giving it; cannot tell if it was captured")
@@ -311,7 +311,8 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
                        reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
                        evidence=[_ev(call, reasked[0])])
     return Finding(parameter="qty_missed", status="Pass", basis="spoken_proxy",
-                   reason="buyer gave a quantity and the bot moved on (no read-back needed)")
+                   reason="a quantity was captured and the bot did not ask again" if kept
+                   else "buyer gave a quantity and the bot moved on (no read-back needed)")
 
 
 def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
@@ -380,22 +381,35 @@ def rule_qty_unit(call: CallRecord, led: Ledger) -> Finding:
 
 
 def _product_confirmed(led: Ledger) -> bool:
-    """The bot confirmed a product: bot_confirmed has it, or a product/confirm turn is followed by a buyer product answer."""
+    """The bot confirmed a product: bot_confirmed has it, or the last bot product/confirm turn is answered by the buyer,
+    the buyer gives no later product answer, and the buyer did not change the product at or after that turn."""
     if led.bot_confirmed.get("product"):
         return True
-    asks = [b.idx for b in led.bot_turns if b.slot in ("product", "confirm")]
-    return any(u.gave_value_for == "product" and any(i < u.idx for i in asks) for u in led.user_turns)
+    asks = sorted(b.idx for b in led.bot_turns if b.slot in ("product", "confirm"))
+    if not asks:
+        return False
+    last = asks[-1]
+    answers = sorted(u.idx for u in led.user_turns if u.gave_value_for == "product" and u.idx > last)
+    if len(answers) != 1:
+        return False
+    change = led.product_changed_at_turn
+    return change is None or change < last
 
 
-def _enrich_deflection(call: CallRecord, led: Ledger) -> bool:
+def _enrich_deflection(call: CallRecord, led: Ledger) -> bool | None:
     """L597-603 (enrich variant): after the product change the bot may ask whether the old product is still needed
-    (product/confirm turns) but collects nothing for the new one, then closes within 3 turns."""
+    (product/confirm turns) but collects nothing for the new one, then closes: its LAST turn is labelled "other" and
+    the call ends within 3 turns of the change. True = deflection, False = not, None = clarified but no close seen."""
     c = led.product_changed_at_turn
     later = [b for b in led.bot_turns if b.idx > c]
     if any(b.slot in ENRICH_FORBIDDEN_SLOTS for b in later):
         return False
-    closing = any(b.slot in ("other", "confirm") for b in later)
-    return closing and _end_of_call_within(call, c, 3)
+    bot_idxs = [t.idx for t in call.turns if t.speaker == "bot"]
+    last = max(bot_idxs, default=None)
+    closing = last is not None and last > c and any(b.idx == last and b.slot == "other" for b in later)
+    if closing and _end_of_call_within(call, c, 3):
+        return True
+    return None if any(b.slot in ("product", "confirm") for b in later) and not closing else False
 
 
 def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
@@ -415,9 +429,14 @@ def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
                        reason="handoff call with a confirmed product")
     if led.scope not in BL_SCOPES:
         return Finding(parameter="product_change", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed")
-    if led.variant == "enrich" and led.product_changed_at_turn is not None and _enrich_deflection(call, led):
-        return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
-                       reason="enrich variant: buyer wanted another product and the bot closed the call without collecting it")
+    if led.variant == "enrich" and led.product_changed_at_turn is not None:
+        d = _enrich_deflection(call, led)
+        if d:
+            return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
+                           reason="enrich variant: buyer wanted another product and the bot closed the call without collecting it")
+        if d is None:
+            return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
+                           reason="enrich variant: bot clarified the product change but the call shows no closing turn")
     if not kept:
         return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
                        reason="bot never confirmed a product")

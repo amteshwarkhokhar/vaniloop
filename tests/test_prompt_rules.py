@@ -211,3 +211,40 @@ def test_qty_missed_still_fatal_when_reasked_inside_the_new_segment():
                  buyer_facts={"quantity": "10"}, bot_confirmed={"product": "chair"}, product_changed_at_turn=3)
     f = by(audit_call(call, led))["qty_missed"]
     assert f.status == "Fatal" and f.onset_turn == 8
+
+
+# ---- round 2
+def test_handoff_buyer_correction_without_reconfirm_is_unknown():
+    call = mk_call(4)
+    led = mk_led(call, [bt(0, "product"), bt(2, "handoff")], [UserTurnLabel(idx=1, gave_value_for="product")],
+                 scope="seller_unavailable_handoff", buyer_facts={}, bot_confirmed={}, product_match=None,
+                 product_changed_at_turn=1, final_product="chair")
+    assert by(audit_call(call, led))["product_change"].status == "Unknown"
+
+
+def test_handoff_reconfirmed_after_correction_passes():
+    call = mk_call(6)
+    led = mk_led(call, [bt(0, "product"), bt(2, "confirm"), bt(4, "handoff")],
+                 [UserTurnLabel(idx=1, gave_value_for="product"), UserTurnLabel(idx=3, gave_value_for="product")],
+                 scope="seller_unavailable_handoff", buyer_facts={}, bot_confirmed={}, product_match=None,
+                 product_changed_at_turn=1, final_product="chair")
+    assert by(audit_call(call, led))["product_change"].status == "Pass"
+
+
+def test_enrich_clarification_then_disconnect_is_unknown():
+    assert _pc(*_change_led("enrich", ("confirm",), n=6)) == "Unknown"
+    assert _pc(*_change_led("enrich", ("confirm", "other"))) == "Pass"
+
+
+def test_enrich_other_before_clarification_is_not_a_close():
+    assert _pc(*_change_led("enrich", ("other", "confirm"))) == "Unknown"
+
+
+def test_qty_missed_captured_quantity_does_not_bypass_reask():
+    call = mk_call(12)
+    led = mk_led(call, [bt(0, "quantity"), bt(4, "quantity")], [UserTurnLabel(idx=1, gave_value_for="quantity")],
+                 buyer_facts={"quantity": "10"}, bot_confirmed={"product": "pump", "quantity": "10"})
+    f = by(audit_call(call, led))["qty_missed"]
+    assert f.status == "Fatal" and f.onset_turn == 4
+    led.bot_turns[2].slot = "city"
+    assert by(audit_call(call, led))["qty_missed"].status == "Pass"
