@@ -115,12 +115,12 @@ def test_enrich_clarifying_product_turn_keeps_exemption():
 
 
 def test_enrich_but_bot_collects_is_not_pass():
-    assert _pc(*_change_led("enrich", ("quantity", "other"))) == "Fatal"
-    assert _pc(*_change_led("enrich", ("confirm", "spec"))) == "Fatal"
+    assert _pc(*_change_led("enrich", ("quantity", "other"))) == "NonFatal"
+    assert _pc(*_change_led("enrich", ("confirm", "spec"))) == "NonFatal"
 
 
 def test_enrich_but_bot_hands_off_after_change_is_not_pass():
-    assert _pc(*_change_led("enrich", ("handoff",))) == "Fatal"
+    assert _pc(*_change_led("enrich", ("handoff",))) == "NonFatal"
 
 
 def test_enrich_without_closing_evidence_is_not_pass():
@@ -248,3 +248,21 @@ def test_qty_missed_captured_quantity_does_not_bypass_reask():
     assert f.status == "Fatal" and f.onset_turn == 4
     led.bot_turns[2].slot = "city"
     assert by(audit_call(call, led))["qty_missed"].status == "Pass"
+
+
+# ---- round 3
+def test_enrich_collection_after_change_is_nonfatal_even_if_product_matches():
+    call, led = _change_led("enrich", ("quantity", "other"))
+    led.product_match = True  # would otherwise fall through to Pass
+    f = by(audit_call(call, led))["product_change"]
+    assert f.status == "NonFatal" and f.onset_turn == 4
+
+
+def test_handoff_confirmation_after_the_handoff_does_not_count():
+    call = mk_call(6)
+    led = mk_led(call, [bt(0, "handoff"), bt(2, "confirm")], [UserTurnLabel(idx=3, gave_value_for="product")],
+                 scope="seller_unavailable_handoff", buyer_facts={}, bot_confirmed={}, product_match=None)
+    assert by(audit_call(call, led))["product_change"].status == "Unknown"
+    led = mk_led(call, [bt(0, "confirm"), bt(2, "handoff")], [UserTurnLabel(idx=1, gave_value_for="product")],
+                 scope="seller_unavailable_handoff", buyer_facts={}, bot_confirmed={}, product_match=None)
+    assert by(audit_call(call, led))["product_change"].status == "Pass"

@@ -385,11 +385,13 @@ def _product_confirmed(led: Ledger) -> bool:
     the buyer gives no later product answer, and the buyer did not change the product at or after that turn."""
     if led.bot_confirmed.get("product"):
         return True
-    asks = sorted(b.idx for b in led.bot_turns if b.slot in ("product", "confirm"))
+    handoff = _handoff_turn(led)  # evidence after the first handoff turn does not count
+    before = lambda i: handoff is None or i < handoff  # noqa: E731
+    asks = sorted(b.idx for b in led.bot_turns if b.slot in ("product", "confirm") and before(b.idx))
     if not asks:
         return False
     last = asks[-1]
-    answers = sorted(u.idx for u in led.user_turns if u.gave_value_for == "product" and u.idx > last)
+    answers = sorted(u.idx for u in led.user_turns if u.gave_value_for == "product" and last < u.idx and before(u.idx))
     if len(answers) != 1:
         return False
     change = led.product_changed_at_turn
@@ -430,6 +432,12 @@ def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
     if led.scope not in BL_SCOPES:
         return Finding(parameter="product_change", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed")
     if led.variant == "enrich" and led.product_changed_at_turn is not None:
+        collected = sorted(b.idx for b in led.bot_turns
+                           if b.idx > led.product_changed_at_turn and b.slot in ENRICH_FORBIDDEN_SLOTS)
+        if collected:  # L599-603: the enrich bot must not collect for the new product
+            return Finding(parameter="product_change", status="NonFatal", basis="spoken_proxy", evidence=ev,
+                           onset_turn=collected[0],
+                           reason="enrich variant: bot collected requirements for the new product after the change")
         d = _enrich_deflection(call, led)
         if d:
             return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
