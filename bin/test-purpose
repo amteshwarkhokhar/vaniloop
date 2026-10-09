@@ -20,7 +20,7 @@ def offenders(path: Path) -> list[tuple[int, str]]:
     tree = ast.parse(path.read_text(), filename=str(path))
     bad: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith("test_"):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
             doc = ast.get_docstring(node)
             if doc is None or len(doc.split()) < MIN_WORDS:
                 bad.append((node.lineno, node.name))
