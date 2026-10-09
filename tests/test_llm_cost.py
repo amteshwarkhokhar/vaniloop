@@ -79,6 +79,18 @@ class _RawCompletions:
         return types.SimpleNamespace(headers=dict(FakeClient.headers), parse=lambda: _make_response(kw))
 
 
+class RetryRecordingClient:
+    """OpenAI stand-in whose with_options records the options metered_create asked it for."""
+
+    def __init__(self):
+        self.options: list[dict] = []
+        self.chat = types.SimpleNamespace(completions=_Completions())
+
+    def with_options(self, **kwargs):
+        self.options.append(kwargs)
+        return self
+
+
 @pytest.fixture
 def cost_env(tmp_path, monkeypatch):
     """Point the cache and costs file at tmp, stub OpenAI and clear the module ledger state."""
@@ -184,18 +196,32 @@ def _mp_settle_worker(costs_path: str, budget: str, queue) -> None:
     child_llm._ledger_broken = False
     child_llm._ledger_broken_reason = ""
     outcomes = []
+    reserve_id = None
     try:
-        child_llm._admit(float(budget))
+        reserve_id = child_llm._admit(float(budget))
         outcomes.append("admitted")
     except child_llm.BudgetExceeded:
         outcomes.append("refused")
-    child_llm._settle("m", "t", None, float(budget), "ok", None)
+    child_llm._settle("m", "t", None, float(budget), "ok", None, reserve_id=reserve_id)
     try:
         child_llm._admit(float(budget))
         outcomes.append("admitted")
     except child_llm.BudgetExceeded:
         outcomes.append("refused")
     queue.put(outcomes)
+
+
+def _mp_reserve_worker(costs_path: str, budget: str, queue) -> None:
+    """Child process: attempt one reservation and admission against the shared ledger, then report."""
+    from vaniloop import llm as child_llm
+
+    child_llm.COSTS_PATH = Path(costs_path)
+    child_llm._ledger_broken = False
+    child_llm._ledger_broken_reason = ""
+    try:
+        queue.put(("admitted", child_llm._admit(float(budget))))
+    except child_llm.BudgetExceeded:
+        queue.put(("refused", None))
 
 
 def test_cross_process_ledger_lock_refuses_after_cap(cost_env):
@@ -215,9 +241,53 @@ def test_cross_process_ledger_lock_refuses_after_cap(cost_env):
         p.join(timeout=60)
         assert p.exitcode == 0
     assert all(second == "refused" for _, second in outcomes), outcomes
-    assert len(rows(ledger)) == 2  # both appends survived and no line was torn
+    # both settle rows survived and no line was torn; the two reserve rows closed them
+    assert len([x for x in rows(ledger) if x.get("kind") != "reserve"]) == 2
     with pytest.raises(llm.BudgetExceeded):
         llm._admit(1.0)
+
+
+def test_concurrent_processes_admit_only_one_reservation(cost_env):
+    """Regression for review round 2 finding 1: a budget that fits one reservation admits exactly one process.
+
+    Reading spend without reserving lets every process pass the cap before any settles, so the run overspends.
+    """
+    ledger = cost_env / "costs.jsonl"
+    ledger.write_text("")
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    procs = [ctx.Process(target=_mp_reserve_worker, args=(str(ledger), "0.08", queue)) for _ in range(2)]
+    for p in procs:
+        p.start()
+    outcomes = [queue.get(timeout=60) for _ in procs]
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0
+    admitted = [o for o in outcomes if o[0] == "admitted"]
+    assert len(admitted) == 1, outcomes
+    r = rows(ledger)
+    assert len(r) == 1 and r[0]["kind"] == "reserve" and r[0]["id"] == admitted[0][1]
+
+
+def test_broken_marker_blocks_admission_after_globals_reset(cost_env, monkeypatch):
+    """Regression for review round 2 finding 2: the broken-ledger marker must block a fresh process state.
+
+    A process-local flag alone would let another process keep spending after a cost row was lost.
+    """
+
+    def boom(path, items):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(llm, "append_jsonl", boom)
+    FakeClient.outputs = ['{"ok": true}']
+    assert llm.complete_json("s", "u", model="m", cache_tag="t") == {"ok": True}
+    marker = llm._marker_path()
+    assert marker.exists() and marker.name == "costs.jsonl.broken"
+    # Simulate a process that never saw the failed append: only the marker file can refuse it.
+    llm._ledger_broken = False
+    llm._ledger_broken_reason = ""
+    with pytest.raises(llm.BudgetExceeded, match="cost ledger write failed earlier"):
+        llm._admit(None)
 
 
 def test_sdk_retries_are_metered_per_attempt(cost_env):
@@ -368,6 +438,21 @@ def test_metered_create_accepts_audio_messages(cost_env):
     assert len(r) == 1 and r[0]["cache_tag"] == "audio" and r[0]["cost_usd"] == pytest.approx(0.002)
 
 
+def test_metered_create_disables_sdk_transport_retries(cost_env):
+    """Regression for review round 2 finding 3: metered_create must ask the client for max_retries=0.
+
+    SDK transport retries would pay for provider attempts the meter never admitted or recorded.
+    """
+    FakeClient.headers = {"x-litellm-response-cost": "0.001"}
+    FakeClient.outputs = ['{"ok": true}']
+    client = RetryRecordingClient()
+    resp = llm.metered_create(client, {"model": "m", "messages": []}, cache_tag="t")
+    assert resp.choices[0].message.content == '{"ok": true}'
+    assert client.options == [{"max_retries": 0}]
+    r = rows(cost_env / "costs.jsonl")
+    assert len(r) == 1 and r[0]["cost_usd"] == pytest.approx(0.001)
+
+
 def test_threads_reach_provider_concurrently(cost_env, monkeypatch):
     """Regression for review round 1 finding 7: four threads with a budget must reach the stub together.
 
@@ -383,7 +468,7 @@ def test_threads_reach_provider_concurrently(cost_env, monkeypatch):
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         list(ex.map(work, range(4)))
-    assert len(rows(cost_env / "costs.jsonl")) == 4
+    assert len([x for x in rows(cost_env / "costs.jsonl") if x.get("kind") != "reserve"]) == 4
 
 
 def test_default_cache_key_unchanged(cost_env):

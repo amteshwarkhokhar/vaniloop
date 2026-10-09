@@ -16,6 +16,7 @@ import json
 import math
 import os
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,8 @@ from .jsonl import append_jsonl, read_jsonl
 ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = ROOT / ".cache" / "llm"
 COSTS_PATH = ROOT / "runs" / "costs.jsonl"
+
+RESERVE_USD = 0.05  # default per-request reservation; override with LLM_RESERVE_USD
 
 LOCK = threading.Lock()  # serialises ledger access between threads in this process
 _ledger_broken = False  # set when a cost row could not be written; blocks every later admission
@@ -95,6 +98,20 @@ def _budget() -> float | None:
     return value
 
 
+def _reserve_usd() -> float:
+    """Per-request reservation amount: LLM_RESERVE_USD when set, else RESERVE_USD. Must be finite and >= 0."""
+    raw = os.environ.get("LLM_RESERVE_USD", "").strip()
+    if not raw:
+        return RESERVE_USD
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"LLM_RESERVE_USD must be a finite number >= 0, got {raw!r}") from None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"LLM_RESERVE_USD must be a finite number >= 0, got {raw!r}")
+    return value
+
+
 def _load_spent() -> float:
     """Sum valid cost_usd over COSTS_PATH. Missing, null, non-finite or negative costs count zero."""
     total = 0.0
@@ -106,6 +123,43 @@ def _load_spent() -> float:
         if math.isfinite(value) and value >= 0:
             total += value
     return total
+
+
+def _open_reservation_usd() -> float:
+    """Sum usd of reserve rows not yet closed by a settle row that carries their id.
+
+    An open reservation is budget already promised to an in-flight request in some process,
+    so the cap must count it until that request settles.
+    """
+    rows = read_jsonl(COSTS_PATH)
+    closed = {row.get("reserve_id") for row in rows if isinstance(row.get("reserve_id"), str)}
+    total = 0.0
+    for row in rows:
+        if row.get("kind") != "reserve" or not isinstance(row.get("id"), str) or row["id"] in closed:
+            continue
+        usd = row.get("usd")
+        if isinstance(usd, bool) or not isinstance(usd, (int, float)):
+            continue
+        value = float(usd)
+        if math.isfinite(value) and value >= 0:
+            total += value
+    return total
+
+
+def _marker_path() -> Path:
+    """Path of the broken-ledger marker beside COSTS_PATH (costs.jsonl -> costs.jsonl.broken)."""
+    return COSTS_PATH.with_name(COSTS_PATH.name + ".broken")
+
+
+def _mark_broken(exc: Exception) -> None:
+    """Record a ledger write failure in memory and leave a marker file other processes can see."""
+    global _ledger_broken, _ledger_broken_reason
+    _ledger_broken = True
+    _ledger_broken_reason = f"{type(exc).__name__}: {exc}"
+    try:
+        _marker_path().write_text(_ledger_broken_reason, encoding="utf-8")
+    except Exception:
+        pass  # the in-memory flag still blocks this process
 
 
 @contextmanager
@@ -125,23 +179,37 @@ def _ledger_lock():
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def _admit(budget: float | None) -> None:
-    """Refuse the request when the shared ledger is at the cap or the ledger is unwritable.
+def _admit(budget: float | None) -> str | None:
+    """Reserve budget in the shared ledger, or refuse when the cap is reached.
 
-    The lock is held only for the fresh ledger read, then released before the provider call.
-    Overspend is bounded by the cost of requests already admitted in any process when the
-    cap is reached, because those requests settle after it and charge their cost then.
+    Under the lock the check is settled spend + open reservations + this reservation. If it fits,
+    a reserve row is appended and its id returned; _settle closes it with a matching reserve_id.
+    The lock is released before the provider call, so requests still run concurrently. A marker
+    left by an earlier failed write blocks admission in every process that shares this ledger.
     """
     if _ledger_broken:
         raise BudgetExceeded(f"cost ledger not writable: {_ledger_broken_reason}")
     with _ledger_lock():
+        marker = _marker_path()
+        if marker.exists():
+            raise BudgetExceeded(f"cost ledger write failed earlier; inspect and delete {marker}")
         if budget is None:
-            return
+            return None
+        reserve = _reserve_usd()
         spent = _load_spent()
-        if spent >= budget:
+        reserved = _open_reservation_usd()
+        if spent + reserved + reserve > budget:
             raise BudgetExceeded(
-                f"LLM budget reached: spent ${spent:.4f} of ${budget:.4f}; delete or rename {COSTS_PATH} to reset"
+                f"LLM budget reached: spent ${spent:.4f} + reserved ${reserved:.4f} of ${budget:.4f}; "
+                f"delete or rename {COSTS_PATH} to reset"
             )
+        reserve_id = uuid.uuid4().hex
+        try:
+            append_jsonl(COSTS_PATH, [{"kind": "reserve", "id": reserve_id, "usd": reserve}])
+        except Exception as exc:
+            _mark_broken(exc)
+            raise BudgetExceeded(f"cost ledger not writable: {_ledger_broken_reason}") from exc
+        return reserve_id
 
 
 def _header_cost(headers) -> float | None:
@@ -170,9 +238,16 @@ def _exception_headers(exc) -> dict:
         return {}
 
 
-def _settle(model: str, cache_tag: str, resp, cost: float | None, status: str, error: str | None) -> None:
-    """Append one cost row under the ledger lock. A write failure marks the ledger broken, never raises."""
-    global _ledger_broken, _ledger_broken_reason
+def _settle(
+    model: str,
+    cache_tag: str,
+    resp,
+    cost: float | None,
+    status: str,
+    error: str | None,
+    reserve_id: str | None = None,
+) -> None:
+    """Append one cost row under the lock, closing reserve_id. A write failure marks the ledger broken, never raises."""
     usage = getattr(resp, "usage", None)
     row = {
         "ts": datetime.now(UTC).isoformat(),
@@ -183,24 +258,35 @@ def _settle(model: str, cache_tag: str, resp, cost: float | None, status: str, e
         "cost_usd": cost,
         "status": status,
         "error": error,
+        "reserve_id": reserve_id,
     }
     try:
         with _ledger_lock():
             append_jsonl(COSTS_PATH, [row])
     except Exception as exc:
         # Never mask the request result or its exception: record the break and refuse later requests.
-        _ledger_broken = True
-        _ledger_broken_reason = f"{type(exc).__name__}: {exc}"
+        _mark_broken(exc)
+
+
+def _without_retries(client):
+    """Return the client with SDK transport retries disabled when it supports with_options."""
+    with_options = getattr(client, "with_options", None)
+    if not callable(with_options):
+        return client
+    return with_options(max_retries=0)
 
 
 def metered_create(client, request: dict, cache_tag: str):
-    """One metered provider request: admit, call, settle exactly once, return the parsed response.
+    """One metered provider request: reserve, call, settle exactly once, return the parsed response.
 
-    Raw headers are read before parse(), so a parse failure still records the header cost. The
-    request body is passed through unchanged, so audio content parts and other shapes work too.
+    SDK transport retries are turned off first, so every attempt is its own admitted and settled
+    request even for callers that built the client themselves. Raw headers are read before
+    parse(), so a parse failure still records the header cost. The request body is passed through
+    unchanged, so audio content parts and other shapes work too.
     """
     model = request.get("model") or model_name()
-    _admit(_budget())
+    reserve_id = _admit(_budget())
+    client = _without_retries(client)
     resp = None
     headers: dict = {}
     status = "ok"
@@ -222,7 +308,7 @@ def metered_create(client, request: dict, cache_tag: str):
             headers = _exception_headers(exc)
         raise
     finally:
-        _settle(model, cache_tag, resp, _header_cost(headers), status, error)
+        _settle(model, cache_tag, resp, _header_cost(headers), status, error, reserve_id=reserve_id)
 
 
 def _make_client(base_url: str, api_key: str, max_retries: int | None):

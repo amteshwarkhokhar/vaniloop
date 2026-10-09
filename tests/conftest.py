@@ -14,3 +14,4 @@ def _isolated_cost_log(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "COSTS_PATH", tmp_path / "costs.jsonl")
     monkeypatch.setattr(llm, "_ledger_broken", False)
     monkeypatch.setattr(llm, "_ledger_broken_reason", "")
+    monkeypatch.delenv("LLM_RESERVE_USD", raising=False)
