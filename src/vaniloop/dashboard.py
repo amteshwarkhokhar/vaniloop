@@ -22,6 +22,7 @@ from vaniloop.grading import (
     reveal,
     save_grade,
 )
+from vaniloop.issue import KNOWN
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 from vaniloop.models import AuditRecord, CallRecord, Cause
 
@@ -251,7 +252,9 @@ def grade_tab(audits: list[AuditRecord], calls: dict[str, CallRecord], data_dir:
             st.audio(str(audio))
         else:
             st.caption("Audio file not available.")
-        st.dataframe(transcript_frame(call), use_container_width=True, hide_index=True)
+        rows = transcript_frame(call)
+        rows["start_sec"] = rows["start_sec"].map("{:.1f}".format)
+        st.table(rows)  # st.table wraps text; a dataframe cuts long turns
 
     existing = grades.get(sel) or {}
     all_params = known_parameters(audits)
@@ -265,7 +268,12 @@ def grade_tab(audits: list[AuditRecord], calls: dict[str, CallRecord], data_dir:
             index=list(HAND_VERDICTS).index(default_verdict),
             horizontal=True,
         )
-        params = st.multiselect("Failing parameters", all_params, default=default_params)
+        params = st.multiselect(
+            "Failing parameters",
+            all_params,
+            default=default_params,
+            format_func=lambda p: f"{p}: {KNOWN[p][0]}" if p in KNOWN else p,
+        )
         fault_turn = st.number_input(
             "First fault turn (optional)", min_value=-1, value=int(default_turn) if default_turn is not None else -1
         )
