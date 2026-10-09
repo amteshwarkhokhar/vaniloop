@@ -743,3 +743,22 @@ def test_golden_guard_trips_on_a_golden_path(tmp_path, monkeypatch):
     assert len(tripped) == 4
     open(tmp_path / "other" / "ok.json").close()  # an unrelated path still works
     assert len(tripped) == 4
+
+
+def test_run_fix_patches_a_pattern_unconfirmed_cause_but_not_an_outlier(tmp_path):
+    """A pattern_unconfirmed cause must get a patch, and an outlier or single_category cause must not.
+
+    Without it no cause could ever get a gate row (the gate needs a patch), so every pattern would stay unconfirmed.
+    """
+    causes = [cause("o", "outlier"), cause("u", "pattern_unconfirmed"), cause("s", "single_category"), cause("r")]
+    cp, pp, op = tmp_path / "causes.json", tmp_path / "prompt.md", tmp_path / "patches.json"
+    cp.write_text(json.dumps({"causes": [c.model_dump() for c in causes]}))
+    pp.write_text(PROMPT)
+    seen: list = []
+
+    def llm(system, user, **kw):
+        seen.extend(c.cause_id for c in causes if c.name in user)
+        return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
+
+    run_fix(cp, pp, op, top_n=5, llm=llm)
+    assert seen == ["u", "r"]

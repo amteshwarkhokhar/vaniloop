@@ -179,6 +179,16 @@ def run_golden(cmd: str, n: int = 150, seed: int = 0) -> None:
         )
 
 
+def cause_lines(causes: list, outliers: list[dict]) -> list[str]:
+    """One CLI line per cause: its status and counts, and for a non-pattern the conditions it failed."""
+    failed = {r["cause_id"]: r["failed"] for r in outliers}
+    return [
+        f"  [{c.status}] {c.parameter}: fatal={len(c.fatal_calls)} nonfatal={len(c.nonfatal_calls)} "
+        f"priority={c.priority:g}" + (f" failed: {', '.join(failed[c.cause_id])}" if c.cause_id in failed else "")
+        for c in causes
+    ]
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="vaniloop.pipeline")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -260,11 +270,8 @@ def main(argv: list[str] | None = None) -> None:
     else:
         causes = run_issues()
         print(f"{len(causes)} causes -> {CAUSES_PATH}")
-        for c in causes:
-            print(
-                f"  [{c.status}] {c.parameter}: fatal={len(c.fatal_calls)} "
-                f"nonfatal={len(c.nonfatal_calls)} priority={c.priority:g}"
-            )
+        for line in cause_lines(causes, read_jsonl(CAUSES_PATH.with_name("outliers.jsonl"))):
+            print(line)
 
 
 if __name__ == "__main__":

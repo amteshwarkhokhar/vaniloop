@@ -124,3 +124,23 @@ def test_regrade_keeps_audits_when_calls_and_ledgers_share_no_call(tmp_path, mon
     with pytest.raises(SystemExit):
         pipeline.run_regrade(p["calls_path"], p["ledgers_path"], p["audits_path"])
     assert "keep" in p["audits_path"].read_text()
+
+
+def test_issues_lines_show_the_status_and_the_failed_condition_of_a_non_pattern():
+    """The issues printout must show each cause's status and, for a non-pattern, the condition it failed.
+
+    Without it the owner could not tell from the terminal why a cause got no fix.
+    """
+    from vaniloop.models import Cause
+
+    def c(cid, status):
+        return Cause(
+            cause_id=cid, name=cid, description="", type="prompt", parameter=cid, status=status, fatal_calls=["a"]
+        )
+
+    out = pipeline.cause_lines(
+        [c("p", "pattern_unconfirmed"), c("s", "single_category")],
+        [{"cause_id": "s", "failed": ["categories", "reproduction"]}],
+    )
+    assert out[0].startswith("  [pattern_unconfirmed] p:") and "failed" not in out[0]
+    assert out[1].startswith("  [single_category] s:") and out[1].endswith("failed: categories, reproduction")

@@ -14,7 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from . import prompt
-from .issue import AUDITS_PATH, CAUSES_PATH, load_audits
+from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits
 from .jsonl import read_jsonl
 from .llm import complete_json
 from .models import AuditRecord, Cause
@@ -241,7 +241,7 @@ def run_fix(
     audits_path: Path = AUDITS_PATH,
 ) -> dict:
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
-    ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") == "ranked"]
+    ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") in FIXABLE_STATUSES]
     prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
     rejected: list[dict] = []
