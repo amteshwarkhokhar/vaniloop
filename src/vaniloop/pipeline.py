@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .categorize import CATEGORIES_PATH, run_categorize
-from .fix import PATCHES_PATH, run_fix, run_refix
+from .fix import PATCHES_PATH, require_patchable, run_fix, run_refix
 from .golden import GOLDEN_DIR, build_golden, golden_agreement, latest_golden, load_golden
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
@@ -201,8 +201,9 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("regrade")
     sub.add_parser("categorize")
     f = sub.add_parser("fix")
-    f.add_argument("--prompt", required=True)
+    f.add_argument("--prompt", default=None, help="the VANI prompt file; not needed with --dry-run")
     f.add_argument("--top", type=int, default=3)
+    f.add_argument("--dry-run", action="store_true", help="list patch / ticket / watch per cause; no LLM call")
     rf = sub.add_parser("refix")
     rf.add_argument("--cause", required=True)
     rf.add_argument("--prompt", required=True)
@@ -245,10 +246,25 @@ def main(argv: list[str] | None = None) -> None:
             f"-> {CATEGORIES_PATH}"
         )
     elif args.cmd == "fix":
-        r = run_fix(prompt_path=Path(args.prompt), top_n=args.top)
-        print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
+        if args.prompt is None and not args.dry_run:
+            ap.error("fix needs --prompt unless --dry-run")
+        kw = {"prompt_path": Path(args.prompt)} if args.prompt else {}
+        r = run_fix(causes_path=CAUSES_PATH, out_path=PATCHES_PATH, top_n=args.top, dry_run=args.dry_run, **kw)
+        if args.dry_run:
+            for x in r["plan"]:
+                print(f"  {x['action']:6} {x['cause_id']} [{x['status']}] type={x['type']} "
+                      f"suspected={x['suspected_type'] or '-'}: {x['why']}")  # fmt: skip
+            return
+        print(
+            f"{len(r['patches'])} patches, {len(r['rejected'])} rejected, {len(r['tickets'])} tickets, "
+            f"{len(r['watched'])} watched -> {PATCHES_PATH}"
+        )
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")
+        for cid in r["tickets"]:
+            print(f"  ticket {cid}: runs/tickets/{cid}.md")
+        for cid in r["watched"]:
+            print(f"  watch {cid}")
     elif args.cmd == "refix":
         r = run_refix(args.cause, Path(args.prompt))
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
@@ -257,6 +273,8 @@ def main(argv: list[str] | None = None) -> None:
         for p in r["patches"]:
             print(f"  new patch for {p['cause_id']}: attempt {p['attempt']}; next: prove --attempt {p['attempt']}")
     elif args.cmd == "prove":
+        if not args.dry_run:  # a tool or data cause takes no gate run: stop before any replay or LLM call
+            require_patchable(args.cause, CAUSES_PATH)
         out = run_prove(
             args.cause,
             Path(args.prompt),

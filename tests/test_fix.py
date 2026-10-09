@@ -833,3 +833,201 @@ def test_channel_cause_marked_ranked_is_never_sent_to_the_llm(tmp_path):
     cp.write_text(json.dumps({"causes": [ch.model_dump()]}))
     pp.write_text(PROMPT)
     assert run_fix(cp, pp, op, llm=boom)["patches"] == []
+
+
+# ---- fix by type (#73): prompt causes get patches, tool and data causes get tickets, the rest is watched ----
+
+PHONE_LIKE = "98765" + "43210"  # built at run time so the repo phone scan does not trip on the test file
+
+
+def _boom(*_a, **_k):
+    raise AssertionError("the LLM must not be called here")
+
+
+def typed_cause(cid, status="ranked", ctype="flow_logic", suspected="", parameter="looping", **kw):
+    return Cause(
+        cause_id=cid,
+        name=f"Name of {cid}",
+        description="d",
+        type=ctype,
+        parameter=parameter,
+        suspected_type=suspected,
+        status=status,
+        **kw,
+    )
+
+
+def typed_files(tmp_path, causes, audits=(), gates=()):
+    """Write causes, prompt, audits and gates files under tmp_path; return run_fix kwargs."""
+    kw = dict(
+        causes_path=tmp_path / "causes.json",
+        prompt_path=tmp_path / "prompt.md",
+        out_path=tmp_path / "patches.json",
+        audits_path=tmp_path / "audits.jsonl",
+        gates_path=tmp_path / "gates.jsonl",
+        tickets_dir=tmp_path / "tickets",
+        category_of=lambda call_id: {"c1": "pumps", "c2": "pumps", "c3": "textiles"}.get(call_id, "unknown"),
+    )
+    kw["causes_path"].write_text(json.dumps({"causes": [c.model_dump() for c in causes]}))
+    kw["prompt_path"].write_text(PROMPT)
+    kw["audits_path"].write_text("".join(json.dumps(a.model_dump(mode="json")) + "\n" for a in audits))
+    kw["gates_path"].write_text("".join(json.dumps(g) + "\n" for g in gates))
+    return kw
+
+
+def isq_audit(call_id, status, onset, quote, parameter="category_isq"):
+    finding = Finding(
+        parameter=parameter,
+        status=status,
+        reason="Bot asked a spec question from another category",
+        basis="observed",
+        onset_turn=onset,
+        evidence=[Evidence(turn_idx=onset, quote=quote)],
+    )
+    return AuditRecord(call_id=call_id, verdict=status, scope="bl_collection", findings=[finding])
+
+
+def patch_llm(seen):
+    def llm(system, user, **kw):
+        seen.append(user)
+        return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
+
+    return llm
+
+
+def test_data_cause_gets_a_ticket_with_evidence_and_no_patch(tmp_path):
+    """A cause with suspected_type data or tool must get runs/tickets/<id>.md and no patch, with no LLM call for it.
+
+    Without it a data fault (wrong ISQ list for a category) would be "fixed" by a prompt edit that cannot work,
+    and the owner of the data would never see the evidence.
+    """
+    data = typed_cause(
+        "cause_category_isq",
+        suspected="data",
+        parameter="category_isq",
+        fatal_calls=["c1", "c2"],
+        nonfatal_calls=["c3"],
+        symptom_calls=["c4"],
+    )
+    tool = typed_cause("cause_product_change", suspected="tool", parameter="product_change", fatal_calls=["c1"])
+    audits = [
+        isq_audit("c1", "Fatal", 4, f"Line one\nline two {PHONE_LIKE} " + "x" * 300),
+        isq_audit("c2", "Fatal", 6, "short quote"),
+        isq_audit("c3", "NonFatal", 8, "another quote"),
+    ]
+    gates = [{"cause_id": "cause_category_isq", "attempt": 1, "decision": "inconclusive", "reason": "gate reason one"}]
+    kw = typed_files(tmp_path, [data, tool, typed_cause("cause_looping")], audits, gates)
+    seen: list = []
+    r = run_fix(llm=patch_llm(seen), **kw)
+    assert len(seen) == 1 and "Name of cause_looping" in seen[0]  # only the prompt-side cause reaches the LLM
+    assert [p["cause_id"] for p in json.loads(kw["out_path"].read_text())["patches"]] == ["cause_looping"]
+    assert sorted(p.name for p in kw["tickets_dir"].glob("*.md")) == [
+        "cause_category_isq.md",
+        "cause_product_change.md",
+    ]
+    assert sorted(r["tickets"]) == ["cause_category_isq", "cause_product_change"]
+    text = (kw["tickets_dir"] / "cause_category_isq.md").read_text()
+    for needle in ("c1", "c2", "c3", "c4", "onset turn 4", "onset turn 8", "inconclusive", "gate reason one"):
+        assert needle in text
+    assert "pumps: 2" in text and "textiles: 1" in text  # the category spread
+    assert PHONE_LIKE not in text  # phone-like digit runs are redacted
+    assert all(len(line) < 400 for line in text.splitlines())  # a quote is cut to one short line
+    assert not any(line.strip().startswith("line two") for line in text.splitlines())  # no multi-line quote
+
+
+def test_channel_and_outlier_causes_get_neither_patch_nor_ticket_and_are_watched(tmp_path):
+    """Channel causes and outliers (also single_category and watch) must get no patch and no ticket, only a watch.
+
+    Without it bad audio or a non-reproducible fault would take a paid fix slot or clutter the data tickets.
+    """
+    causes = [
+        typed_cause("cause_channel_x", status="watch", ctype="channel"),
+        typed_cause("cause_channel_y", status="ranked", ctype="channel", suspected="data"),  # hand-edited file
+        typed_cause("cause_out", status="outlier", suspected="data"),
+        typed_cause("cause_single", status="single_category"),
+        typed_cause("cause_watch", status="watch"),
+    ]
+    kw = typed_files(tmp_path, causes)
+    r = run_fix(llm=_boom, **kw)
+    assert r["patches"] == [] and r["tickets"] == []
+    assert sorted(r["watched"]) == sorted(c.cause_id for c in causes)
+    assert not kw["tickets_dir"].exists() or not list(kw["tickets_dir"].glob("*.md"))
+
+
+def test_flow_logic_cause_stays_patchable_unless_suspected_type_is_tool_or_data(tmp_path):
+    """A flow_logic cause (looping, dead_air) with no suspected_type must still get a patch.
+
+    Without it the fix stage would stop patching the loops it patched all day, because they are not type prompt.
+    """
+    causes = [typed_cause("cause_looping"), typed_cause("cause_dead_air", parameter="dead_air")]
+    kw = typed_files(tmp_path, causes)
+    seen: list = []
+    r = run_fix(llm=patch_llm(seen), **kw)
+    assert [p["cause_id"] for p in r["patches"]] == ["cause_looping", "cause_dead_air"] and r["tickets"] == []
+
+
+def test_fix_dry_run_lists_patch_ticket_watch_with_no_llm_call_and_no_file(tmp_path):
+    """A dry run must list patch, ticket or watch per cause, call no LLM and write no file.
+
+    Without it the owner could only learn the routing by paying for a real run.
+    """
+    causes = [
+        typed_cause("cause_looping"),
+        typed_cause("cause_category_isq", suspected="data", parameter="category_isq"),
+        typed_cause("cause_channel_z", status="watch", ctype="channel"),
+    ]
+    kw = typed_files(tmp_path, causes)
+    r = run_fix(llm=_boom, dry_run=True, **kw)
+    assert {p["cause_id"]: p["action"] for p in r["plan"]} == {
+        "cause_looping": "patch",
+        "cause_category_isq": "ticket",
+        "cause_channel_z": "watch",
+    }
+    assert not kw["out_path"].exists() and not kw["tickets_dir"].exists()
+
+
+def test_pipeline_fix_dry_run_prints_the_plan_without_a_prompt_file(tmp_path, monkeypatch, capsys):
+    """`pipeline fix --dry-run` must print one patch/ticket/watch line per cause and need no --prompt.
+
+    Without it the dry run would demand a prompt file and could not be used to preview the routing.
+    """
+    from vaniloop import pipeline
+
+    causes = [typed_cause("cause_looping"), typed_cause("cause_category_isq", suspected="data")]
+    kw = typed_files(tmp_path, causes)
+    monkeypatch.setattr(pipeline, "CAUSES_PATH", kw["causes_path"])
+    monkeypatch.setattr(pipeline, "PATCHES_PATH", kw["out_path"])
+    monkeypatch.setattr(pipeline, "run_fix", lambda **k: run_fix(**{**k, "llm": _boom}))
+    pipeline.main(["fix", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "patch" in out and "cause_looping" in out
+    assert "ticket" in out and "cause_category_isq" in out
+
+
+def test_refix_refuses_a_ticket_cause_before_any_llm_call(tmp_path):
+    """run_refix must stop on a cause with suspected_type tool or data before any LLM call, even with a patch.
+
+    Without it an old patch on a data cause would get a second paid attempt for a fault a prompt cannot fix.
+    """
+    kw = refix_files(tmp_path)
+    ticket = cause().model_copy(update={"suspected_type": "data"})
+    kw["causes_path"].write_text(json.dumps({"causes": [ticket.model_dump()]}))
+    with pytest.raises(SystemExit, match="ticket"):
+        run_refix("cause_qty_probing", llm=_boom, **kw)
+    assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW
+
+
+def test_prove_refuses_a_ticket_cause_before_any_llm_call(tmp_path, monkeypatch):
+    """`pipeline prove` must refuse a tool or data cause before run_prove (and so any replay LLM call) starts.
+
+    Without it a leftover patch on a data cause could be gated with paid replays that prove nothing.
+    """
+    from vaniloop import pipeline
+
+    ticket = cause("cause_category_isq").model_copy(update={"suspected_type": "data"})
+    cp = tmp_path / "causes.json"
+    cp.write_text(json.dumps({"causes": [ticket.model_dump()]}))
+    monkeypatch.setattr(pipeline, "CAUSES_PATH", cp)
+    monkeypatch.setattr(pipeline, "run_prove", _boom)
+    with pytest.raises(SystemExit, match="ticket"):
+        pipeline.main(["prove", "--cause", "cause_category_isq", "--prompt", str(tmp_path / "p.md")])
