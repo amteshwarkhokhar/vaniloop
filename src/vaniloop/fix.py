@@ -57,12 +57,7 @@ def _user_message(cause: Cause, examples: list[str], prompt_text: str) -> str:
             "examples": examples,
         }
     )
-    return (
-        "<data>\n"
-        f"{data}\n"
-        "</data>\n\n"
-        f"Prompt with line numbers:\n{_numbered(prompt_text)}"
-    )
+    return f"<data>\n{data}\n</data>\n\nPrompt with line numbers:\n{_numbered(prompt_text)}"
 
 
 def _retry_kwargs(llm) -> dict:
@@ -98,8 +93,9 @@ def changed_lines(old: str, new: str) -> int:
     return sum(1 for x in d if x.startswith(("- ", "+ ")))
 
 
-def propose_patch(cause: Cause, examples: list[str], prompt_text: str, llm=complete_json,
-                  rejected: list[dict] | None = None) -> PromptPatch | None:
+def propose_patch(
+    cause: Cause, examples: list[str], prompt_text: str, llm=complete_json, rejected: list[dict] | None = None
+) -> PromptPatch | None:
     """Return a validated patch, or None. The reason for a rejection is appended to `rejected`."""
 
     def reject(reason: str) -> None:
@@ -127,16 +123,28 @@ def propose_patch(cause: Cause, examples: list[str], prompt_text: str, llm=compl
         return reject(f"diff changes {changed} lines (max {MAX_CHANGED_LINES})")
     start = prompt_text.count("\n", 0, prompt_text.index(old)) + 1
     end = start + old.count("\n") - (1 if old.endswith("\n") else 0)
-    return PromptPatch(cause_id=cause.cause_id, target_start_line=start, target_end_line=end,
-                       old_text=old, new_text=new, rationale=rationale, risk=risk)
+    return PromptPatch(
+        cause_id=cause.cause_id,
+        target_start_line=start,
+        target_end_line=end,
+        old_text=old,
+        new_text=new,
+        rationale=rationale,
+        risk=risk,
+    )
 
 
 def apply_patch(prompt_text: str, patch: PromptPatch) -> str:
     return prompt_text.replace(patch.old_text, patch.new_text, 1)
 
 
-def run_fix(causes_path: Path = CAUSES_PATH, prompt_path: Path = ROOT / "data" / "reference" / "vani_prompt_sarvam.md",
-            out_path: Path = PATCHES_PATH, top_n: int = 3, llm=complete_json) -> dict:
+def run_fix(
+    causes_path: Path = CAUSES_PATH,
+    prompt_path: Path = ROOT / "data" / "reference" / "vani_prompt_sarvam.md",
+    out_path: Path = PATCHES_PATH,
+    top_n: int = 3,
+    llm=complete_json,
+) -> dict:
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
     ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") == "ranked"]
     prompt_text = Path(prompt_path).read_bytes().decode("utf-8")  # keep CRLF: anchors use original chars
