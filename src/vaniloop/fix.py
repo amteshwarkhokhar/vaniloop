@@ -98,6 +98,19 @@ def _strip_line_numbers(text: str) -> str:
     return _LINE_NUMBER.sub("", text)
 
 
+def _strip_new_text_numbers(text: str) -> str | None:
+    """Strip "N: " prefixes from new_text only when every non-empty line has one.
+
+    No numbered line: return the text unchanged. Some but not all: return None (ambiguous numbering), because a
+    line such as "2: 1 is the preferred ratio." may be real prompt text.
+    """
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    numbered = sum(1 for ln in lines if _LINE_NUMBER.match(ln))
+    if numbered == 0:
+        return text
+    return _strip_line_numbers(text) if numbered == len(lines) else None
+
+
 def evidence_examples(cause: Cause, audits: dict[str, AuditRecord]) -> list[str]:
     """Up to MAX_EXAMPLES one-line evidence quotes of the cause's parameter, one per member call.
 
@@ -161,8 +174,13 @@ def propose_patch(
         return reject("new_text identical to old_text")
     n = _count_overlapping(prompt_text, old)
     if n == 0:  # the model may have copied the "N: " prefixes of the numbered view: retry once without them
-        old2, new2 = _strip_line_numbers(old), _strip_line_numbers(new)
+        old2 = _strip_line_numbers(old)
         if old2 != old:
+            new2 = _strip_new_text_numbers(new)
+            if new2 is None:
+                return reject("new_text has some lines with N: prefixes and some without (ambiguous numbering)")
+            if not new2.strip():
+                return reject("new_text empty")
             if new2 == old2:
                 return reject("new_text identical to old_text")
             old, new = old2, new2

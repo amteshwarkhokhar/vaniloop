@@ -274,7 +274,7 @@ def test_prefixed_anchor_is_found_once_and_a_repeated_one_is_rejected():
     Without the retry the copied prefixes reject a correct anchor. Without the count a repeat would patch blindly.
     """
     old = "10: line 10: rule text 10\n11: line 11: rule text 11"
-    new = "10: line 10: rule text 10\nAlways ask the quantity.\n11: line 11: rule text 11"
+    new = "10: line 10: rule text 10\n11: Always ask the quantity.\n12: line 11: rule text 11"
     p = propose_patch(cause(), [], PROMPT, llm=stub(old, new))
     assert isinstance(p, PromptPatch)
     assert p.old_text == "line 10: rule text 10\nline 11: rule text 11"
@@ -373,3 +373,31 @@ def test_rejected_rows_keep_the_first_300_chars_of_old_text(tmp_path):
     r = run_fix(cp, pp, op, llm=stub(old, "x"), audits_path=ap)
     assert r["rejected"][0]["old_text"] == old[:300]
     assert json.loads(op.read_text())["rejected"][0]["old_text"] == old[:300]
+
+
+def test_prefix_strip_that_empties_new_text_is_rejected():
+    """If stripping the "N: " prefix leaves new_text empty, the patch must be rejected.
+
+    Otherwise a model reply of just a line number would delete the instruction it anchored on.
+    """
+    prompt = "head\nAsk quantity.\ntail"
+    rej: list = []
+    assert propose_patch(cause(), [], prompt, llm=stub("2: Ask quantity.", "2: "), rejected=rej) is None
+    assert "empty" in rej[0]["reason"]
+
+
+def test_new_text_with_mixed_line_numbering_is_rejected_and_unnumbered_is_kept():
+    """new_text may lose "N: " prefixes only when every non-empty line has one; a mix is rejected.
+
+    A real line such as "2: 1 is the preferred ratio." would otherwise lose its "2: " and corrupt the prompt.
+    """
+    old = "10: line 10: rule text 10"
+    mixed = "line 10: rule text 10\n2: 1 is the preferred ratio."
+    rej: list = []
+    assert propose_patch(cause(), [], PROMPT, llm=stub(old, mixed), rejected=rej) is None
+    assert "ambiguous" in rej[0]["reason"]
+
+    plain = "line 10: rule text 10\nAlways ask the quantity."  # no numbered line: kept exactly as given
+    p = propose_patch(cause(), [], PROMPT, llm=stub(old, plain))
+    assert isinstance(p, PromptPatch)
+    assert p.old_text == "line 10: rule text 10" and p.new_text == plain
