@@ -1,4 +1,4 @@
-"""Streamlit dashboard: Audit, Grade, Issues and Fix views over vaniloop outputs. Drawing lives in viz.py.
+"""Streamlit dashboard: Audit, Grade, Issues, Fix and Test views over vaniloop outputs. Drawing lives in viz.py.
 
 Run: uv run streamlit run src/vaniloop/dashboard.py
 """
@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from pydantic import BaseModel, model_validator
 
 from vaniloop.fix import PromptPatch
+from vaniloop.gate import GateResult
 from vaniloop.grading import (
     HAND_VERDICTS,
     agreement,
@@ -28,13 +31,16 @@ from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 from vaniloop.models import AuditRecord, CallRecord, Cause
 from vaniloop.viz import (
     CSS,
+    REPLAY_MARK,
     VERDICT_COLOR,
     VERDICT_LABEL,
     call_strip,
     cause_list,
     findings,
     fix_cards,
+    gate_cards,
     lede,
+    replay_panel,
     script,
     wall,
 )
@@ -46,6 +52,10 @@ NAMES = {p: v[0] for p, v in KNOWN.items()}  # parameter -> plain name, e.g. qty
 EMPTY_FIX = (
     "No fixes to show yet. The fix stage writes prompt patches for the top causes: "
     "`uv run python -m vaniloop.pipeline fix --prompt data/reference/vani_prompt_sarvam.md`."
+)
+EMPTY_TEST = (
+    "No replays to show yet. The test stage replays failing calls with the old and the fixed prompt: "
+    "`uv run python -m vaniloop.pipeline prove --cause <cause_id> --prompt data/reference/vani_prompt_sarvam.md`."
 )
 
 
@@ -125,6 +135,47 @@ def load_patches_doc(d: Path | str) -> tuple[list[PromptPatch], list[dict]] | No
     except Exception as e:
         st.warning(f"Could not read {p.name}: {type(e).__name__}. Showing no patches.")
         return None
+
+
+def load_gates(d: Path | str) -> list[GateResult]:
+    """The latest gate result per cause. gates.jsonl is append-only, so the last row of a cause wins."""
+    p = _pick(Path(d), "gates.jsonl", "synthetic_gates.jsonl")
+    rows = [{**r, "p_value": float("nan") if r.get("p_value") is None else r["p_value"]} for r in read_jsonl(p)]
+    return list({g.cause_id: g for g in _models(GateResult, rows)}.values())  # null p_value: no test ran
+
+
+class ReplayRow(BaseModel):
+    """One row of replays.jsonl: a replayed call and its audit, written by the prove command."""
+
+    cause_id: str
+    attempt: int = 1
+    role: str
+    prompt: str
+    seed: int
+    fork_turn: int
+    ended_by: str
+    call: CallRecord
+    audit: AuditRecord | None = None
+
+    @model_validator(mode="after")
+    def _finite_times(self):
+        """A NaN or infinite time passes float validation but breaks the script's clock, so reject the row."""
+        times = [self.call.duration_sec]
+        times += [x for t in self.call.turns for x in (t.start_sec, t.end_sec)]
+        times += [x for s in self.call.silences for x in (s.start_sec, s.end_sec)]
+        if not all(math.isfinite(x) for x in times):
+            raise ValueError("replay times must be finite")
+        return self
+
+    @property
+    def target_id(self) -> str:
+        """The original call's id. A replay is named '<original id>__replay_<tag>_<seed>_<hash>'."""
+        return self.call.call_id.split(REPLAY_MARK)[0]
+
+
+def load_replays(d: Path | str) -> list[ReplayRow]:
+    p = _pick(Path(d), "replays.jsonl", "synthetic_replays.jsonl")
+    return _models(ReplayRow, read_jsonl(p))
 
 
 def load_grade_sample(d: Path | str, audits: list[AuditRecord]) -> list[str]:
@@ -427,6 +478,48 @@ def fix_tab(causes: list[Cause], doc: tuple[list[PromptPatch], list[dict]] | Non
     st.html(fix_cards(causes, patches, rejected))
 
 
+def gates_tab(causes: list[Cause], gates: list[GateResult], replays: list[ReplayRow]) -> None:
+    """The latest ship-gate result per cause, then the old and new replay of one target call side by side."""
+    if not gates:
+        st.info(EMPTY_TEST)
+        return
+    by_id = {c.cause_id: c for c in causes}
+    rank = {c.cause_id: i for i, c in enumerate(causes)}
+    gates = sorted(gates, key=lambda g: rank.get(g.cause_id, len(rank)))  # rank order; unknown causes last
+    labels = {g.cause_id: by_id[g.cause_id].name if g.cause_id in by_id else g.cause_id for g in gates}
+    st.html(gate_cards(gates, labels))
+
+    st.markdown("#### Old and new replay of one call")
+    cid = st.selectbox("Cause", list(labels), format_func=labels.get, key="replay_cause")
+    gate = next(g for g in gates if g.cause_id == cid)
+    call_ids = [c.call_id for c in gate.per_call]
+    if not call_ids:
+        st.caption("This gate result has no target calls.")
+        return
+    call_id = st.selectbox("Target call", call_ids, key=f"replay_call_{cid}")
+    parameter = by_id[cid].parameter if cid in by_id else None
+    st.caption("Seed 0, from the turn where the replay leaves the original call.")
+    left, right = st.columns(2, gap="large")
+    for col, which in ((left, "old"), (right, "new")):
+        row = next(  # a rerun appends, so the last matching row wins
+            (
+                r
+                for r in reversed(replays)
+                if (r.cause_id, r.attempt, r.role, r.prompt, r.seed) == (cid, gate.attempt, "target", which, 0)
+                and r.target_id == call_id
+            ),
+            None,
+        )
+        with col:
+            if row is None:
+                st.caption(f"No seed-0 replay with the {which} prompt is recorded for this call.")
+            else:
+                title = f"{which.capitalize()} prompt"
+                st.html(
+                    replay_panel(title, row.call, row.audit, row.fork_turn, row.ended_by, row.seed, parameter, NAMES)
+                )
+
+
 def main() -> None:
     st.set_page_config(page_title="vaniloop", page_icon="\u260e", layout="wide", initial_sidebar_state="collapsed")
     st.html(CSS)
@@ -455,7 +548,7 @@ def main() -> None:
     elif view == "Fix":
         fix_tab(causes, load_patches_doc(data_dir))
     else:
-        st.info("No replays to show yet. The test stage replays failing calls with the old and the fixed prompt.")
+        gates_tab(causes, load_gates(data_dir), load_replays(data_dir))
 
 
 if __name__ == "__main__":
