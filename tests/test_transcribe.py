@@ -163,3 +163,20 @@ def test_bare_list_reply_is_accepted_as_the_turns(tmp_path, monkeypatch):
     bare = json.dumps(json.loads(GOOD)["turns"])
     row = transcribe_call(mp3, out_dir=tmp_path / "t", client=StubClient(bare), log_path=tmp_path / "log.jsonl")
     assert row["status"] == "ok" and row["n_turns"] == 2
+
+
+def test_turns_wrapped_in_a_one_item_list_are_accepted(tmp_path, monkeypatch):
+    """Gemini also returned [{"turns": [...]}] on 2 of the first 11 sample calls (107_90741474, 144_90741487).
+    If this breaks, those paid calls are logged as 'no valid turns' and the sample loses about 1 call in 5."""
+    mp3 = _mp3(tmp_path, monkeypatch)
+    wrapped = json.dumps([json.loads(GOOD)])
+    row = transcribe_call(mp3, out_dir=tmp_path / "t", client=StubClient(wrapped), log_path=tmp_path / "log.jsonl")
+    assert row["status"] == "ok" and row["n_turns"] == 2
+
+
+def test_failed_reply_is_kept_for_debugging(tmp_path, monkeypatch):
+    """When a reply cannot be used, its raw text is saved next to the log so the cause can be seen.
+    If this breaks, a new reply shape fails silently and costs a second paid call to diagnose."""
+    mp3 = _mp3(tmp_path, monkeypatch)
+    transcribe_call(mp3, out_dir=tmp_path / "t", client=StubClient('{"other": 1}'), log_path=tmp_path / "log.jsonl")
+    assert (tmp_path / "transcribe_raw" / "77_123_ABC.txt").read_text() == '{"other": 1}'

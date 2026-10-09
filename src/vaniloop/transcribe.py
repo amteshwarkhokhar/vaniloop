@@ -102,6 +102,15 @@ def normalise_turns(raw, duration: float) -> list[dict]:
     return turns
 
 
+def _find_turns(data):
+    """Return the turn list from the shapes Gemini has produced: {"turns": [...]}, [...], or [{"turns": [...]}]."""
+    if isinstance(data, dict):
+        return data.get("turns")
+    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) and "turns" in data[0]:
+        return data[0]["turns"]
+    return data
+
+
 def _client():
     from openai import OpenAI
 
@@ -151,8 +160,7 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
     }
     try:
         text = (resp.choices[0].message.content or "").strip().removeprefix("```json").removesuffix("```")
-        data = json.loads(text)
-        turns = normalise_turns(data.get("turns") if isinstance(data, dict) else data, duration)
+        turns = normalise_turns(_find_turns(json.loads(text)), duration)
     except (ValueError, AttributeError) as e:
         row.update(status="error", error=f"unparseable output: {e}"[:200])
     else:
@@ -160,6 +168,10 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
             row.update(status="ok", n_turns=len(turns))
         else:
             row.update(status="error", error="no valid turns")
+    if row["status"] != "ok":
+        raw_dir = log_path.parent / "transcribe_raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / f"{call_id}.txt").write_text(resp.choices[0].message.content or "", encoding="utf-8")
     if row["status"] == "ok":
         doc = {
             "call_id": call_id,
