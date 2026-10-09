@@ -38,8 +38,14 @@ def model_name() -> str:
     return os.environ.get("LLM_MODEL", "google/gemini-3-flash-preview")
 
 
-def _key(model: str, messages: list[dict], base_url: str = "", cache_tag: str = "") -> str:
-    raw = json.dumps({"m": model, "u": base_url, "t": cache_tag, "msgs": messages}, sort_keys=True, ensure_ascii=False)
+def _key(model: str, messages: list[dict], base_url: str = "", cache_tag: str = "",
+         temperature: float = 0, seed: int | None = None) -> str:
+    body = {"m": model, "u": base_url, "t": cache_tag, "msgs": messages}
+    if temperature != 0:  # added only when non-default, so keys of older calls stay identical
+        body["temp"] = temperature
+    if seed is not None:
+        body["seed"] = seed
+    raw = json.dumps(body, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -75,12 +81,13 @@ def _write_cache(key: str, data: dict) -> None:
 
 
 def complete_json(system: str, user: str, model: str | None = None, retries: int = 2,
-                  validate=None, cache_tag: str = "") -> dict:
+                  validate=None, cache_tag: str = "", temperature: float = 0, seed: int | None = None,
+                  max_retries: int | None = None) -> dict:
     """Return a parsed JSON object. Retries on unparseable or invalid output; only valid output is cached."""
     model = model or model_name()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     base = os.environ.get("LLM_BASE_URL")
-    key = _key(model, messages, base or "", cache_tag)
+    key = _key(model, messages, base or "", cache_tag, temperature, seed)
     hit = cached_json(key, validate)
     if hit is not None:
         return hit
@@ -90,14 +97,17 @@ def complete_json(system: str, user: str, model: str | None = None, retries: int
     api_key = os.environ.get("LLM_API_KEY")
     if not base or not api_key:
         raise RuntimeError("LLM_BASE_URL and LLM_API_KEY must be set in .env (no cached answer for this request)")
-    client = OpenAI(base_url=base, api_key=api_key)
+    client_kw = {} if max_retries is None else {"max_retries": max_retries}
+    client = OpenAI(base_url=base, api_key=api_key, **client_kw)
+    extra = {} if seed is None else {"seed": seed}
     last_err: Exception | None = None
     for _ in range(retries + 1):
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0,
+            temperature=temperature,
             response_format={"type": "json_object"},
+            **extra,
         )
         text = resp.choices[0].message.content or ""
         try:
