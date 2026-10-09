@@ -381,3 +381,14 @@ def test_workers_below_1_stop_before_any_llm_call(tmp_path):
         with pytest.raises(SystemExit):
             prove.run_prove(CAUSE, pf, n=3, k=2, workers=workers, replay_fn=raising, audit_fn=raising, **paths)
     assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
+
+
+def test_cache_refresh_skips_the_warm_up(tmp_path, capsys, monkeypatch):
+    """With VANILOOP_CACHE=refresh and workers 4, no warm-up call may run and one line must say why. In refresh mode
+    the gate ignores the cache, so every warmed replay and audit would be paid for a second time."""
+    monkeypatch.setenv("VANILOOP_CACHE", "refresh")
+    out, _, stubs = run(tmp_path, workers=4)
+    assert stubs.replays == stubs.audits == out.replays == 14
+    assert not any(t.startswith("warm") for t, *_ in stubs.log)
+    text = capsys.readouterr().out
+    assert "warm-up skipped" in text and "VANILOOP_CACHE=refresh" in text and "warm-up done" not in text

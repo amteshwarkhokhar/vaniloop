@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -239,7 +240,8 @@ def run_prove(
 
     A run writes one gates row and one replays row per replay. A dry run makes no LLM call and writes no file.
     With workers > 1 the first-round replays are computed in a thread pool before the gate starts (see warm_cache);
-    the gate and the rows stay the same, only the wall time shrinks.
+    the gate and the rows stay the same, only the wall time shrinks. With VANILOOP_CACHE=refresh the gate cannot read
+    the cache, so the warm-up is skipped.
     """
     if not cause_id.startswith("cause_"):
         raise SystemExit(f"cause id '{cause_id}' does not look like cause_<parameter>")
@@ -301,7 +303,9 @@ def run_prove(
         return audit
 
     costs_before = len(read_jsonl(llm.COSTS_PATH))  # before the warm-up: its replays are part of this run's cost
-    if workers > 1:
+    if workers > 1 and os.environ.get("VANILOOP_CACHE") == "refresh":
+        print("warm-up skipped: VANILOOP_CACHE=refresh makes the gate ignore the cache, so warming would pay twice")
+    elif workers > 1:
         print(
             f"warm-up: {plan.warm_replays} replays, each with its audit, on {workers} workers before the gate. "
             f"The gate stops early on a futility reject or on unresolved seed-0 evidence, and then never needs "
