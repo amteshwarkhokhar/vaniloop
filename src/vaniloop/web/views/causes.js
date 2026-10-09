@@ -55,7 +55,7 @@
       el.innerHTML = `
         <h1 class="view-title"><em>${causes.length}</em> ${causes.length === 1 ? "cause" : "causes"} found in <em>${ids.size}</em> ${ids.size === 1 ? "call" : "calls"}.</h1>
         <p class="lede">In rank order. Open a cause to see its calls.</p>
-        <div class="causes-head label" aria-hidden="true"><span></span><span>Cause</span><span>Owner</span><span>Calls</span><span>Fatal / Non-fatal</span><span>Status</span><span></span></div>
+        <div class="causes-head label" aria-hidden="true"><span></span><span>Cause</span><span>Owner</span><span class="r">Calls</span><span>Fatal / Non-fatal</span><span>Status</span><span></span></div>
         <ol class="causes">${causes.map((c, i) => row(c, i, max)).join("")}</ol>`;
       el.querySelector(".causes").addEventListener("click", (e) => {
         const b = e.target.closest(".crow");

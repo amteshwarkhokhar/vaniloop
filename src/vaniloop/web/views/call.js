@@ -48,9 +48,14 @@
     }).join("");
   }
 
+  // Worst first: Fatal, Non-fatal, Unknown or Needs review, Pass, then Not applicable.
+  const RANK = { Fatal: 0, NonFatal: 1, Unknown: 2, NeedsReview: 2, Pass: 3, NotApplicable: 4 };
+  const rank = (s) => V.own(RANK, s) ?? 2;
+
   function checks(findings) {
     if (!findings.length) return `<p class="empty">No checks were recorded for this call.</p>`;
-    return `<ul>${findings.map((f) => `<li>
+    const sorted = [...findings].sort((a, b) => rank(a.status) - rank(b.status));
+    return `<ul>${sorted.map((f) => `<li>
       <span class="dot t-${esc(V.tone(f.status))}"></span><span class="cname">${esc(V.name(f.parameter))}</span>
       <span class="cstat">${esc(V.word(f.status))}</span><p class="creason" title="${esc(f.reason)}">${esc(f.reason)}</p></li>`).join("")}</ul>`;
   }

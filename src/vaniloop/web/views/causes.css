@@ -1,10 +1,13 @@
 /* Causes view */
 .causes-head,.crow{ display:grid; grid-template-columns:28px minmax(0,1fr) 280px 48px 160px 170px 12px; gap:24px; align-items:center; }
-.causes-head{ margin-top:56px; padding:0 12px 12px; font-size:10px; }
+.causes-head{ margin-top:56px; padding:0 0 12px; font-size:10px; }
+.causes-head .r{ text-align:right; }
 .causes{ list-style:none; margin:0; padding:0; border-top:1px solid var(--seam); }
 .cause{ border-bottom:1px solid var(--seam); }
-.crow{ width:100%; padding:22px 12px; text-align:left; transition:background .2s var(--ease); }
-.crow:hover,.open .crow{ background:var(--slate); }
+/* the row text lines up with the content above; the slate ground hangs 12px into the gutter */
+.crow{ width:calc(100% + 24px); margin:0 -12px; padding:22px 12px; text-align:left; transition:background .26s var(--ease); }
+.crow:hover{ background:var(--slate); }
+.cause.open .crow,.cause.open .panel{ background:var(--slate); }
 .rank{ font-size:12px; color:var(--ash); }
 .kname{ display:grid; gap:6px; min-width:0; }
 .kname b{ font-weight:500; font-size:16px; line-height:1.35; }
@@ -23,7 +26,7 @@
 .open .caret{ transform:translateY(2px) rotate(-135deg); border-color:var(--champagne); }
 
 /* the expanding panel: height follows the grid row from 0fr to 1fr */
-.panel{ display:grid; grid-template-rows:0fr; transition:grid-template-rows .26s var(--ease); }
+.panel{ display:grid; grid-template-rows:0fr; margin:0 -12px; transition:grid-template-rows .26s var(--ease), background .26s var(--ease); }
 .panel > div{ overflow:hidden; }
 .open .panel{ grid-template-rows:1fr; }
 .panel-in{ padding:4px 12px 28px 64px; max-width:900px; }
@@ -44,7 +47,8 @@
   .causes{ margin-top:48px; }
 }
 @media (max-width:720px){
-  .crow{ grid-template-columns:20px minmax(0,1fr) 40px 12px; gap:10px 14px; padding:18px 4px; }
+  .crow{ grid-template-columns:20px minmax(0,1fr) 40px 12px; gap:10px 14px; width:100%; margin:0; padding:18px 4px; }
+  .panel{ margin:0; }
   .count{ font-size:26px; }
   .panel-in{ padding:4px 4px 24px 34px; }
 }

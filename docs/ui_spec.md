@@ -43,15 +43,14 @@
 ├──────────────────────────────────────────────────────────────┤
 │ 713 calls heard. 52 carry a Fatal fault.                     │  hero sentence, numbers from data
 │ ▁▂▅▃▁▇▂▃▅▁▂▃ … (the spectrum: one hairline bar per call) …   │  signature, 180px tall, full width
-│ ● Fatal 52   ● Non-fatal 301   ● Needs review 88   ● Pass 272│  legend, counts, mono labels
-│ [All] [Fatal] [Non-fatal] [Needs review] [Pass]              │  filter (also filters the spectrum)
+│ All 713  ● Fatal 52  ● Non-fatal 301  ● Review 88  ● Pass 272│  filter tabs = legend: dot, word, mono count
 │ 133_9085…   01:32   lead call   Fatal   Looping: asked city 4×│  call rows, hairline-separated
 └──────────────────────────────────────────────────────────────┘
 ```
 
 ### Views (hash routing, no framework)
 
-1. `#/`: **Calls**. The hero sentence, the spectrum, the legend with counts, the filter, and the call list. The list is virtualised or paged at 100 rows, with a "Show 100 more" button.
+1. `#/`: **Calls**. The hero sentence, the spectrum, the filter tabs, and the call list. The legend lives in the filter tabs: each tab shows the verdict dot, the word and its count in mono, and "All" shows the total. A tab also filters the spectrum. The list is virtualised or paged at 100 rows, with a "Show 100 more" button.
 2. `#/call/<call_id>`: **Call**.
    - Back link "← All calls".
    - Title: the short call id in mono, then duration, scope and the verdict chip.

@@ -1,4 +1,4 @@
-// Calls view: the hero sentence, the spectrum (one hairline per call), the legend, the filter and the call list.
+// Calls view: the hero sentence, the spectrum (one hairline per call), the filter tabs (which carry the legend) and the call list.
 (() => {
   "use strict";
   const { esc } = V;
@@ -33,23 +33,23 @@
       const meta = [
         sum.updated_ist && `Updated ${esc(sum.updated_ist)} IST`,
         sum.spend_usd != null && `Grading spend $${sum.spend_usd.toFixed(2)}`,
-      ].filter(Boolean);
+      ].filter(Boolean).map((m) => `<span class="nw">${m}</span>`);
       el.innerHTML = `
         <section class="hero">
           <h1 class="hero-line"><span><em>${esc(sum.total)}</em> ${sum.total === 1 ? "call" : "calls"} heard.</span>
             <span>${fatal ? `<em>${esc(fatal)}</em> ${fatal === 1 ? "carries" : "carry"} a Fatal fault.` : "None carries a Fatal fault."}</span></h1>
-          ${meta.length ? `<p class="label">${meta.join("<span class='sep'>/</span>")}</p>` : ""}
+          ${meta.length ? `<p class="label">${meta.join("<span class='sep'>/</span><wbr>")}</p>` : ""}
         </section>
         <figure class="spectrum" aria-label="${plural(calls.length, "call", "calls")}, one line each, height by length, grouped by verdict">
           <div class="bars"></div><div class="playhead"></div><div class="tip" role="tooltip" hidden></div>
         </figure>
-        <ul class="legend">${ORDER.map((v) => `<li><span class="dot t-${V.tone(v)}"></span><span class="label">${V.word(v)}</span><span class="mono num">${esc(sum.verdicts[v] || 0)}</span></li>`).join("")}</ul>
         <div class="filters" role="group" aria-label="Show calls by verdict">
-          ${["all", ...ORDER].map((v) => `<button class="f" data-v="${v}" aria-pressed="${v === filter}">${v === "all" ? "All" : V.word(v)}</button>`).join("")}
+          <button class="f" data-v="all" aria-pressed="${filter === "all"}">All<span class="mono n">${esc(sum.total)}</span></button>
+          ${ORDER.map((v) => `<button class="f" data-v="${v}" aria-pressed="${v === filter}"><span class="dot t-${V.tone(v)}" aria-hidden="true"></span>${V.word(v)}<span class="mono n">${esc(sum.verdicts[v] || 0)}</span></button>`).join("")}
         </div>
         <div class="rows-head label" aria-hidden="true"><span>Call</span><span>Length</span><span>Scope</span><span>Verdict</span><span>First fault</span></div>
         <ol class="rows"></ol>
-        <button class="f more" hidden></button>`;
+        <button class="more" hidden></button>`;
 
       const fig = el.querySelector(".spectrum");
       const bars = el.querySelector(".bars");

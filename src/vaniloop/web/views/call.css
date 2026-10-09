@@ -13,10 +13,11 @@
 .tape::before{ content:""; position:absolute; left:0; right:0; top:50%; height:1px; background:var(--seam); }
 .segs{ position:absolute; inset:0; animation:draw .7s var(--ease) both; }
 @keyframes draw{ from{ clip-path:inset(0 100% 0 0); } to{ clip-path:inset(0 0 0 0); } }
-.seg{ position:absolute; min-width:2px; border-radius:1px; transition:background .2s var(--ease), opacity .2s var(--ease); }
-.seg.bot{ bottom:calc(50% + 2px); background:var(--ivory); opacity:.55; }
-.seg.user{ top:calc(50% + 2px); background:var(--ash); opacity:.45; }
-.seg.hl{ background:var(--champagne); opacity:1; }
+/* each turn is drawn as fine vertical hairlines, like the spectrum (a hatch pattern, not a colour gradient) */
+.seg{ position:absolute; min-width:2px; background:repeating-linear-gradient(90deg,var(--c) 0 1px,transparent 1px 3px); transition:opacity .2s var(--ease); }
+.seg.bot{ --c:var(--ivory); bottom:calc(50% + 2px); opacity:.7; }
+.seg.user{ --c:var(--ash); top:calc(50% + 2px); opacity:.6; }
+.seg.hl{ --c:var(--champagne); opacity:1; }
 .gap{ position:absolute; top:0; bottom:0; background:var(--slate); border-left:1px solid var(--seam); border-right:1px solid var(--seam); overflow:hidden; }
 .gap .label{ position:absolute; top:6px; left:8px; font-size:10px; font-style:normal; white-space:nowrap; }
 .notch{ position:absolute; top:-14px; bottom:0; width:16px; margin-left:-8px; transform-origin:50% 0;
@@ -43,17 +44,18 @@
 .notes{ display:grid; gap:14px; }
 .note{ padding-left:12px; border-left:1px solid var(--tone); overflow-wrap:anywhere; transition:opacity .6s var(--ease), transform .6s var(--ease); }
 .note.rest{ opacity:.55; transform:translateY(6px); }
-.note .label{ color:var(--ivory); font-size:10px; }
+.note .label{ color:var(--ivory); font-size:11px; }
 .note .st{ color:var(--tone); margin-left:6px; }
 .note p{ margin:4px 0; font-size:13px; line-height:1.5; color:var(--ash); }
-.note .basis{ font:400 10px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--ash); opacity:.7; }
+.note .basis{ font:400 10px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--ash); }
 
 /* the checks */
 .checks{ position:sticky; top:32px; }
 .checks li{ display:grid; grid-template-columns:6px minmax(0,1fr) auto; gap:2px 12px; align-items:center; padding:12px 0; border-top:1px solid var(--seam); }
 .cname{ font-size:14px; }
 .cstat{ font:500 10px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--ash); }
-.creason{ grid-column:2 / -1; margin:0; font-size:13px; color:var(--ash); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.creason{ grid-column:2 / -1; margin:0; font-size:13px; line-height:1.45; color:var(--ash);
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 
 @media (max-width:1100px){
   .turn{ grid-template-columns:44px 52px minmax(0,1fr); }
