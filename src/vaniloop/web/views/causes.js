@@ -6,22 +6,23 @@
     ranked: "Recurring pattern", pattern_unconfirmed: "Pattern not confirmed", watch: "Watching",
     outlier: "Outlier", single_category: "One category only", isolated: "Isolated",
   };
-  const status = (s) => STATUS[s] || String(s || "").replace(/_/g, " ");
-  const seg = (n, max, t) => (n ? `<i class="t-${t}" style="width:${((100 * n) / max).toFixed(2)}%"></i>` : "");
+  const status = (s) => V.own(STATUS, s) || String(s || "").replace(/_/g, " ");
+  const list = (x) => (Array.isArray(x) ? x : []);
+  const seg = (n, max, t) => (n ? `<i class="t-${esc(t)}" style="width:${((100 * n) / max).toFixed(2)}%"></i>` : "");
   const link = (id, v) =>
-    `<a class="mlink" href="#/call/${encodeURIComponent(id)}"><span class="dot t-${V.tone(v)}"></span><span class="mono">${esc(id)}</span></a>`;
+    `<a class="mlink" href="#/call/${encodeURIComponent(id)}"><span class="dot t-${esc(V.tone(v))}"></span><span class="mono">${esc(id)}</span></a>`;
 
   function row(c, i, max) {
-    const fatal = (c.fatal_calls || []).length;
-    const non = (c.nonfatal_calls || []).length;
-    const sym = c.symptom_calls || [];
+    const fatal = list(c.fatal_calls).length;
+    const non = list(c.nonfatal_calls).length;
+    const sym = list(c.symptom_calls);
     const n = fatal + non;
     const owner = c.owner
       ? `<span class="chip owner">${esc(c.owner)}</span>${c.owner_evidence ? `<span class="ev" title="${esc(c.owner_evidence)}">${esc(c.owner_evidence)}</span>` : ""}`
       : "";
     const calls = [
-      ...(c.fatal_calls || []).map((id) => link(id, "Fatal")),
-      ...(c.nonfatal_calls || []).map((id) => link(id, "NonFatal")),
+      ...list(c.fatal_calls).map((id) => link(id, "Fatal")),
+      ...list(c.nonfatal_calls).map((id) => link(id, "NonFatal")),
       ...sym.map((id) => link(id, "NeedsReview")),
     ].join("");
     const pid = `cause-${i}`;
@@ -44,14 +45,16 @@
   }
 
   VIEWS.causes = {
-    async render(el) {
-      const causes = (await V.get("/api/causes")).causes || [];
+    async render(el, params, signal) {
+      const body = await V.get("/api/causes", signal);
+      if (signal?.aborted) return;
+      const causes = list(body?.causes).filter((c) => c && typeof c === "object");
       if (!causes.length) {
         el.innerHTML = `<h1 class="view-title">Causes</h1><p class="empty">No causes yet. Run <code>uv run python -m vaniloop.pipeline issues</code> to group faults into causes.</p>`;
         return;
       }
-      const ids = new Set(causes.flatMap((c) => [...(c.fatal_calls || []), ...(c.nonfatal_calls || [])]));
-      const max = Math.max(1, ...causes.map((c) => (c.fatal_calls || []).length + (c.nonfatal_calls || []).length));
+      const ids = new Set(causes.flatMap((c) => [...list(c.fatal_calls), ...list(c.nonfatal_calls)]));
+      const max = Math.max(1, ...causes.map((c) => list(c.fatal_calls).length + list(c.nonfatal_calls).length));
       el.innerHTML = `
         <h1 class="view-title"><em>${causes.length}</em> ${causes.length === 1 ? "cause" : "causes"} found in <em>${ids.size}</em> ${ids.size === 1 ? "call" : "calls"}.</h1>
         <p class="lede">In rank order. Open a cause to see its calls.</p>
@@ -64,7 +67,7 @@
         b.setAttribute("aria-expanded", open);
         b.parentElement.classList.toggle("open", open);
         b.nextElementSibling.inert = !open;
-      });
+      }, { signal });
     },
   };
 })();

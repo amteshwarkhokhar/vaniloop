@@ -14,14 +14,15 @@
   }
 
   function row(g, i, names) {
-    const [word, tone] = DECISION[g.decision] || [g.decision || "Unknown", "review"];
+    // Own-property lookup: a decision such as "constructor" falls back to the raw word, review tone.
+    const [word, tone] = V.own(DECISION, g.decision) || [String(g.decision || "Unknown"), "review"];
     const p = num(g.p_value);
     const oldR = num(g.old_fail_rate);
     const newR = num(g.new_fail_rate);
     return `<li class="gate">
       <span class="gcause"><b>${esc(names.get(g.cause_id) || V.name(String(g.cause_id || "").replace(/^cause_/, "")))}</b>
         <span class="label">${esc(g.cause_id)}<span class="sep">/</span>Attempt ${esc(g.attempt ?? 1)}</span></span>
-      <span class="gdec"><span class="chip t-${tone}">${esc(word)}</span></span>
+      <span class="gdec"><span class="chip t-${esc(tone)}">${esc(word)}</span></span>
       <span class="rates" role="img" aria-label="Fail rate ${pct(oldR)} on the old prompt, ${pct(newR)} on the new prompt">
         ${bar("Old", oldR, "old", i)}${bar("New", newR, "new", i)}</span>
       <span class="mono gp${p == null ? " none" : ""}" title="${p == null ? "No significance test was run" : `alpha ${esc(g.alpha ?? "")}`}">${p == null ? "no test" : `p ${p < 0.001 ? p.toExponential(1) : +p.toFixed(3)}`}</span>
@@ -29,13 +30,15 @@
   }
 
   VIEWS.fixes = {
-    async render(el) {
-      const [gates, causes] = await Promise.all([V.get("/api/gates"), V.get("/api/causes")]);
+    async render(el, params, signal) {
+      const [raw, causes] = await Promise.all([V.get("/api/gates", signal), V.get("/api/causes", signal)]);
+      if (signal?.aborted) return;
+      const gates = (Array.isArray(raw) ? raw : []).filter((g) => g && typeof g === "object");
       if (!gates.length) {
         el.innerHTML = `<h1 class="view-title">Fixes</h1><p class="empty">No fixes tested yet. Run <code>uv run python -m vaniloop.pipeline prove --cause &lt;id&gt; --prompt &lt;file&gt;</code> to test one.</p>`;
         return;
       }
-      const names = new Map((causes.causes || []).map((c) => [c.cause_id, c.name]));
+      const names = new Map((Array.isArray(causes?.causes) ? causes.causes : []).filter((c) => c && typeof c === "object").map((c) => [c.cause_id, c.name]));
       const count = (d) => gates.filter((g) => g.decision === d).length;
       const shipped = count("ship");
       const rest = [
