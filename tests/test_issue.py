@@ -327,16 +327,20 @@ def test_finding_without_onset_is_never_root_over_one_with_an_onset():
 def test_equal_onsets_and_all_missing_onsets_make_co_roots():
     """Findings that start on the same turn, or that all lack an onset, must each count as a root of that call.
 
-    Neither order can be proven, so neither parameter is called a symptom. This keeps today's counts for such
-    calls (the tie rule of build_causes).
+    Neither order can be proven, so neither parameter is called a symptom. A later-onset finding on the same call
+    is still a symptom, so the test fails without root selection (the tie rule of decide_roots).
     """
-    audits = [aud_on(c, looping=("Fatal", 5), qty_missed=("NonFatal", 5)) for c in "abc"]
+    audits = [aud_on(c, looping=("Fatal", 5), qty_missed=("NonFatal", 5), qty_accuracy=("Fatal", 9)) for c in "abc"]
     audits += [aud_on(c, dead_air=("Fatal", None), qty_probing=("Fatal", None)) for c in "def"]
     c = by_param(build_causes(audits))
     for p in ("looping", "qty_missed"):
         assert c[p].symptom_calls == [] and len(c[p].fatal_calls + c[p].nonfatal_calls) == 3
+    assert "qty_accuracy" not in c  # onset 9 is later than the tied roots at 5: a symptom, no root call
     for p in ("dead_air", "qty_probing"):
         assert c[p].symptom_calls == [] and c[p].fatal_calls == ["d", "e", "f"]
+    # a symptom is recorded on a cause that does have roots
+    c = by_param(build_causes(audits + [aud_on(x, qty_accuracy=("Fatal", 1)) for x in "ghi"]))
+    assert c["qty_accuracy"].symptom_calls == ["a", "b", "c"]
 
 
 def test_misheard_onset_makes_a_channel_cause_with_status_watch():
