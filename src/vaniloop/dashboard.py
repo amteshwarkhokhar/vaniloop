@@ -261,23 +261,29 @@ def grade_tab(audits: list[AuditRecord], calls: dict[str, CallRecord], data_dir:
     default_params = [p for p in existing.get("parameters", []) if p in all_params]
     default_verdict = existing.get("verdict") if existing.get("verdict") in HAND_VERDICTS else HAND_VERDICTS[0]
     default_turn = existing.get("first_fault_turn")
-    with st.form("grade_form"):
+    # Widgets are keyed by call id: unsaved choices on one call must never be saved under another.
+    with st.form(f"grade_form_{sel}"):
         verdict = st.radio(
             "Your verdict",
             list(HAND_VERDICTS),
             index=list(HAND_VERDICTS).index(default_verdict),
             horizontal=True,
+            key=f"grade_verdict_{sel}",
         )
         params = st.multiselect(
             "Failing parameters",
             all_params,
             default=default_params,
             format_func=lambda p: f"{p}: {KNOWN[p][0]}" if p in KNOWN else p,
+            key=f"grade_params_{sel}",
         )
         fault_turn = st.number_input(
-            "First fault turn (optional)", min_value=-1, value=int(default_turn) if default_turn is not None else -1
+            "First fault turn (optional)",
+            min_value=-1,
+            value=int(default_turn) if default_turn is not None else -1,
+            key=f"grade_turn_{sel}",
         )
-        note = st.text_area("Note", value=existing.get("note", ""))
+        note = st.text_area("Note", value=existing.get("note", ""), key=f"grade_note_{sel}")
         submitted = st.form_submit_button("Save grade")
     if submitted:
         save_grade(
@@ -328,7 +334,7 @@ def grade_tab(audits: list[AuditRecord], calls: dict[str, CallRecord], data_dir:
     if agree["per_parameter"]:
         pdf = pd.DataFrame(
             [
-                {"parameter": p, "agree": v["agree"], "rate": f"{v['rate'] * 100:.0f}%"}
+                {"parameter": p, "agree": v["agree"], "n": v["n"], "rate": f"{v['rate'] * 100:.0f}%"}
                 for p, v in agree["per_parameter"].items()
             ]
         )

@@ -26,7 +26,8 @@ def grade_sample(audits: list[AuditRecord], n: int = 20, seed: int = 0) -> list[
 
     Each group is sorted by call_id then shuffled with random.Random(seed). Taking one
     from Fatal, NonFatal, NeedsReview, Pass in turn keeps a sample balanced even when the
-    audit is mostly Pass or mostly Fatal.
+    audit is mostly Pass or mostly Fatal. The picks are shuffled at the end: in round-robin
+    order a call's position would reveal its audit verdict.
     """
     rng = random.Random(seed)
     groups: list[list[str]] = []
@@ -46,6 +47,7 @@ def grade_sample(audits: list[AuditRecord], n: int = 20, seed: int = 0) -> list[
         if len(out) == before:  # every group exhausted
             break
         i += 1
+    rng.shuffle(out)
     return out
 
 
@@ -93,24 +95,34 @@ def reveal(call_id: str, grades: dict[str, dict], audits: list[AuditRecord]) -> 
     }
 
 
+def _decided(audit: AuditRecord, param: str) -> bool:
+    """True when the audit judged this parameter: it has a finding for it and the status is not Unknown."""
+    return any(f.parameter == param and f.status != "Unknown" for f in audit.findings)
+
+
 def agreement(grades: dict[str, dict], audits: list[AuditRecord]) -> dict:
     """Calibration numbers over every graded call that has an audit.
 
     Returns graded count, verdict agreement count and rate, per-parameter agreement
     (a parameter agrees when both sides list it or neither does) and the mismatches
-    whose hand verdict, audit verdict or failing-parameter set differ.
+    whose hand verdict, audit verdict or failing-parameter set differ. A parameter is
+    compared only on calls where the audit decided it (no Unknown, no missing finding),
+    so missing evidence never counts as agreement; n is that call count.
     """
     audit_by_id = {a.call_id: a for a in audits}
     pairs = [(cid, g, audit_by_id[cid]) for cid, g in grades.items() if cid in audit_by_id]
     graded = len(pairs)
     verdict_agree = sum(1 for _, g, a in pairs if g.get("verdict") == a.verdict)
-    parameters = sorted({p for _, g, a in pairs for p in (set(g.get("parameters") or []) | set(failing_parameters(a)))})
+    parameters = sorted(
+        {p for _, g, a in pairs for p in set(g.get("parameters") or []) | {f.parameter for f in a.findings}}
+    )
     per_parameter: dict[str, dict] = {}
     for param in parameters:
+        judged = [(g, a) for _, g, a in pairs if _decided(a, param)]
         agreed = sum(
-            1 for _, g, a in pairs if (param in (g.get("parameters") or [])) == (param in set(failing_parameters(a)))
+            1 for g, a in judged if (param in (g.get("parameters") or [])) == (param in set(failing_parameters(a)))
         )
-        per_parameter[param] = {"agree": agreed, "rate": (agreed / graded) if graded else 0.0}
+        per_parameter[param] = {"agree": agreed, "n": len(judged), "rate": (agreed / len(judged)) if judged else 0.0}
     mismatches = []
     for cid, g, a in pairs:
         if g.get("verdict") != a.verdict or set(g.get("parameters") or []) != set(failing_parameters(a)):

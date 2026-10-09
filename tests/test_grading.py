@@ -21,6 +21,11 @@ def mk_audit(call_id: str, verdict: str, params: tuple[str, ...] = (), status: s
     return AuditRecord(call_id=call_id, verdict=verdict, scope="bl_collection", findings=findings)
 
 
+def mk(call_id: str, verdict: str, statuses: dict[str, str]) -> AuditRecord:
+    findings = [Finding(parameter=p, status=st, reason="synthetic", basis="observed") for p, st in statuses.items()]
+    return AuditRecord(call_id=call_id, verdict=verdict, scope="bl_collection", findings=findings)
+
+
 def test_grade_sample_spread_determinism_and_overflow():
     """grade_sample must spread picks across verdicts, repeat for the same seed, and cap at the data size.
 
@@ -36,10 +41,22 @@ def test_grade_sample_spread_determinism_and_overflow():
     assert first == grade_sample(audits, n=8, seed=0)
     assert len(first) == 8 and len(set(first)) == 8
     verdict_by_id = {a.call_id: a.verdict for a in audits}
-    assert {verdict_by_id[cid] for cid in first} == {"Fatal", "NonFatal", "NeedsReview", "Pass"}
-    assert first[0][0] == "f" and first[1][0] == "n" and first[2][0] == "r" and first[3][0] == "p"
+    assert sorted(verdict_by_id[cid] for cid in first) == sorted(["Fatal", "NonFatal", "NeedsReview", "Pass"] * 2)
     overflow = grade_sample(audits, n=99)
     assert len(overflow) == len(audits) and set(overflow) == set(verdict_by_id)
+
+
+def test_sample_order_does_not_reveal_the_audit_verdict():
+    """The sample is shuffled, so a call's position in the list does not follow the verdict cycle.
+
+    In round-robin order every 4th call would be Fatal, and the owner would know the audit answer before grading.
+    """
+    audits = [mk_audit(f"{v}{i:02d}", v) for v in ("Fatal", "NonFatal", "NeedsReview", "Pass") for i in range(5)]
+    verdict_by_id = {a.call_id: a.verdict for a in audits}
+    order = [verdict_by_id[cid] for cid in grade_sample(audits, n=20, seed=0)]
+    cycle = ["Fatal", "NonFatal", "NeedsReview", "Pass"] * 5
+    assert sorted(order) == sorted(cycle) and order != cycle
+    assert sum(a == b for a, b in zip(order, cycle, strict=True)) < 10
 
 
 def test_save_and_load_last_wins(tmp_path):
@@ -86,10 +103,10 @@ def test_agreement_counts_and_mismatch_list():
     A wrong count or rate would tell the owner the audit agrees with him when it does not.
     """
     audits = [
-        mk_audit("a1", "Pass"),
-        mk_audit("a2", "Fatal", ("looping",)),
-        mk_audit("a3", "NonFatal", ("dead_air", "looping"), status="NonFatal"),
-        mk_audit("a4", "Pass"),
+        mk("a1", "Pass", {"looping": "Pass", "dead_air": "Pass"}),
+        mk("a2", "Fatal", {"looping": "Fatal", "dead_air": "Pass"}),
+        mk("a3", "NonFatal", {"looping": "NonFatal", "dead_air": "NonFatal"}),
+        mk("a4", "Pass", {"looping": "Pass", "dead_air": "Pass"}),
     ]
     grades = {
         "a1": {"verdict": "Pass", "parameters": []},
@@ -101,11 +118,28 @@ def test_agreement_counts_and_mismatch_list():
     assert agree["graded"] == 4
     assert agree["verdict_agree"] == 3
     assert agree["verdict_rate"] == 0.75
-    assert agree["per_parameter"]["looping"] == {"agree": 3, "rate": 0.75}
-    assert agree["per_parameter"]["dead_air"] == {"agree": 3, "rate": 0.75}
+    assert agree["per_parameter"]["looping"] == {"agree": 3, "n": 4, "rate": 0.75}
+    assert agree["per_parameter"]["dead_air"] == {"agree": 3, "n": 4, "rate": 0.75}
     assert {m["call_id"] for m in agree["mismatches"]} == {"a3", "a4"}
     a3 = next(m for m in agree["mismatches"] if m["call_id"] == "a3")
     assert a3 == {"call_id": "a3", "hand": "Fatal", "audit": "NonFatal"}
+
+
+def test_missing_evidence_never_counts_as_agreement():
+    """A parameter the audit left Unknown, or never judged, is left out of that parameter's agreement.
+
+    If it counted, an audit that abstains everywhere would look like it agrees with every blank hand grade.
+    A parameter that passed everywhere still appears, so calibration sees it.
+    """
+    audits = [
+        mk("a1", "NeedsReview", {"qty_probing": "Unknown", "dead_air": "Pass"}),
+        mk("a2", "Pass", {"qty_probing": "Pass", "dead_air": "Pass"}),
+        AuditRecord(call_id="a3", verdict="NeedsReview", scope="unclear", findings=[]),
+    ]
+    grades = {cid: {"verdict": "Pass", "parameters": []} for cid in ("a1", "a2", "a3")}
+    per = agreement(grades, audits)["per_parameter"]
+    assert per["qty_probing"] == {"agree": 1, "n": 1, "rate": 1.0}
+    assert per["dead_air"] == {"agree": 2, "n": 2, "rate": 1.0}
 
 
 def test_dashboard_grade_helpers_on_fixtures():
