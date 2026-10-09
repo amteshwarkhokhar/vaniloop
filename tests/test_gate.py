@@ -856,3 +856,78 @@ def test_fatal_on_another_parameter_with_no_onset_is_unresolved():
     new = trials("new", {"a": False, "b": False, "c": False})
     new[0] = new[0].model_copy(update={"unresolved": t.unresolved})
     assert decide(OLD3, new, GUARD_OK, k=2).decision == "inconclusive"
+
+
+# ---- the NEW-Fatal reject counts only side-effect Fatals that NEW adds ----
+def _side_gate(cause_fatal_calls=(), side_new=(), side_old=(), param="qty_accuracy"):
+    """Run a looping gate on calls a, b, c. OLD fails the cause everywhere, NEW fixes it except on the calls in
+    cause_fatal_calls (Fatal under both prompts). side_new / side_old are (call, seed) pairs that carry a Fatal
+    on `param` after the fork under that prompt."""
+
+    def b(cid, prompt, seed):
+        if cid.startswith("g"):
+            return "Pass", "Pass", "end_call"
+        if prompt == "OLD" or cid in cause_fatal_calls:
+            return "Fatal", "Fatal", "max_turns"
+        return "Pass", "Pass", "end_call"
+
+    rf, af, _log = make_fns(b)
+    marked = {("OLD", c, s) for c, s in side_old} | {("NEW", c, s) for c, s in side_new}
+
+    def audit_fn(rec):
+        a = af(rec)
+        cid = rec.call_id.split("|")[0]
+        gen = rec.turns[-1].text  # "<cid>|<prompt>|<seed>|gen3"
+        _c, prompt, seed, _g = gen.split("|")
+        if (prompt, cid, int(seed)) in marked:
+            a.findings.append(Finding(parameter=param, status="Fatal", reason="r", basis="observed", onset_turn=3))
+        return a
+
+    return run_gate("c1", "looping", [mk(c) for c in "abc"], [], "OLD", "NEW", 3, rf, audit_fn)
+
+
+def test_cause_parameter_fatal_does_not_trigger_the_new_fatal_reject():
+    """A target whose cause Fatal repeats under NEW (3 of 3 under OLD and NEW) adds no NEW-Fatal reject.
+
+    Protects the gate from counting the cause parameter twice: the permutation test already judges it. If
+    this failed, one still-failing looping call would force a reject on a patch that fixed the other calls
+    (the real attempt-2 gate: looping Fatal after the fork in 3 of 3 OLD and 3 of 3 NEW replays).
+    """
+    r = _side_gate(cause_fatal_calls=("a",))
+    assert r.decision == "ship" and "adds a side-effect" not in r.reason
+    t = _trial("a", "new", 0, _res(), lambda _c: audit("Fatal", "Fatal"), "looping")
+    assert t.fatal and t.side_fatals == []  # still a Fatal after the fork, but not a side effect
+
+
+def test_side_effect_fatal_only_under_new_rejects_and_names_call_and_parameter():
+    """A qty_accuracy Fatal after the fork on NEW only rejects, and the reason names the call and the parameter.
+
+    Protects the NEW-Fatal reject itself: a patch that fixes the cause but causes a new Fatal elsewhere
+    must not ship. If the reason lost the call or the parameter, the fix stage could not tell what the patch broke.
+    """
+    r = _side_gate(side_new=[("a", 1)])
+    assert r.decision == "reject" and r.lift > 0
+    assert "'a'" in r.reason and "qty_accuracy" in r.reason
+    t = _trial("a", "new", 0, _res(), lambda _c: _side_audit("qty_accuracy"), "looping")
+    assert t.side_fatals == ["qty_accuracy"]
+
+
+def _side_audit(param, onset=3):
+    a = audit("Pass", "Fatal", onset=onset)
+    a.findings[1].parameter = param
+    return a
+
+
+def test_side_effect_fatal_equal_under_both_prompts_does_not_reject():
+    """A side-effect Fatal that OLD has as often as NEW is background, not the patch, and does not reject.
+
+    Protects the comparison per call: a Fatal on another parameter under both prompts is not caused by
+    the patch. If it rejected, a call with its own unrelated fault could never ship a fix. Two more NEW
+    Fatals than OLD on the same call still reject, and so does a different parameter than OLD's.
+    """
+    r = _side_gate(side_new=[("a", 1)], side_old=[("a", 1)])
+    assert r.decision == "ship"
+    assert _side_gate(side_new=[("a", 0), ("a", 1)], side_old=[("a", 1)]).decision == "reject"
+    old = [t.model_copy(update={"side_fatals": ["dead_air"]}) if t.call_id == "a" else t for t in OLD3]
+    new = [t.model_copy(update={"side_fatals": ["qty_accuracy"]}) if t.call_id == "a" else t for t in NEW3]
+    assert decide(old, new, GUARD_OK, k=2).decision == "reject"
