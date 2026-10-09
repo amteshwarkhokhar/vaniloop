@@ -372,6 +372,9 @@ STATUS_LABEL = {
 }
 
 
+CHANNEL_LABEL = "Channel fault: the bot misheard the buyer at the root turn"  # replaces the watch label (#71)
+
+
 def cause_list(causes: list[Cause]) -> str:
     """Causes in order. Each shows its frequency interval on one shared axis, so widths compare across rows.
 
@@ -379,14 +382,20 @@ def cause_list(causes: list[Cause]) -> str:
     """
     top = max((c.freq_ci_high for c in causes), default=0.5)
     axis = min(1.0, (int(top * 10) + 1) / 10)
-    lever = {"prompt": "Prompt fix", "flow_logic": "Flow or logic fix", "asr": "Speech recognition fix"}
+    lever = {
+        "prompt": "Prompt fix",
+        "flow_logic": "Flow or logic fix",
+        "asr": "Speech recognition fix",
+        "channel": "Speech / channel: watch, no prompt fix",
+    }
     rows = []
     n = 0
     for c in causes:
         pattern = c.status in FIXABLE_STATUSES
         n += pattern
         num = str(n) if pattern else "&ndash;"
-        label = f"<br><small><i>{esc(STATUS_LABEL[c.status])}</i></small>" if c.status in STATUS_LABEL else ""
+        text = CHANNEL_LABEL if c.type == "channel" else STATUS_LABEL.get(c.status)
+        label = f"<br><small><i>{esc(text)}</i></small>" if text else ""
         lo, hi = c.freq_ci_low / axis * 100, c.freq_ci_high / axis * 100
         color = VERDICT_COLOR["Fatal"] if c.fatal_calls else VERDICT_COLOR["NonFatal"]
         bar = (

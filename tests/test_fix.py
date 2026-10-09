@@ -814,3 +814,22 @@ def test_refix_refuses_a_demoted_cause_before_any_llm_call(tmp_path):
         with pytest.raises(SystemExit, match=rf"{status}.*failed: categories, reproduction"):
             run_refix("cause_qty_probing", llm=boom, **kw)
         assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW
+
+
+def test_channel_cause_marked_ranked_is_never_sent_to_the_llm(tmp_path):
+    """A channel cause with status ranked must not reach the LLM through run_fix or propose_patch.
+
+    Without it a hand-edited causes.json could make the fixer patch the prompt for a bad-audio fault.
+    """
+
+    def boom(system, user, **kw):
+        raise AssertionError("the LLM must not be called for a channel cause")
+
+    ch = cause("cause_channel_x", "ranked").model_copy(update={"type": "channel"})
+    rej: list = []
+    assert propose_patch(ch, [], PROMPT, llm=boom, rejected=rej) is None
+    assert rej[0]["cause_id"] == "cause_channel_x" and "channel" in rej[0]["reason"]
+    cp, pp, op = tmp_path / "causes.json", tmp_path / "prompt.md", tmp_path / "out" / "patches.json"
+    cp.write_text(json.dumps({"causes": [ch.model_dump()]}))
+    pp.write_text(PROMPT)
+    assert run_fix(cp, pp, op, llm=boom)["patches"] == []

@@ -144,3 +144,20 @@ def test_issues_lines_show_the_status_and_the_failed_condition_of_a_non_pattern(
     )
     assert out[0].startswith("  [pattern_unconfirmed] p:") and "failed" not in out[0]
     assert out[1].startswith("  [single_category] s:") and out[1].endswith("failed: categories, reproduction")
+
+
+def test_cause_lines_show_the_symptom_count():
+    """The issues printout must show how many calls are symptoms of each cause, 0 when there are none.
+
+    Without it the root/symptom split could only be read from causes.json, not from the terminal.
+    """
+    from vaniloop.models import Cause
+
+    def c(cid, symptoms):
+        return Cause(
+            cause_id=cid, name=cid, description="", type="prompt", parameter=cid, fatal_calls=["a"],
+            symptom_calls=symptoms,
+        )  # fmt: skip
+
+    out = pipeline.cause_lines([c("p", ["x", "y", "z"]), c("q", [])], [])
+    assert "symptoms=3" in out[0] and "symptoms=0" in out[1]

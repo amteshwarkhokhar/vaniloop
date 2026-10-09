@@ -119,10 +119,13 @@ class Cause(BaseModel):
     cause_id: str
     name: str
     description: str
-    type: Literal["prompt", "asr", "knowledge_gap", "flow_logic"]
+    type: Literal["prompt", "asr", "knowledge_gap", "flow_logic", "channel"]  # channel: bad audio, never patched
     parameter: str
+    # Calls where this parameter is the call's root finding (#71). The counts, support and rank use only these.
     fatal_calls: list[str] = Field(default_factory=list)
     nonfatal_calls: list[str] = Field(default_factory=list)
+    symptom_calls: list[str] = Field(default_factory=list)  # parameter failed here, but an earlier finding is the root
+    suspected_type: str = ""  # tool (product_change) or data (category_isq): informational, needs traces to confirm
     fixability: float = 1.0
     priority: float = 0.0
     rank_score: float = 0.0  # wilson_low * mean_severity * fixability; used for sorting

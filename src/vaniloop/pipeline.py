@@ -184,7 +184,8 @@ def cause_lines(causes: list, outliers: list[dict]) -> list[str]:
     failed = {r["cause_id"]: r["failed"] for r in outliers}
     return [
         f"  [{c.status}] {c.parameter}: fatal={len(c.fatal_calls)} nonfatal={len(c.nonfatal_calls)} "
-        f"priority={c.priority:g}" + (f" failed: {', '.join(failed[c.cause_id])}" if c.cause_id in failed else "")
+        f"priority={c.priority:g} symptoms={len(c.symptom_calls)}"
+        + (f" failed: {', '.join(failed[c.cause_id])}" if c.cause_id in failed else "")
         for c in causes
     ]
 

@@ -143,3 +143,17 @@ def test_cause_list_numbers_patterns_only_and_labels_every_other_status():
     assert re.findall(r'<span class="n">([^<]+)</span>', out) == ["1", "2", "&ndash;", "&ndash;"]
     assert "Pattern, not replayed yet" in out
     assert "the old prompt did not reproduce it" in out and "fewer than 2 product categories" in out
+
+
+def test_cause_list_labels_a_channel_cause_as_channel_not_as_a_small_watch():
+    """A channel cause must show the channel label and the channel lever, never the under-3-calls watch label.
+
+    Without it a bad-audio cause would read as a small prompt fault and the owner would try to patch it.
+    """
+    ch = Cause(
+        cause_id="cause_channel_x", name="N", description="", type="channel", parameter="x", status="watch",
+        fatal_calls=["a"],
+    )  # fmt: skip
+    out = cause_list([ch])
+    assert "the bot misheard the buyer at the root turn" in out and "no prompt fix" in out
+    assert "under 3 calls" not in out and '<span class="n">&ndash;</span>' in out

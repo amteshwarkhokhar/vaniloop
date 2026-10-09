@@ -181,6 +181,8 @@ def propose_patch(
             rejected.append(row)
         return None
 
+    if cause.type == "channel":  # bad audio is never patched, whatever its status says (#71)
+        return reject("channel cause: bad audio is not fixed with a prompt patch")
     try:
         system = SYSTEM if previous is None else SYSTEM + REFIX_SYSTEM
         out = llm(system, _user_message(cause, examples, prompt_text, previous), **_retry_kwargs(llm))
@@ -242,7 +244,11 @@ def run_fix(
     audits_path: Path = AUDITS_PATH,
 ) -> dict:
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
-    ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") in FIXABLE_STATUSES]
+    ranked = [
+        Cause.model_validate(c)
+        for c in doc.get("causes", [])
+        if c.get("status") in FIXABLE_STATUSES and c.get("type") != "channel"  # a channel cause is never patched
+    ]
     prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
     out = Path(out_path)

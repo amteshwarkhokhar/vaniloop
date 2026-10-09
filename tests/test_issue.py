@@ -8,10 +8,11 @@ from vaniloop.issue import (
     UNKNOWN_CATEGORY,
     build_causes,
     classify_causes,
+    require_fixable,
     run_issues,
     wilson,
 )
-from vaniloop.models import AuditRecord, Finding
+from vaniloop.models import AuditRecord, Finding, Turn
 
 
 def aud(cid, verdict="Fatal", **statuses):
@@ -256,3 +257,198 @@ def test_zero_old_rate_rows_without_real_evidence_do_not_make_an_outlier():
         row = {"cause_id": "cause_looping", "decision": "inconclusive", "reason": reason, "old_fail_rate": 0.0}
         out, outliers = classify_causes(looping_causes(), cats, [row])
         assert out[0].status == "ranked" and outliers == [], reason
+
+
+# ---- root vs symptom and channel (issue #71). Synthetic calls only.
+def aud_on(cid, verdict="Fatal", **found):
+    """An audit whose findings carry onsets: parameter=(status, onset_turn or None)."""
+    fs = [Finding(parameter=p, status=s, reason="r", basis="observed", onset_turn=o) for p, (s, o) in found.items()]
+    return AuditRecord(call_id=cid, verdict=verdict, scope="bl_collection", findings=fs)
+
+
+def turns_for(n=12, **flags):
+    """n alternating turns (even idx bot, odd idx user). flags: `<idx>` -> field set True, e.g. t5="bot_misheard"."""
+    out = []
+    for i in range(n):
+        extra = {flags[f"t{i}"]: True} if f"t{i}" in flags else {}
+        out.append(
+            Turn(idx=i, speaker="bot" if i % 2 == 0 else "user", start_sec=i, end_sec=i + 0.5, text="x", **extra)
+        )
+    return out
+
+
+def by_param(causes):
+    return {c.parameter: c for c in causes}
+
+
+def test_earliest_finding_is_the_root_and_later_ones_are_symptoms():
+    """Looping at turn 9 and qty_missed at turn 4 must count the call for qty_missed and list looping as symptom.
+
+    Without it one early fault that causes later ones would be counted for every parameter it trips.
+    """
+    audits = [aud_on(c, qty_missed=("Fatal", 4), looping=("Fatal", 9)) for c in "abc"]
+    c = by_param(build_causes(audits))
+    assert c["qty_missed"].fatal_calls == ["a", "b", "c"] and c["qty_missed"].symptom_calls == []
+    assert "looping" not in c  # a cause with no root call is not listed
+    audits.append(aud_on("d", looping=("Fatal", 2)))  # here looping is the root
+    audits += [aud_on(x, looping=("NonFatal", 1)) for x in "ef"]
+    c = by_param(build_causes(audits))
+    assert c["looping"].fatal_calls == ["d"] and c["looping"].nonfatal_calls == ["e", "f"]
+    assert c["looping"].symptom_calls == ["a", "b", "c"]
+    assert c["looping"].status == "ranked"  # 3 root calls; the symptom calls add nothing
+    assert c["qty_missed"].status == "ranked"
+
+
+def test_symptom_calls_do_not_count_for_support_or_rank():
+    """A cause with 2 root calls and 5 symptom calls must stay under MIN_SUPPORT and score as 2 calls.
+
+    Without it a parameter that is only a downstream effect would climb the ranking and take a fix slot.
+    """
+    audits = [aud_on(f"r{i}", looping=("Fatal", 3)) for i in range(2)]
+    audits += [aud_on(f"s{i}", qty_missed=("Fatal", 1), looping=("Fatal", 6)) for i in range(5)]
+    audits += [aud(f"p{i}", "Pass") for i in range(3)]
+    n = 10
+    c = by_param(build_causes(audits))["looping"]
+    assert (c.fatal_calls, len(c.symptom_calls)) == (["r0", "r1"], 5)
+    assert c.status == "watch" and c.freq_ci_low == pytest.approx(wilson(2, n)[0])
+    assert c.priority == pytest.approx(5 * 2 * 0.5)
+
+
+def test_finding_without_onset_is_never_root_over_one_with_an_onset():
+    """A failing finding with no onset must be a symptom of any finding that has an onset, even a late one.
+
+    Without it a rule that cannot say where its fault started would steal the root from a precisely placed fault.
+    """
+    audits = [aud_on(c, looping=("Fatal", None), qty_probing=("NonFatal", 30)) for c in "abc"]
+    c = by_param(build_causes(audits))
+    assert c["qty_probing"].nonfatal_calls == ["a", "b", "c"] and "looping" not in c
+
+
+def test_equal_onsets_and_all_missing_onsets_make_co_roots():
+    """Findings that start on the same turn, or that all lack an onset, must each count as a root of that call.
+
+    Neither order can be proven, so neither parameter is called a symptom. A later-onset finding on the same call
+    is still a symptom, so the test fails without root selection (the tie rule of decide_roots).
+    """
+    audits = [aud_on(c, looping=("Fatal", 5), qty_missed=("NonFatal", 5), qty_accuracy=("Fatal", 9)) for c in "abc"]
+    audits += [aud_on(c, dead_air=("Fatal", None), qty_probing=("Fatal", None)) for c in "def"]
+    c = by_param(build_causes(audits))
+    for p in ("looping", "qty_missed"):
+        assert c[p].symptom_calls == [] and len(c[p].fatal_calls + c[p].nonfatal_calls) == 3
+    assert "qty_accuracy" not in c  # onset 9 is later than the tied roots at 5: a symptom, no root call
+    for p in ("dead_air", "qty_probing"):
+        assert c[p].symptom_calls == [] and c[p].fatal_calls == ["d", "e", "f"]
+    # a symptom is recorded on a cause that does have roots
+    c = by_param(build_causes(audits + [aud_on(x, qty_accuracy=("Fatal", 1)) for x in "ghi"]))
+    assert c["qty_accuracy"].symptom_calls == ["a", "b", "c"]
+
+
+def test_misheard_onset_makes_a_channel_cause_with_status_watch():
+    """A root whose onset turn has bot_misheard must go to a type=channel cause with status watch, even at 3 calls.
+
+    Without it a bad line would be read as a prompt fault and a patch would be written for a problem of the audio.
+    """
+    audits = [aud_on(c, qty_missed=("Fatal", 4)) for c in "abc"]
+    turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
+    causes = build_causes(audits, turns)
+    assert [(c.type, c.status, c.parameter) for c in causes] == [("channel", "watch", "qty_missed")]
+    assert causes[0].cause_id != "cause_qty_missed" and causes[0].fatal_calls == ["a", "b", "c"]
+    assert causes[0].fixability == 0.0
+    audits += [aud_on(c, qty_missed=("Fatal", 4)) for c in "de"]  # two clean calls (no turns flagged)
+    turns.update({c: turns_for() for c in "de"})
+    c = {x.cause_id: x for x in build_causes(audits, turns)}
+    assert c["cause_qty_missed"].fatal_calls == ["d", "e"] and c["cause_channel_qty_missed"].fatal_calls == [
+        "a",
+        "b",
+        "c",
+    ]
+    assert c["cause_qty_missed"].type == "prompt"
+
+
+def test_unclear_user_turn_right_before_the_onset_is_a_channel_fault():
+    """audio_unclear on the nearest user turn before the onset must make a channel root, an earlier one must not.
+
+    Without it a bot answer that follows a noisy user turn would be blamed on the prompt.
+    """
+    turns = {"a": turns_for(t3="audio_unclear"), "b": turns_for(t1="audio_unclear"), "c": turns_for(t4="audio_unclear")}
+    audits = [aud_on(c, looping=("NonFatal", 4)) for c in "abc"]
+    kinds = {c.cause_id: c for c in build_causes(audits, turns)}
+    assert kinds["cause_channel_looping"].nonfatal_calls == ["a", "c"]  # a: user turn 3 before onset 4. c: turn 4
+    assert kinds["cause_looping"].nonfatal_calls == ["b"]  # turn 1 is an earlier user turn, not the one before
+
+
+def test_only_the_root_can_be_channel_and_no_turns_means_no_channel():
+    """A misheard turn at a symptom's onset must not make a channel cause, and missing turns must not either.
+
+    Without it every later fault on a call with one noisy moment would be labelled channel, and a missing
+    calls.jsonl would change the ranking.
+    """
+    audits = [aud_on(c, qty_missed=("Fatal", 2), looping=("Fatal", 8)) for c in "abc"]
+    turns = {c: turns_for(t8="bot_misheard") for c in "abc"}  # flags the symptom only
+    c = by_param(build_causes(audits, turns))
+    assert c["qty_missed"].type == "prompt" and "looping" not in c
+    flagged = {c: turns_for(t2="bot_misheard") for c in "abc"}
+    assert build_causes(audits, flagged)[0].type == "channel"
+    assert build_causes(audits, {})[0].type == "prompt" and build_causes(audits)[0].type == "prompt"
+    no_onset = [aud_on(c, looping=("Fatal", None)) for c in "abc"]
+    assert build_causes(no_onset, {c: turns_for(t0="bot_misheard") for c in "abc"})[0].type == "flow_logic"
+
+
+def test_channel_cause_stays_watch_and_is_refused_by_fix(tmp_path):
+    """classify_causes must keep a channel cause at watch, and require_fixable must refuse it even if marked ranked.
+
+    Without it the three-call support and two-category tests would rank a bad-audio cause and refix could patch it.
+    """
+    audits = [aud_on(c, looping=("Fatal", 4)) for c in "abc"]
+    causes = build_causes(audits, {c: turns_for(t4="bot_misheard") for c in "abc"})
+    out, outliers = classify_causes(causes, cat_map(a="food", b="services", c="other"), [SHIPPED])
+    assert [(c.type, c.status) for c in out] == [("channel", "watch")]
+    assert outliers[0]["condition"] == "channel" and outliers[0]["status"] == "watch"
+    path = tmp_path / "causes.json"
+    path.write_text(json.dumps({"causes": [out[0].model_dump()]}))
+    with pytest.raises(SystemExit, match="channel"):
+        require_fixable(out[0].cause_id, path)
+    forced = {**out[0].model_dump(), "status": "ranked"}  # a hand-edited file must still not allow a patch
+    path.write_text(json.dumps({"causes": [forced]}))
+    with pytest.raises(SystemExit, match="channel"):
+        require_fixable(out[0].cause_id, path)
+
+
+def test_suspected_type_flags_tool_and_data_without_changing_status():
+    """product_change must carry suspected_type tool, category_isq data and any other parameter an empty string.
+
+    Without it the report could not tell the owner which causes may be tool or data faults, which need traces.
+    """
+    audits = [aud(f"{p}{i}", **{p: "Fatal"}) for p in ("product_change", "category_isq", "looping") for i in "abc"]
+    c = by_param(build_causes(audits))
+    assert (c["product_change"].suspected_type, c["category_isq"].suspected_type, c["looping"].suspected_type) == (
+        "tool",
+        "data",
+        "",
+    )
+    assert c["product_change"].type == "prompt" and c["product_change"].status == "ranked"
+
+
+def test_run_issues_reads_calls_and_writes_symptoms_and_the_onset_count(tmp_path):
+    """run_issues must read calls.jsonl beside causes.json, write the channel split and report calls it cannot order.
+
+    Without it the file path would ignore channel faults and the owner could not check the stop rule (how many
+    calls have no onset order) on real runs.
+    """
+    audits = tmp_path / "audits.jsonl"
+    rows = [aud_on(c, qty_missed=("Fatal", 4)) for c in "abc"]
+    rows += [aud_on("d", qty_missed=("Fatal", 4), looping=("Fatal", 9))]
+    rows += [aud_on("e", looping=("Fatal", None), dead_air=("Fatal", None))]  # cannot be ordered
+    audits.write_text("\n".join(r.model_dump_json() for r in rows) + "\n")
+    calls = [{"call_id": "a", "duration_sec": 9, "turns": [t.model_dump() for t in turns_for(t4="bot_misheard")]}]
+    (tmp_path / "calls.jsonl").write_text("\n".join(json.dumps(c) for c in calls) + "\n")
+    causes = run_issues(audits, tmp_path / "causes.json")
+    doc = json.loads((tmp_path / "causes.json").read_text())
+    got = {c["cause_id"]: c for c in doc["causes"]}
+    assert (
+        got["cause_channel_qty_missed"]["fatal_calls"] == ["a"] and got["cause_channel_qty_missed"]["status"] == "watch"
+    )
+    assert got["cause_qty_missed"]["fatal_calls"] == ["b", "c", "d"]
+    assert got["cause_looping"]["fatal_calls"] == ["e"]
+    assert got["cause_qty_missed"]["symptom_calls"] == [] and len(causes) == len(doc["causes"])
+    assert doc["calls_with_several_faults"] == 2 and doc["calls_with_several_roots"] == 1
