@@ -32,6 +32,7 @@ GATES_PATH = RUNS / "gates.jsonl"
 REPLAYS_PATH = RUNS / "replays.jsonl"
 
 PICK_SEED = 0
+CALL_VALUES_HEADING = "Call values"
 AUDIO_PARAMETERS = {"dead_air"}  # judged from audio silences; a text replay has none
 
 
@@ -80,8 +81,26 @@ def _position(call: CallRecord, turn_idx: int | None) -> int | None:
     return next((i for i, t in enumerate(call.turns) if t.idx == turn_idx), None)
 
 
-def target_fork(call: CallRecord, audit: AuditRecord, parameter: str) -> int | None:
-    """Fork at the failing finding's onset turn, else at the audit's first fault turn, else None."""
+def _after_product_change(call: CallRecord, ledger: Ledger) -> int | None:
+    """Position of the first bot turn after the ledger's product change, or None without a change turn or bot turn."""
+    if ledger.product_changed_at_turn is None:
+        return None
+    return next(
+        (i for i, t in enumerate(call.turns) if t.speaker == "bot" and t.idx > ledger.product_changed_at_turn), None
+    )
+
+
+def target_fork(call: CallRecord, audit: AuditRecord, parameter: str, ledger: Ledger | None = None) -> int | None:
+    """Fork at the failing finding's onset turn, else at the audit's first fault turn, else None.
+
+    For `product_change` the fork is the first bot turn after the product change, in every scope: the fault is how the
+    bot handles the change, and the audit's onset can be a later turn (the seller handoff). Without a change turn the
+    onset rule applies.
+    """
+    if parameter == "product_change" and ledger is not None:
+        pos = _after_product_change(call, ledger)
+        if pos is not None:
+            return pos
     finding = next((f for f in audit.findings if f.parameter == parameter and f.status in ("Fatal", "NonFatal")), None)
     for turn_idx in (finding.onset_turn if finding else None, audit.first_fault_turn):
         pos = _position(call, turn_idx)
@@ -98,24 +117,63 @@ def guard_fork(call: CallRecord) -> int | None:
     return next((i for i in range(first_user + 1, len(call.turns)) if call.turns[i].speaker == "bot"), None)
 
 
+def channel_fault(call: CallRecord, fork: int) -> bool:
+    """True when the fork turn or the user turn right before it is flagged `bot_misheard` or `audio_unclear`.
+
+    The fault then was a mishearing, which a text replay cannot reproduce: the replayed bot hears the clean text.
+    """
+    before = next((t for t in reversed(call.turns[:fork]) if t.speaker == "user"), None)
+    return any(t is not None and (t.bot_misheard or t.audio_unclear) for t in (call.turns[fork], before))
+
+
+def inert_patch(call: CallRecord, ledger: Ledger, old: str, new: str) -> bool:
+    """True when the old and the new prompt render to the same text for this call, so the patch changes nothing."""
+    variables = render.call_variables(call, ledger)
+    return render.render(old, variables) == render.render(new, variables)
+
+
 def select_targets(
     calls: dict[str, CallRecord],
     ledgers: dict[str, Ledger],
     audits: dict[str, AuditRecord],
     parameter: str,
     n: int,
+    prompts: tuple[str, str] | None = None,
+    dropped: dict[str, list[str]] | None = None,
 ) -> tuple[list[Item], set[str]]:
     """Main-variant calls whose saved audit fails the parameter and that have a fork turn.
 
-    Returns the n picked items and the ids of every candidate (the guards must stay clear of all of them).
+    Returns the n picked items and the ids of every candidate (the guards must stay clear of all of them). A picked
+    call is dropped, and the next candidate in the same seeded order takes its place, when it is a channel fault (see
+    channel_fault) or, with `prompts` = (old, new), when the patch is inert for it (see inert_patch). The ids dropped
+    are printed per reason and added to `dropped[reason]` when given.
     """
     forks: dict[str, int] = {}
     for cid, audit in audits.items():
         if cid in calls and cid in ledgers and ledgers[cid].variant == "main" and gate.failed(audit, parameter):
-            fork = target_fork(calls[cid], audit, parameter)
+            fork = target_fork(calls[cid], audit, parameter, ledgers[cid])
             if fork is not None:
                 forks[cid] = fork
-    return [(calls[c], ledgers[c], forks[c]) for c in pick(list(forks), n)], set(forks)
+    first = pick(list(forks), n)  # the plain pick first, so a run with no drop keeps its picks
+    rest = sorted(set(forks) - set(first))
+    random.Random(PICK_SEED).shuffle(rest)  # the same seeded order for the replacements
+    reasons: dict[str, list[str]] = {"inert patch": [], "channel fault": []}
+    kept: list[str] = []
+    for cid in [*first, *rest]:
+        if len(kept) >= n:
+            break
+        if prompts is not None and inert_patch(calls[cid], ledgers[cid], *prompts):
+            reasons["inert patch"].append(cid)
+        elif channel_fault(calls[cid], forks[cid]):
+            reasons["channel fault"].append(cid)
+        else:
+            kept.append(cid)
+    for reason, ids in reasons.items():
+        if ids:
+            print(f"dropped target(s), {reason}: {', '.join(sorted(ids))}")
+            if dropped is not None:
+                dropped.setdefault(reason, []).extend(ids)
+    return [(calls[c], ledgers[c], forks[c]) for c in sorted(kept)], set(forks)
 
 
 def select_guards(
@@ -162,9 +220,26 @@ def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path, attempt:
     return old, new
 
 
+def call_values(ledger: Ledger) -> dict:
+    """The values the call carried, from the ledger: the product, the specs the bot offered (name -> options, in the
+    order offered) and whether the bot asked for units."""
+    specs: dict[str, list[str]] = {}
+    for t in ledger.bot_turns:
+        if t.slot == "spec" and t.spec_name:
+            options = specs.setdefault(t.spec_name, [])
+            options += [o for o in t.options_offered if o not in options]
+    return {
+        "product_name": ledger.initial_product or "",
+        "specs": specs,
+        "units_asked": any(t.slot == "unit" for t in ledger.bot_turns),
+    }
+
+
 def _sent_prompt(bot_prompt: str, call: CallRecord, ledger: Ledger) -> str:
-    """The text the replay bot gets: the template rendered with the variables this call saw."""
-    return render.render(bot_prompt, render.call_variables(call, ledger))
+    """The text the replay bot gets: the template rendered with the variables this call saw, then a "Call values"
+    block. Rendering only picks branches, so the bot would not see the values; the block is the same for old and new."""
+    block = json.dumps(call_values(ledger), ensure_ascii=False, indent=2)
+    return render.render(bot_prompt, render.call_variables(call, ledger)) + f"\n\n## {CALL_VALUES_HEADING}\n{block}\n"
 
 
 def _sent_tags(plan: Plan) -> dict[str, set[str]]:
@@ -282,8 +357,18 @@ def run_prove(
     }
     ledgers = {r["call_id"]: Ledger.model_validate(r) for r in dedupe_by_call_id(read_jsonl(ledgers_path))}
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
-    targets, candidates = select_targets(calls, ledgers, audits, parameter, n)
+    dropped: dict[str, list[str]] = {}
+    try:  # the inert check renders every candidate: a template error must stop here, before any LLM call
+        targets, candidates = select_targets(calls, ledgers, audits, parameter, n, (old, new), dropped)
+    except TemplateError as e:
+        raise SystemExit(f"a prompt for cause {cause_id} does not render: {type(e).__name__}: {e}") from e
     if len(targets) < gate.MIN_CALLS:
+        if dropped.get("inert patch"):
+            raise SystemExit(
+                f"patch does not reach this cause's calls: it renders the same old and new prompt for "
+                f"{len(dropped['inert patch'])} of {len(candidates)} candidate call(s) and only {len(targets)} "
+                f"target call(s) are left; the gate needs {gate.MIN_CALLS}"
+            )
         raise SystemExit(f"only {len(targets)} target call(s) for '{parameter}'; the gate needs {gate.MIN_CALLS}")
     plan = Plan(
         cause_id, parameter, old, new, targets, select_guards(calls, ledgers, audits, candidates, guards), k, max_turns
