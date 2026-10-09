@@ -434,6 +434,36 @@ def test_quantity_channel_converts_units_and_compares_the_range_maximum():
     assert build_causes(audits, turns, ranges)[0].type == "channel"  # the maxima 3 and 9 differ
 
 
+def test_quantity_channel_falls_back_to_the_unit_slot_when_the_text_has_no_unit():
+    """A quantity string with no unit must read that side's separate unit slot before converting.
+
+    Buyer quantity '1' with unit slot kg and bot quantity '1000' with unit slot g are the same 1 kg. Without
+    the slot fallback the bot side converted nothing (to_base treats a missing unit as no unit), so 1 looked
+    like 1000 and a misheard re-ask became a speech fault (channel) instead of staying prompt-owned (#90
+    review round 2, MEDIUM).
+    """
+    audits = [aud_on(c, qty_accuracy=("Fatal", 4)) for c in "abc"]
+    turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
+    slots = {c: led(c, quantity=("1", "1000"), unit=("kg", "g")) for c in "abc"}
+    assert [c.type for c in build_causes(audits, turns, slots)] == ["prompt"]  # 1 kg == 1000 g via the slots
+
+
+def test_quantity_channel_with_a_unit_on_one_side_only_compares_the_raw_maxima():
+    """'50 kg' vs '50' in either direction must not count as a quantity mismatch.
+
+    rule_qty_accuracy converts the bot side only when both sides name a unit of the same kind, and with a unit
+    on one side only it compares the raw numbers. Without that guard the bare number was converted as if it
+    had no unit at all (50 vs 50000), so a correct read-back became a speech fault instead of staying
+    prompt-owned, in either ledger direction (#90 review round 2, MEDIUM).
+    """
+    audits = [aud_on(c, qty_accuracy=("Fatal", 4)) for c in "abc"]
+    turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
+    bot_bare = {c: led(c, quantity=("50 kg", "50")) for c in "abc"}
+    assert [c.type for c in build_causes(audits, turns, bot_bare)] == ["prompt"]  # the bot dropped the unit
+    buyer_bare = {c: led(c, quantity=("50", "50 kg")) for c in "abc"}
+    assert [c.type for c in build_causes(audits, turns, buyer_bare)] == ["prompt"]  # the buyer side was bare
+
+
 def test_unclear_user_turn_right_before_the_onset_is_a_channel_fault():
     """audio_unclear on the nearest user turn before the onset must make a channel root, an earlier one must not.
 

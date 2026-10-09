@@ -137,13 +137,16 @@ def _unit_mismatch(led: Ledger) -> bool:
 def _qty_mismatch(led: Ledger) -> bool:
     """True when the buyer's and the bot's quantities both state a value and differ (rule_qty_accuracy's parse).
 
-    Both sides are parsed with rules.py's parse_quantity_full, the bot side is converted into the buyer's unit
-    and the values compare by their range maximum (a range counts as its maximum), so '50' and 'fifty' and
-    '1 kg' and '1000 g' agree while '2-3 kg' and '2-9 kg' differ (#90 review). A side that parses no number
-    falls back to the normalised text.
+    Both sides are parsed with rules.py's parse_quantity_full. When a quantity string has no parsed unit, that
+    side's separate unit slot is the fallback (#90 review round 2). The bot side is converted into the buyer's
+    unit only when both units are known and of the same kind, exactly as rule_qty_accuracy does; with a unit on
+    one side only the raw numbers compare (range maxima, a range counts as its maximum) with math.isclose, so
+    '50 kg' and '50' agree while '2-3 kg' and '2-9 kg' differ. Units that differ in kind are qty_unit's fault,
+    not a quantity mismatch (rule_qty_accuracy calls that Unknown). A side that parses no number falls back to
+    the normalised text.
     """
     # lazy: rules imports only models today, issue must not import it first
-    from .rules import parse_quantity_full, to_base
+    from .rules import norm_unit, parse_quantity_full, to_base, unit_group
 
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if not _norm_value(said) or not _norm_value(kept):
@@ -151,7 +154,15 @@ def _qty_mismatch(led: Ledger) -> bool:
     pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
     if pa is None or pb is None:
         return _norm_value(said) != _norm_value(kept)
-    return not math.isclose(to_base(pa[1], pa[2]), to_base(pb[1], pb[2]), rel_tol=1e-9, abs_tol=1e-9)
+    ahi, bhi = pa[1], pb[1]
+    ua = pa[2] or norm_unit(led.buyer_facts.get("unit"))
+    ub = pb[2] or norm_unit(led.bot_confirmed.get("unit"))
+    ga, gb = unit_group(ua), unit_group(ub)
+    if ga and gb and ga != gb:
+        return False  # units differ in kind: qty_unit owns that, and the numbers say nothing about it
+    if ua and ub:  # both known, same kind: convert the bot value into the buyer's unit
+        bhi *= to_base(1, ub) / to_base(1, ua)
+    return not math.isclose(ahi, bhi, rel_tol=1e-9, abs_tol=1e-9)
 
 
 def _value_mismatch(param: str, led: Ledger) -> bool:
