@@ -762,3 +762,24 @@ def test_run_fix_patches_a_pattern_unconfirmed_cause_but_not_an_outlier(tmp_path
 
     run_fix(cp, pp, op, top_n=5, llm=llm)
     assert seen == ["u", "r"]
+
+
+def test_refix_refuses_a_demoted_cause_before_any_llm_call(tmp_path):
+    """A cause that causes.json demoted to outlier or single_category must stop run_refix before any LLM call.
+
+    Without it a demoted cause keeps its old patch and paid calls would write it a new one.
+    """
+
+    def boom(*_a, **_k):
+        raise AssertionError("the LLM was called")
+
+    for status in ("outlier", "single_category"):
+        (tmp_path / status).mkdir()
+        kw = refix_files(tmp_path / status)
+        kw["causes_path"].write_text(json.dumps({"causes": [cause(status=status).model_dump()]}))
+        kw["causes_path"].with_name("outliers.jsonl").write_text(
+            json.dumps({"cause_id": "cause_qty_probing", "failed": ["categories", "reproduction"]}) + "\n"
+        )
+        with pytest.raises(SystemExit, match=rf"{status}.*failed: categories, reproduction"):
+            run_refix("cause_qty_probing", llm=boom, **kw)
+        assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW

@@ -169,15 +169,39 @@ def test_latest_gate_row_decides_and_other_reasons_do_not_demote():
     assert out[0].status == "ranked"
 
 
-def test_low_support_cause_keeps_its_status_and_is_logged():
-    """A cause under MIN_SUPPORT must keep watch or isolated, and must be logged with the support condition.
+def test_low_support_cause_keeps_its_status_and_logs_every_failed_condition():
+    """A cause under MIN_SUPPORT must keep watch or isolated and log all the conditions it failed, not only support.
 
-    Without it the existing watch list would change meaning and the outlier log would hide small causes.
+    Without it the log would hide that a small cause also spans one category or was not reproduced.
     """
-    causes = build_causes([aud("a", dead_air="Fatal"), aud("b", qty_probing="NonFatal")])
-    out, outliers = classify_causes(causes, cat_map(a="food", b="services"), [])
-    assert sorted(c.status for c in out) == ["isolated", "watch"]
+    causes = build_causes([aud("a", dead_air="Fatal"), aud("b", qty_probing="NonFatal"), aud("c", looping="Fatal")])
+    out, outliers = classify_causes(causes, cat_map(a="food", b="services", c="food"), [NOT_REPRO])
+    assert sorted(c.status for c in out) == ["isolated", "watch", "watch"]
+    failed = {r["parameter"]: r["failed"] for r in outliers}
+    assert failed["dead_air"] == ["support", "categories"]  # one call is one category
+    assert failed["qty_probing"] == ["support", "categories"]
+    assert failed["looping"] == ["support", "categories", "reproduction"]  # NOT_REPRO is the looping gate row
     assert {r["condition"] for r in outliers} == {"support"}
+
+
+def test_legacy_gate_row_with_zero_old_failures_counts_as_not_reproduced():
+    """A gate row from before #63 with old_fail_rate 0 and a 'no improvement' reason must demote the cause.
+
+    Without it that old row would leave the cause ranked, though the OLD replay never showed the fault.
+    """
+    legacy = {
+        "cause_id": "cause_looping",
+        "decision": "reject",
+        "reason": "no improvement: lift 0.000 <= 0",
+        "old_fail_rate": 0.0,
+    }
+    cats = cat_map(a="food", b="food", c="services")
+    out, outliers = classify_causes(looping_causes(), cats, [legacy])
+    assert out[0].status == "outlier" and outliers[0]["failed"] == ["reproduction"]
+    shipped = {**legacy, "decision": "ship"}  # a shipped row with old rate 0 is not demoted by the rate rule
+    assert classify_causes(looping_causes(), cats, [shipped])[0][0].status == "ranked"
+    real_reject = {**legacy, "old_fail_rate": 0.4}  # a reject where OLD did fail stays a reject
+    assert classify_causes(looping_causes(), cats, [real_reject])[0][0].status == "ranked"
 
 
 def test_patterns_keep_rank_order_and_come_before_non_patterns():

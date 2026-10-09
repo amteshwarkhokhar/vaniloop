@@ -14,7 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from . import prompt
-from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits
+from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits, require_fixable
 from .jsonl import read_jsonl
 from .llm import complete_json
 from .models import AuditRecord, Cause
@@ -336,6 +336,7 @@ def run_refix(
     cause = next((Cause.model_validate(c) for c in raw if c.get("cause_id") == cause_id), None)
     if cause is None:
         raise SystemExit(f"{cause_id} is not in {causes_path}")
+    require_fixable(cause_id, Path(causes_path))  # a demoted cause keeps its old patch but takes no new one
     previous = {
         "old_text": current.old_text,
         "new_text": current.new_text,

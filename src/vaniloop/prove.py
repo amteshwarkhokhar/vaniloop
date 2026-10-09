@@ -20,7 +20,7 @@ from . import gate, llm, prompt, render, replay
 from .fix import PATCHES_PATH, PromptPatch, _count_overlapping, apply_patch
 from .gate import AuditFn, Item, ReplayFn
 from .ingest import OUT_PATH as CALLS_PATH
-from .issue import AUDITS_PATH, load_audits
+from .issue import AUDITS_PATH, load_audits, require_fixable
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import AuditRecord, CallRecord, Ledger
@@ -338,6 +338,7 @@ def run_prove(
     replay_fn: ReplayFn | None = None,
     audit_fn: AuditFn | None = None,
     attempt: int = 1,
+    causes_path: Path | None = None,
 ) -> Outcome:
     """Check, pick calls, then (unless dry_run) replay, decide and record. Every stop comes before the first replay.
 
@@ -355,6 +356,8 @@ def run_prove(
         raise SystemExit(f"--k must be at least 2, got {k}")
     if workers < 1:
         raise SystemExit(f"--workers must be at least 1, got {workers}")
+    if not dry_run:  # a demoted cause keeps its old patch but takes no gate run (causes.json sits beside patches.json)
+        require_fixable(cause_id, causes_path or Path(patches_path).with_name("causes.json"))
     old, new = build_prompts(cause_id, prompt_path, patches_path, attempt)
     calls = {
         r["call_id"]: CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)

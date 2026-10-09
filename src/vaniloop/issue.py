@@ -120,6 +120,42 @@ def build_causes(audits: list[AuditRecord]) -> list[Cause]:
     return causes
 
 
+def _not_reproduced(row: dict) -> bool:
+    """True if a gate row says the OLD replay did not show the fault.
+
+    Rows written since #63 say so in the reason. A row from before #63 with 0 OLD failures was a plain
+    "no improvement" reject, so a non-ship row with old_fail_rate 0 counts too.
+    """
+    if str(row.get("reason", "")).startswith(NOT_REPRODUCED_PREFIX):
+        return True
+    return row.get("decision") != "ship" and row.get("old_fail_rate") == 0
+
+
+def require_fixable(cause_id: str, causes_path: Path) -> None:
+    """Stop with SystemExit when causes.json holds this cause with a status that is not in FIXABLE_STATUSES.
+
+    A cause that was demoted to outlier or single_category keeps its old patch, so refix and prove call this
+    before any LLM call. A missing file or a missing cause is not refused here (the caller has its own checks).
+    The message names the status and the failed conditions from the outliers.jsonl next to causes.json.
+    """
+    path = Path(causes_path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")).get("causes", [])
+    except (OSError, ValueError, AttributeError):
+        return
+    row = next((c for c in raw if isinstance(c, dict) and c.get("cause_id") == cause_id), None)
+    if row is None or row.get("status") in FIXABLE_STATUSES:
+        return
+    why = next(
+        (r.get("failed") for r in read_jsonl(path.with_name("outliers.jsonl")) if r.get("cause_id") == cause_id), None
+    )
+    raise SystemExit(
+        f"{cause_id} has status '{row.get('status')}' in {path.name}, not a pattern"
+        + (f" (failed: {', '.join(why)})" if why else "")
+        + "; it takes no new patch and no gate run"
+    )
+
+
 def classify_causes(
     causes: list[Cause],
     category_of: Callable[[str], str],
@@ -130,9 +166,11 @@ def classify_causes(
     A cause is a pattern only if (a) it has MIN_SUPPORT calls (build_causes: status ranked), (b) its calls span
     at least MIN_CATEGORIES known product categories and (c) its latest gate row is not "replay did not
     reproduce the fault". With no gate row yet it is `pattern_unconfirmed`, not an outlier. Else:
-      - fails (b): `single_category` (a data signal). Fails (b) and (c): still single_category, both are logged.
+      - fails (b): `single_category` (a data signal). Fails (b) and (c): still single_category.
       - fails (c) only: `outlier`.
-      - fails (a): keeps `watch` or `isolated`, logged with condition `support`.
+      - fails (a): keeps `watch` or `isolated`.
+    Every cause that fails any condition is logged with all the conditions it failed, in the order
+    support, categories, reproduction (`condition` is the first).
     A call with category `unknown` (no ledger, no product or an unlabelled name) is never a category: it adds
     nothing to the count, so unknowns cannot fake a second category. `other` is a real answer and counts as one.
     Scores and ranks are not changed: only the status and the order.
@@ -145,16 +183,17 @@ def classify_causes(
         by_cat = Counter(category_of(call) for call in calls)
         unknown = by_cat.pop(UNKNOWN_CATEGORY, 0)
         gate = last_gate.get(c.cause_id)
-        not_reproduced = gate is not None and str(gate.get("reason", "")).startswith(NOT_REPRODUCED_PREFIX)
-        failed = []
-        if c.status != "ranked":
+        not_reproduced = gate is not None and _not_reproduced(gate)
+        failed = []  # every condition is judged on its own, so the log keeps all of them
+        if len(calls) < MIN_SUPPORT:
             failed.append("support")
-        elif len(by_cat) < MIN_CATEGORIES:
+        if len(by_cat) < MIN_CATEGORIES:
             failed.append("categories")
-        if c.status == "ranked" and not_reproduced:
+        if not_reproduced:
             failed.append("reproduction")
         if failed:
-            status = c.status if failed == ["support"] else "single_category" if "categories" in failed else "outlier"
+            # the status follows the first failed condition; below MIN_SUPPORT it stays watch or isolated
+            status = c.status if "support" in failed else "single_category" if "categories" in failed else "outlier"
             outliers.append(
                 {
                     "cause_id": c.cause_id,

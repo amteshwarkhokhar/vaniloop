@@ -675,3 +675,24 @@ def test_product_change_target_with_no_bot_turn_after_the_change_is_skipped_and_
     items, cand = prove.select_targets(calls, ledgers, audits, "product_change", 4)
     assert sorted(c.call_id for c, _, _ in items) == ["a", "b", "c"] and "late" not in cand
     assert "no bot turn after the product change: late" in capsys.readouterr().out
+
+
+def test_prove_refuses_a_demoted_cause_before_any_replay_but_a_dry_run_still_plans(tmp_path):
+    """A real prove run on a cause that causes.json demoted must stop with its status and failed conditions.
+
+    Without it a demoted cause keeps its old patch and the gate could ship it, though it is no longer a pattern.
+    """
+    pf, paths = write_inputs(tmp_path)
+    (tmp_path / "causes.json").write_text(json.dumps({"causes": [{"cause_id": CAUSE, "status": "single_category"}]}))
+    (tmp_path / "outliers.jsonl").write_text(json.dumps({"cause_id": CAUSE, "failed": ["categories"]}) + "\n")
+    with pytest.raises(SystemExit, match=r"single_category.*failed: categories"):
+        prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, replay_fn=raising, audit_fn=raising, **paths)
+    assert not paths["gates_path"].exists()
+    prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, dry_run=True, replay_fn=raising, audit_fn=raising, **paths)
+    (tmp_path / "causes.json").write_text(
+        json.dumps({"causes": [{"cause_id": CAUSE, "status": "pattern_unconfirmed"}]})
+    )
+    out = prove.run_prove(
+        CAUSE, pf, n=3, k=2, guards=2, replay_fn=Stubs().replay_fn, audit_fn=Stubs().audit_fn, **paths
+    )
+    assert out.result is not None
