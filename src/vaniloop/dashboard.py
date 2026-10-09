@@ -26,7 +26,7 @@ from vaniloop.grading import (
     reveal,
     save_grade,
 )
-from vaniloop.issue import KNOWN
+from vaniloop.issue import FIXABLE_STATUSES, KNOWN
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 from vaniloop.models import AuditRecord, CallRecord, Cause
 from vaniloop.viz import (
@@ -470,9 +470,9 @@ def issues_tab(causes: list[Cause], total_calls: int) -> None:
 
 
 def fix_tab(causes: list[Cause], doc: tuple[list[PromptPatch], list[dict]] | None) -> None:
-    """One card per ranked cause: the prompt patch as a line diff, or why there is none."""
+    """One card per pattern cause: the prompt patch as a line diff, or why there is none."""
     patches, rejected = doc if doc is not None else ([], [])
-    if doc is None or not (patches or rejected or any(c.status == "ranked" for c in causes)):
+    if doc is None or not (patches or rejected or any(c.status in FIXABLE_STATUSES for c in causes)):
         st.info(EMPTY_FIX)
         return
     st.html(fix_cards(causes, patches, rejected))

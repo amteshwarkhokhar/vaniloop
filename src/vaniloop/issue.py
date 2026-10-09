@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 from .jsonl import dedupe_by_call_id, read_jsonl
@@ -15,6 +17,13 @@ AUDITS_PATH = ROOT / "runs" / "audits.jsonl"
 CAUSES_PATH = ROOT / "runs" / "causes.json"
 
 MIN_SUPPORT = 3
+MIN_CATEGORIES = 2  # a pattern recurs in at least this many known product categories
+UNKNOWN_CATEGORY = "unknown"  # same label as categorize.UNKNOWN (a test pins it); categorize imports this module
+NOT_REPRODUCED_PREFIX = "replay did not reproduce the fault"  # start of the gate.decide reason (#63)
+# Display order of the statuses. A pattern is ranked (gate-confirmed) or pattern_unconfirmed (no gate row yet).
+FIXABLE_STATUSES = frozenset({"ranked", "pattern_unconfirmed"})  # the causes fix and the Fix view work on
+LEGACY_NO_IMPROVEMENT_PREFIX = "no improvement: lift"  # gate.decide reject text; pre-#63 rows with OLD 0/n carry it
+STATUS_ORDER = {"ranked": 0, "pattern_unconfirmed": 0, "watch": 1, "outlier": 2, "single_category": 3, "isolated": 4}
 FIXABILITY = {"prompt": 1.0, "flow_logic": 0.5, "asr": 0.25}
 
 # parameter -> (name, description, type)
@@ -108,9 +117,104 @@ def build_causes(audits: list[AuditRecord]) -> list[Cause]:
                 status=status,
             )
         )
-    order = {"ranked": 0, "watch": 1, "isolated": 2}
-    causes.sort(key=lambda c: (order[c.status], -c.rank_score, -c.priority))
+    causes.sort(key=lambda c: (STATUS_ORDER[c.status], -c.rank_score, -c.priority))
     return causes
+
+
+def _not_reproduced(row: dict) -> bool:
+    """True if a gate row says the OLD replay did not show the fault.
+
+    Rows written since #63 say so in the reason. A row from before #63 with 0 OLD failures was a plain
+    "no improvement: lift" reject, so that reason with old_fail_rate 0 counts too. Any other row with rate 0
+    (unresolved trials, a futility stop, identical replays) has no real evidence and does not count.
+    """
+    reason = str(row.get("reason", ""))
+    if reason.startswith(NOT_REPRODUCED_PREFIX):
+        return True
+    return reason.startswith(LEGACY_NO_IMPROVEMENT_PREFIX) and row.get("old_fail_rate") == 0
+
+
+def require_fixable(cause_id: str, causes_path: Path) -> None:
+    """Stop with SystemExit when causes.json holds this cause with a status that is not in FIXABLE_STATUSES.
+
+    A cause that was demoted to outlier or single_category keeps its old patch, so refix and prove call this
+    before any LLM call. A missing file or a missing cause is not refused here (the caller has its own checks).
+    The message names the status and the failed conditions from the outliers.jsonl next to causes.json.
+    """
+    path = Path(causes_path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")).get("causes", [])
+    except (OSError, ValueError, AttributeError):
+        return
+    row = next((c for c in raw if isinstance(c, dict) and c.get("cause_id") == cause_id), None)
+    if row is None or row.get("status") in FIXABLE_STATUSES:
+        return
+    why = next(
+        (r.get("failed") for r in read_jsonl(path.with_name("outliers.jsonl")) if r.get("cause_id") == cause_id), None
+    )
+    raise SystemExit(
+        f"{cause_id} has status '{row.get('status')}' in {path.name}, not a pattern"
+        + (f" (failed: {', '.join(why)})" if why else "")
+        + "; it takes no new patch and no gate run"
+    )
+
+
+def classify_causes(
+    causes: list[Cause],
+    category_of: Callable[[str], str],
+    gate_rows: list[dict],
+) -> tuple[list[Cause], list[dict]]:
+    """Split causes into patterns and outliers. Returns (causes in display order, outlier log rows).
+
+    A cause is a pattern only if (a) it has MIN_SUPPORT calls (build_causes: status ranked), (b) its calls span
+    at least MIN_CATEGORIES known product categories and (c) its latest gate row is not "replay did not
+    reproduce the fault". With no gate row yet it is `pattern_unconfirmed`, not an outlier. Else:
+      - fails (b): `single_category` (a data signal). Fails (b) and (c): still single_category.
+      - fails (c) only: `outlier`.
+      - fails (a): keeps `watch` or `isolated`.
+    Every cause that fails any condition is logged with all the conditions it failed, in the order
+    support, categories, reproduction (`condition` is the first).
+    A call with category `unknown` (no ledger, no product or an unlabelled name) is never a category: it adds
+    nothing to the count, so unknowns cannot fake a second category. `other` is a real answer and counts as one.
+    Scores and ranks are not changed: only the status and the order.
+    """
+    last_gate = {r.get("cause_id"): r for r in gate_rows}  # gates.jsonl is append-only: the last row wins
+    out: list[Cause] = []
+    outliers: list[dict] = []
+    for c in causes:
+        calls = c.fatal_calls + c.nonfatal_calls
+        by_cat = Counter(category_of(call) for call in calls)
+        unknown = by_cat.pop(UNKNOWN_CATEGORY, 0)
+        gate = last_gate.get(c.cause_id)
+        not_reproduced = gate is not None and _not_reproduced(gate)
+        failed = []  # every condition is judged on its own, so the log keeps all of them
+        if len(calls) < MIN_SUPPORT:
+            failed.append("support")
+        if len(by_cat) < MIN_CATEGORIES:
+            failed.append("categories")
+        if not_reproduced:
+            failed.append("reproduction")
+        if failed:
+            # the status follows the first failed condition; below MIN_SUPPORT it stays watch or isolated
+            status = c.status if "support" in failed else "single_category" if "categories" in failed else "outlier"
+            outliers.append(
+                {
+                    "cause_id": c.cause_id,
+                    "parameter": c.parameter,
+                    "status": status,
+                    "condition": failed[0],
+                    "failed": failed,
+                    "calls": len(calls),
+                    "categories": dict(by_cat),
+                    "unknown_calls": unknown,
+                    "gate_reason": gate.get("reason") if gate else None,
+                }
+            )
+        else:
+            status = "ranked" if gate is not None else "pattern_unconfirmed"
+        out.append(c.model_copy(update={"status": status}))
+    out.sort(key=lambda c: (STATUS_ORDER[c.status], -c.rank_score, -c.priority))
+    return out, outliers
 
 
 def load_audits(path: Path) -> list[AuditRecord]:
@@ -124,9 +228,27 @@ def load_audits(path: Path) -> list[AuditRecord]:
     return out
 
 
+def _call_categories(runs: Path) -> Callable[[str], str]:
+    """call_id -> category from `<runs>/ledgers.jsonl` and `<runs>/categories.json` (read once, not per call)."""
+    from .categorize import load_categories, name_key, product_of  # lazy: categorize imports this module
+
+    cats = load_categories(runs / "categories.json")
+    by_call = {}
+    for r in dedupe_by_call_id(read_jsonl(runs / "ledgers.jsonl"), last_wins=True):
+        name = product_of(r)
+        by_call[r["call_id"]] = cats.get(name_key(name), UNKNOWN_CATEGORY) if name else UNKNOWN_CATEGORY
+    return lambda call_id: by_call.get(call_id, UNKNOWN_CATEGORY)
+
+
 def run_issues(audits_path: Path = AUDITS_PATH, out_path: Path = CAUSES_PATH) -> list[Cause]:
+    """Rank causes, split patterns from outliers, write causes.json and outliers.jsonl.
+
+    categories.json, ledgers.jsonl and gates.jsonl are read from the folder of `out_path`; outliers.jsonl is
+    written there and rewritten whole each run (it is a snapshot of today's outliers, not a history).
+    """
     audits = load_audits(Path(audits_path))
-    causes = build_causes(audits)
+    runs = Path(out_path).parent
+    causes, outliers = classify_causes(build_causes(audits), _call_categories(runs), read_jsonl(runs / "gates.jsonl"))
     review = sum(a.verdict == "NeedsReview" for a in audits)
     doc = {
         "denominator": len(audits) - review,
@@ -139,4 +261,8 @@ def run_issues(audits_path: Path = AUDITS_PATH, out_path: Path = CAUSES_PATH) ->
     tmp = out.with_name(out.name + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, out)  # atomic: readers see the old or the new file, never a partial one
+    log = out.with_name("outliers.jsonl")
+    tmp = log.with_name(log.name + f".{os.getpid()}.tmp")
+    tmp.write_text("".join(json.dumps(o, ensure_ascii=False) + "\n" for o in outliers), encoding="utf-8")
+    os.replace(tmp, log)
     return causes

@@ -211,3 +211,18 @@ def test_word_marks_never_drop_duplicate_or_reorder_words_on_repeated_words():
         }
         plain = {k: html.unescape(re.sub(r"</?(?:ins|del)[^>]*>", "", t)) for k, t in shown.items()}
         assert plain == {"del": old, "add": new}, (old, new, shown)
+
+
+def test_fix_cards_include_a_pattern_unconfirmed_cause_and_skip_an_outlier():
+    """The Fix view must show a card for a pattern_unconfirmed cause and none for an outlier or single_category one.
+
+    Without it a new pattern would never show in the Fix view, so the owner could not see its patch.
+    """
+
+    def c(cid, status):
+        return Cause(cause_id=cid, name=f"Name {cid}", description="", type="prompt", parameter=cid, status=status)
+
+    causes = [c("u", "pattern_unconfirmed"), c("o", "outlier"), c("s", "single_category")]
+    out = fix_cards(causes, [], [])
+    assert out.count('class="vl-card"') == 1 and "Name u" in out
+    assert "Name o" not in out and "Name s" not in out

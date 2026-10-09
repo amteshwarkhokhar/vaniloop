@@ -1,9 +1,10 @@
 """Dashboard drawings: call text is escaped, blind drawings carry no audit, and the wall counts every call."""
 
+import re
 from pathlib import Path
 
 from vaniloop.dashboard import load_audits, load_calls, load_causes
-from vaniloop.models import AuditRecord, CallRecord, Evidence, Finding, Silence, Turn
+from vaniloop.models import AuditRecord, CallRecord, Cause, Evidence, Finding, Silence, Turn
 from vaniloop.viz import call_strip, cause_list, findings, lede, script, wall
 
 FIX = Path(__file__).parent / "fixtures"
@@ -127,3 +128,18 @@ def test_wall_scale_and_strip_edges_stay_inside_the_timeline():
     edge = _call()
     edge.turns.append(Turn(idx=3, speaker="bot", start_sec=20, end_sec=20, text="end"))
     assert "Turn 3," not in call_strip(edge)
+
+
+def test_cause_list_numbers_patterns_only_and_labels_every_other_status():
+    """Only patterns may carry a rank number, and every non-pattern must show a label that says why.
+
+    Without it an outlier would read as the most urgent cause and the owner would chase a data signal.
+    """
+
+    def c(cid, status):
+        return Cause(cause_id=cid, name=f"Name {cid}", description="", type="prompt", parameter=cid, status=status)
+
+    out = cause_list([c("a", "ranked"), c("b", "pattern_unconfirmed"), c("c", "outlier"), c("d", "single_category")])
+    assert re.findall(r'<span class="n">([^<]+)</span>', out) == ["1", "2", "&ndash;", "&ndash;"]
+    assert "Pattern, not replayed yet" in out
+    assert "the old prompt did not reproduce it" in out and "fewer than 2 product categories" in out

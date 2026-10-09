@@ -128,4 +128,7 @@ class Cause(BaseModel):
     rank_score: float = 0.0  # wilson_low * mean_severity * fixability; used for sorting
     freq_ci_low: float = 0.0
     freq_ci_high: float = 0.0
-    status: Literal["ranked", "isolated", "watch"] = "ranked"
+    # ranked = a confirmed pattern. Below MIN_SUPPORT: watch (has a Fatal) or isolated. The rest is set by
+    # issue.classify_causes: single_category (spans < 2 known categories), outlier (the OLD replay did not
+    # reproduce it), pattern_unconfirmed (a pattern so far, no gate row yet).
+    status: Literal["ranked", "isolated", "watch", "outlier", "single_category", "pattern_unconfirmed"] = "ranked"

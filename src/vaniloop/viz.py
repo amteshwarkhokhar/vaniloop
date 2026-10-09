@@ -13,6 +13,7 @@ import math
 import re
 from typing import TYPE_CHECKING
 
+from .issue import FIXABLE_STATUSES
 from .models import AuditRecord, CallRecord, Cause
 
 if TYPE_CHECKING:  # type names only: drawing must not import the LLM client
@@ -362,13 +363,30 @@ def findings(audit: AuditRecord, names: dict[str, str] | None = None) -> str:
     return f'<div class="vl">{body}{tail}</div>'
 
 
+STATUS_LABEL = {
+    "pattern_unconfirmed": "Pattern, not replayed yet",
+    "watch": "Not a pattern: under 3 calls, has a Fatal",
+    "outlier": "Not a pattern: the old prompt did not reproduce it",
+    "single_category": "Not a pattern: fewer than 2 product categories",
+    "isolated": "Not a pattern: under 3 calls",
+}
+
+
 def cause_list(causes: list[Cause]) -> str:
-    """Ranked causes. Each shows its frequency interval on one shared axis, so widths compare across rows."""
+    """Causes in order. Each shows its frequency interval on one shared axis, so widths compare across rows.
+
+    Only patterns are numbered. A cause that is not a pattern shows a dash and a label that says why.
+    """
     top = max((c.freq_ci_high for c in causes), default=0.5)
     axis = min(1.0, (int(top * 10) + 1) / 10)
     lever = {"prompt": "Prompt fix", "flow_logic": "Flow or logic fix", "asr": "Speech recognition fix"}
     rows = []
-    for i, c in enumerate(causes, 1):
+    n = 0
+    for c in causes:
+        pattern = c.status in FIXABLE_STATUSES
+        n += pattern
+        num = str(n) if pattern else "&ndash;"
+        label = f"<br><small><i>{esc(STATUS_LABEL[c.status])}</i></small>" if c.status in STATUS_LABEL else ""
         lo, hi = c.freq_ci_low / axis * 100, c.freq_ci_high / axis * 100
         color = VERDICT_COLOR["Fatal"] if c.fatal_calls else VERDICT_COLOR["NonFatal"]
         bar = (
@@ -384,7 +402,8 @@ def cause_list(causes: list[Cause]) -> str:
             if x
         )
         rows.append(
-            f'<li><span class="n">{i}</span><span><b>{esc(c.name)}</b><small>{esc(c.description)}</small></span>'
+            f'<li><span class="n">{num}</span>'
+            f"<span><b>{esc(c.name)}</b><small>{esc(c.description)}</small>{label}</span>"
             f"<span>{bar}<small>{c.freq_ci_low:.0%} to {c.freq_ci_high:.0%} of calls</small></span>"
             f"<span>{counts}<br><small>{lever.get(c.type, esc(c.type))}</small></span></li>"
         )
@@ -523,7 +542,7 @@ def fix_cards(causes: list[Cause], patches: list[PromptPatch], rejected: list[di
     A cause whose patch was rejected shows the reason. A cause with neither says there is no patch.
     A patch or rejection for a cause missing from `causes` still gets a card, named by its id, after the ranked ones.
     """
-    ranked = [c for c in causes if c.status == "ranked"]
+    ranked = [c for c in causes if c.status in FIXABLE_STATUSES]
     known = {c.cause_id for c in causes}
     stray = dict.fromkeys([p.cause_id for p in patches] + [r.get("cause_id") for r in rejected])
     ranked += [

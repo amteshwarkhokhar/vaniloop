@@ -774,3 +774,43 @@ def test_golden_guard_trips_on_a_golden_path(tmp_path, monkeypatch):
     assert len(tripped) == 4
     open(tmp_path / "other" / "ok.json").close()  # an unrelated path still works
     assert len(tripped) == 4
+
+
+def test_run_fix_patches_a_pattern_unconfirmed_cause_but_not_an_outlier(tmp_path):
+    """A pattern_unconfirmed cause must get a patch, and an outlier or single_category cause must not.
+
+    Without it no cause could ever get a gate row (the gate needs a patch), so every pattern would stay unconfirmed.
+    """
+    causes = [cause("o", "outlier"), cause("u", "pattern_unconfirmed"), cause("s", "single_category"), cause("r")]
+    cp, pp, op = tmp_path / "causes.json", tmp_path / "prompt.md", tmp_path / "patches.json"
+    cp.write_text(json.dumps({"causes": [c.model_dump() for c in causes]}))
+    pp.write_text(PROMPT)
+    seen: list = []
+
+    def llm(system, user, **kw):
+        seen.extend(c.cause_id for c in causes if c.name in user)
+        return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
+
+    run_fix(cp, pp, op, top_n=5, llm=llm)
+    assert seen == ["u", "r"]
+
+
+def test_refix_refuses_a_demoted_cause_before_any_llm_call(tmp_path):
+    """A cause that causes.json demoted to outlier or single_category must stop run_refix before any LLM call.
+
+    Without it a demoted cause keeps its old patch and paid calls would write it a new one.
+    """
+
+    def boom(*_a, **_k):
+        raise AssertionError("the LLM was called")
+
+    for status in ("outlier", "single_category"):
+        (tmp_path / status).mkdir()
+        kw = refix_files(tmp_path / status)
+        kw["causes_path"].write_text(json.dumps({"causes": [cause(status=status).model_dump()]}))
+        kw["causes_path"].with_name("outliers.jsonl").write_text(
+            json.dumps({"cause_id": "cause_qty_probing", "failed": ["categories", "reproduction"]}) + "\n"
+        )
+        with pytest.raises(SystemExit, match=rf"{status}.*failed: categories, reproduction"):
+            run_refix("cause_qty_probing", llm=boom, **kw)
+        assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW

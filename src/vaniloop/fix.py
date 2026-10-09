@@ -14,7 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from . import prompt
-from .issue import AUDITS_PATH, CAUSES_PATH, load_audits
+from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits, require_fixable
 from .jsonl import read_jsonl
 from .llm import complete_json
 from .models import AuditRecord, Cause
@@ -242,7 +242,7 @@ def run_fix(
     audits_path: Path = AUDITS_PATH,
 ) -> dict:
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
-    ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") == "ranked"]
+    ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") in FIXABLE_STATUSES]
     prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
     out = Path(out_path)
@@ -365,6 +365,7 @@ def run_refix(
     cause = next((Cause.model_validate(c) for c in raw if c.get("cause_id") == cause_id), None)
     if cause is None:
         raise SystemExit(f"{cause_id} is not in {causes_path}")
+    require_fixable(cause_id, Path(causes_path))  # a demoted cause keeps its old patch but takes no new one
     previous = {
         "old_text": current.old_text,
         "new_text": current.new_text,
