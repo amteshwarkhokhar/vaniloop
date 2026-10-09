@@ -205,14 +205,14 @@ def test_f2_evidence_resolves_by_idx_field_and_never_raises():
 
 # ---- F3
 def test_f3_qty_never_asked_explicit_assumption(monkeypatch):
-    """Regression for review round 1 finding: a bot that never asks quantity is Fatal with a spoken_proxy basis.
+    """A bot that never asks quantity is NonFatal with a spoken_proxy basis, as the human audit grades it.
 
     The rule must fall back to Unknown once quantity is not a defined field for the category.
     """
     call = mk_call()
     led = mk_led(call, buyer_facts={})
     f = by(audit_call(call, led))["qty_probing"]
-    assert f.status == "Fatal" and f.basis == "spoken_proxy"
+    assert f.status == "NonFatal" and f.basis == "spoken_proxy"
     assert f.reason.endswith("(assumes quantity is a defined field for this category)")
     monkeypatch.setattr(rules, "QTY_ALWAYS_DEFINED", False)
     assert by(audit_call(call, led))["qty_probing"].status == "Unknown"

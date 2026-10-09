@@ -1,4 +1,4 @@
-"""Pipeline runner. `python -m vaniloop.pipeline audit|issues|fix|grade-sample`."""
+"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|grade-sample`."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
-from .models import CallRecord
+from .models import CallRecord, Ledger
 from .rules import audit_call
 
 RUNS = AUDITS_PATH.parent
@@ -103,6 +103,40 @@ def run_grade_sample(
     return ids
 
 
+def run_regrade(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AUDITS_PATH) -> dict:
+    """Re-apply the Python rules to saved ledgers and rewrite audits.jsonl. No LLM call, no cost.
+
+    Calibration changes rules, not labels, so every rule change can be re-scored on all audited calls in
+    seconds. Calls without a saved ledger are left out. The file is replaced atomically under the audit lock.
+    """
+    lock_path = Path(audits_path).parent / ".audit.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lf:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise SystemExit(LOCK_MSG) from None
+        try:
+            calls = {r["call_id"]: r for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)}
+            ledgers = dedupe_by_call_id(read_jsonl(ledgers_path), last_wins=True)
+            if not calls or not ledgers:  # never replace real audits with an empty file
+                raise SystemExit(f"regrade needs calls and ledgers; found {len(calls)} calls, {len(ledgers)} ledgers")
+            audits = [
+                audit_call(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
+                for r in ledgers
+                if r.get("call_id") in calls
+            ]
+            if not audits:  # calls and ledgers share no call id: keep the audits that exist
+                raise SystemExit(f"regrade found no ledger for any of the {len(calls)} calls; audits left unchanged")
+            out = Path(audits_path)
+            tmp = out.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text("".join(json.dumps(a.model_dump(mode="json")) + "\n" for a in audits), encoding="utf-8")
+            os.replace(tmp, out)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+    return {"regraded": len(audits), "verdicts": dict(Counter(a.verdict for a in audits))}
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="vaniloop.pipeline")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -110,6 +144,7 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--workers", type=int, default=4)
     a.add_argument("--limit", type=int, default=None)
     sub.add_parser("issues")
+    sub.add_parser("regrade")
     f = sub.add_parser("fix")
     f.add_argument("--prompt", required=True)
     f.add_argument("--top", type=int, default=3)
@@ -119,6 +154,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "audit":
         s = run_audit(workers=args.workers, limit=args.limit)
         print(f"processed={s['processed']} skipped={s['skipped']} errors={s['errors']} verdicts={s['verdicts']}")
+    elif args.cmd == "regrade":
+        s = run_regrade()
+        print(f"regraded={s['regraded']} verdicts={s['verdicts']}")
     elif args.cmd == "fix":
         r = run_fix(prompt_path=Path(args.prompt), top_n=args.top)
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")

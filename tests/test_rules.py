@@ -116,11 +116,12 @@ def test_dead_air_over_5s_is_nonfatal_with_audio_evidence():
     assert a.verdict == "NonFatal"
 
 
-def test_never_asking_quantity_in_a_bl_call_is_fatal():
-    """A Buy Lead call where the bot never asks the quantity must grade qty_probing Fatal. If this fails,
-    leads go to sellers without a quantity and the audit says nothing.
+def test_never_asking_quantity_in_a_bl_call_is_nonfatal():
+    """A Buy Lead call where the bot never asks the quantity must grade qty_probing NonFatal, not Fatal.
+    Human auditors grade an unprobed quantity mostly Non-Fatal. As Fatal, it gave 41% Fatal calls
+    against a 4.7% human rate.
     """
     call = load_transcript(T / "10_90797297_EMBDVXFH5.json")
     led = Ledger(call_id=call.call_id, scope="bl_collection", bot_turns=[bot(0, "product")])
     a = audit_call(call, full(call, led))
-    assert {f.parameter: f.status for f in a.findings}["qty_probing"] == "Fatal"
+    assert {f.parameter: f.status for f in a.findings}["qty_probing"] == "NonFatal"
