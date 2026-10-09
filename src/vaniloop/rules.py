@@ -398,9 +398,12 @@ def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
             basis="spoken_proxy",
             reason=f"bot never asked for quantity; cannot tell if it is defined for this category {note}",
         )
+    # NonFatal, not Fatal: IndiaMART's human audit (VANI Call Vital report, 23 Aug-26 Sep 2026) grades
+    # "Qty Probe" mostly Non-Fatal, and fails it only when quantity is defined on the category, which a
+    # transcript cannot show. The Fatal parameters are wrong or missed captured values (qty_missed).
     return Finding(
         parameter="qty_probing",
-        status="Fatal",
+        status="NonFatal",
         basis="spoken_proxy",
         onset_turn=_handoff_turn(led),
         reason=f"bot never asked for quantity and the buyer did not give one {note}",
@@ -409,7 +412,9 @@ def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
 
 def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     """VANI prompt L1261: a valid quantity is stored and the bot moves on WITHOUT a read-back, so a missing read-back
-    is not a fault. It is a miss only if the bot asked for quantity again after the buyer gave it (ignored)."""
+    is not a fault. A re-ask after the buyer gave it is a fault. It is Fatal only if the buyer never gives the
+    quantity again: then the lead likely has none. A re-ask the buyer answers costs a turn but loses nothing,
+    so it is NonFatal (official Fatal definition: wrong or missing buyer info in the lead)."""
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said:
         return Finding(
@@ -428,7 +433,7 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     change = led.product_changed_at_turn
 
     def seg(i: int) -> int:  # a product change starts a new quantity (L83): compare only inside one segment
-        return 1 if change is not None and i > change else 0
+        return 1 if change is not None and i >= change else 0  # the change turn itself belongs to the new product
 
     reasked = []
     for sg in (0, 1):
@@ -439,13 +444,35 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
             )
     reasked.sort()
     if reasked:
+        unanswered = [r for r in reasked if not any(g > r and seg(g) == seg(r) for g in gave)]
+        if unanswered:  # any re-ask the buyer never answered may leave the lead without a quantity
+            r = unanswered[0]
+            return Finding(
+                parameter="qty_missed",
+                status="Fatal",
+                basis="spoken_proxy",
+                onset_turn=r,
+                reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
+                evidence=[_ev(call, r)],
+            )
+        r = reasked[0]
+        if not kept:  # the buyer answered every re-ask, but no captured value shows the answer was usable
+            return Finding(
+                parameter="qty_missed",
+                status="Unknown",
+                basis="spoken_proxy",
+                onset_turn=r,
+                reason=f"buyer said quantity '{said}', the bot asked again and the buyer answered, "
+                "but no captured quantity is visible",
+                evidence=[_ev(call, r)],
+            )
         return Finding(
             parameter="qty_missed",
-            status="Fatal",
+            status="NonFatal",
             basis="spoken_proxy",
-            onset_turn=reasked[0],
-            reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
-            evidence=[_ev(call, reasked[0])],
+            onset_turn=r,
+            reason=f"buyer said quantity '{said}', the bot asked again and the buyer repeated it",
+            evidence=[_ev(call, r)],
         )
     return Finding(
         parameter="qty_missed",

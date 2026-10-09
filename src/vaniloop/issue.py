@@ -31,8 +31,8 @@ KNOWN = {
     ),
     "qty_probing": ("Quantity never asked", "Bot never asks the buyer for the quantity.", "prompt"),
     "qty_missed": (
-        "Quantity given but not captured",
-        "Buyer stated a quantity but the bot did not record it.",
+        "Bot asks again for a quantity already given",
+        "Buyer stated a quantity and the bot asked for it again (Fatal only if the buyer never repeats it).",
         "prompt",
     ),
     "qty_accuracy": (
