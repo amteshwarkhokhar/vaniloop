@@ -47,3 +47,5 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: bin/check
+        env:
+          SKIP_TESTS: "1"

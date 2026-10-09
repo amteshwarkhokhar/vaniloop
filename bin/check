@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
 
-echo "== tests"
-uv run pytest -q || fail=1
+if [ "${SKIP_TESTS:-0}" = 1 ]; then echo "== tests skipped (SKIP_TESTS=1; CI runs them in the test job)"
+else echo "== tests"; uv run pytest -q || fail=1; fi
 
 echo "== every test states its purpose"
 bin/test-purpose || fail=1
