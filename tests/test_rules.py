@@ -201,3 +201,75 @@ def test_dead_air_ignores_silences_before_the_first_and_after_the_last_turn():
     )
     f = rule_dead_air(call, _led())
     assert f.status == "Pass" and "2 long silence(s) were buyer or line pauses" in f.reason
+
+
+def test_dead_air_inside_one_long_buyer_turn_passes():
+    """A silence that sits inside one long buyer turn is buyer speech, not bot dead air. The buyer turn before
+    the silence ends early and the bot answers after, so the boundary lookups alone would call it NonFatal. If
+    this fails, a buyer pausing mid-sentence is charged to VANI.
+    """
+    call = _call(
+        [
+            _turn(0, "user", 0.0, 7.0),
+            _turn(1, "user", 8.0, 20.0),
+            _turn(2, "bot", 21.0, 25.0),
+        ],
+        [Silence(start_sec=8.0, end_sec=14.0)],
+    )
+    f = rule_dead_air(call, _led())
+    assert f.status == "Pass"
+
+
+def test_dead_air_overlapped_by_a_bot_turn_passes():
+    """A silence with a bot turn starting inside it is not dead air: VANI is already speaking. The bot turn
+    starts after the silence does, so the after lookup skips it and would pair a buyer with a later bot turn. If
+    this fails, a bot that resumes mid-silence is still charged with dead air.
+    """
+    call = _call(
+        [
+            _turn(0, "user", 0.0, 5.0),
+            _turn(1, "bot", 10.0, 13.0),
+            _turn(2, "bot", 22.0, 25.0),
+        ],
+        [Silence(start_sec=5.0, end_sec=20.0)],
+    )
+    f = rule_dead_air(call, _led())
+    assert f.status == "Pass"
+
+
+def test_dead_air_with_several_turns_inside_passes():
+    """A silence with several turns inside it is not dead air, even when a buyer turn precedes it and a bot
+    turn follows. The in-between turns are invisible to the boundary lookups. If this fails, any long silence
+    between a buyer and a later bot turn is graded without checking who spoke through it.
+    """
+    call = _call(
+        [
+            _turn(0, "user", 0.0, 5.0),
+            _turn(1, "bot", 8.0, 10.0),
+            _turn(2, "user", 12.0, 14.0),
+            _turn(3, "bot", 22.0, 25.0),
+        ],
+        [Silence(start_sec=5.0, end_sec=20.0)],
+    )
+    f = rule_dead_air(call, _led())
+    assert f.status == "Pass"
+
+
+def test_dead_air_onset_is_the_earliest_gap_not_the_longest():
+    """With two bot gaps, onset_turn must be the answering bot turn of the earliest gap, while the reason keeps
+    the longest duration. issue.py makes the earliest onset the root, so pointing at the longest gap would turn
+    an early dead-air fault into a symptom of a later one. If this fails, the fix stage targets the wrong turn.
+    """
+    call = _call(
+        [
+            _turn(0, "user", 0.0, 5.0),
+            _turn(1, "bot", 11.0, 13.0),
+            _turn(2, "user", 14.0, 15.0),
+            _turn(3, "bot", 30.0, 32.0),
+        ],
+        [Silence(start_sec=5.0, end_sec=11.0), Silence(start_sec=15.0, end_sec=30.0)],
+    )
+    f = rule_dead_air(call, _led())
+    assert f.status == "NonFatal"
+    assert f.onset_turn == 1
+    assert "2 bot gap(s)" in f.reason and "longest 15.0 s" in f.reason

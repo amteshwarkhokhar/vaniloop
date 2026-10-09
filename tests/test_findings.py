@@ -455,9 +455,13 @@ def test_f8_noisy_constant_defined_no_behaviour_change():
     now sits after a buyer turn and before the bot's answer, because only a buyer-then-bot gap counts as dead air.
     """
     assert rules.DEAD_AIR_NOISY_SEC == 8.0 and rules.DEAD_AIR_SEC == 5.0
-    # 10.9 s: starts after buyer turn 1 and ends before bot turn 4 answers, so it is a bot gap over 5 s
-    call = mk_call(audio="x.mp3", silences=[Silence(start_sec=9.4, end_sec=20.3)])
-    assert by(audit_call(call, mk_led(call, [bt(0, "quantity")])))["dead_air"].status == "NonFatal"
+    # 11 s: starts after the buyer turn and ends before the bot answers, with no speech inside, so it is a bot gap
+    call = mk_call(audio="x.mp3", silences=[Silence(start_sec=4.0, end_sec=15.0)])
+    call.turns = [
+        Turn(idx=0, speaker="user", start_sec=0.0, end_sec=4.0, text="buyer"),
+        Turn(idx=1, speaker="bot", start_sec=15.0, end_sec=19.0, text="answer"),
+    ]
+    assert by(audit_call(call, mk_led(call, [bt(1, "quantity")])))["dead_air"].status == "NonFatal"
 
 
 # ---- F9
