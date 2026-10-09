@@ -31,7 +31,10 @@ BUYER_SYSTEM = (
 )
 UNCLEAR_TEXT = "[unclear audio]"  # what the bot's prompt shows for a buyer turn the bot did not hear
 MAX_UNCLEAR_RATE = 0.8  # a fully noisy channel would hide every answer and no prompt could finish the call
-BOT_FORMAT = 'Reply with JSON only: {"text": str, "end_call": bool}. text is your next spoken line.'
+BOT_FORMAT = (
+    'Reply with JSON only: {"text": str, "end_call": bool}. text is your next spoken line. '
+    "A seller handoff or a closing line ends the call: the reply that hands off or closes sets end_call true."
+)
 
 
 class BuyerBrief(BaseModel):

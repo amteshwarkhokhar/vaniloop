@@ -14,7 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import gate, llm, prompt, replay
+from jinja2 import TemplateError
+
+from . import gate, llm, prompt, render, replay
 from .fix import PATCHES_PATH, PromptPatch, _count_overlapping, apply_patch
 from .gate import AuditFn, Item, ReplayFn
 from .ingest import OUT_PATH as CALLS_PATH
@@ -154,19 +156,32 @@ def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path) -> tuple
     return old, new
 
 
+def _sent_prompt(bot_prompt: str, call: CallRecord, ledger: Ledger) -> str:
+    """The text the replay bot gets: the template rendered with the variables this call saw."""
+    return render.render(bot_prompt, render.call_variables(call, ledger))
+
+
+def _sent_tags(plan: Plan) -> dict[str, set[str]]:
+    """Per call id, the tags of the rendered old and new prompts that call's replays send. Raises on a render error."""
+    return {
+        c.call_id: {replay.prompt_tag(_sent_prompt(p, c, ledger)) for p in (plan.old_prompt, plan.new_prompt)}
+        for c, ledger, _ in [*plan.targets, *plan.guards]
+    }
+
+
 def _run_cost(rows_before: int, plan: Plan) -> float:
     """Sum cost_usd of the rows written during the run for this plan's replays, so a parallel run adds nothing.
 
-    A replay turn's cache_tag is replay:<bot|user>:<prompt tag>:<seed>:<call id>:<fork>. Ledger extraction rows
-    carry only a version tag, cannot be attributed and are left out.
+    A replay turn's cache_tag is replay:<bot|user>:<prompt tag>:<seed>:<call id>:<fork>. The tag is that of the
+    rendered prompt the call sent, which differs per call, so a row counts only with the tags of its own call.
+    Ledger extraction rows carry only a version tag, cannot be attributed and are left out.
     """
-    tags = {replay.prompt_tag(plan.old_prompt), replay.prompt_tag(plan.new_prompt)}
-    ids = {c.call_id for c, _, _ in [*plan.targets, *plan.guards]}
+    tags = _sent_tags(plan)
     total = 0.0
     for row in read_jsonl(llm.COSTS_PATH)[rows_before:]:
         parts = str(row.get("cache_tag", "")).split(":")
         cost = row.get("cost_usd")
-        if len(parts) < 6 or parts[0] != "replay" or parts[2] not in tags or ":".join(parts[4:-1]) not in ids:
+        if len(parts) < 6 or parts[0] != "replay" or parts[2] not in tags.get(":".join(parts[4:-1]), ()):
             continue
         if isinstance(cost, (int, float)) and not isinstance(cost, bool) and 0 <= cost < math.inf:
             total += cost
@@ -174,8 +189,11 @@ def _run_cost(rows_before: int, plan: Plan) -> float:
 
 
 def real_replay_fn(max_turns: int) -> ReplayFn:
+    """Replay with the prompt rendered for the call. The caller's old/new label still compares the unrendered texts."""
+
     def fn(call: CallRecord, ledger: Ledger, fork: int, bot_prompt: str, seed: int):
-        return replay.replay_result(call, fork, bot_prompt, replay.buyer_brief(call, ledger, fork), max_turns, seed)
+        sent = _sent_prompt(bot_prompt, call, ledger)
+        return replay.replay_result(call, fork, sent, replay.buyer_brief(call, ledger, fork), max_turns, seed)
 
     return fn
 
@@ -264,6 +282,10 @@ def run_prove(
     plan = Plan(
         cause_id, parameter, old, new, targets, select_guards(calls, ledgers, audits, candidates, guards), k, max_turns
     )
+    try:
+        _sent_tags(plan)  # render every prompt for every call now: a template error must not surface mid-run
+    except TemplateError as e:
+        raise SystemExit(f"a prompt for cause {cause_id} does not render: {type(e).__name__}: {e}") from e
     if dry_run:
         return Outcome(plan)
     replay_fn = replay_fn or real_replay_fn(max_turns)
