@@ -10,6 +10,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from .fix import PATCHES_PATH, run_fix
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, run_issues
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
@@ -85,10 +86,18 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--workers", type=int, default=4)
     a.add_argument("--limit", type=int, default=None)
     sub.add_parser("issues")
+    f = sub.add_parser("fix")
+    f.add_argument("--prompt", required=True)
+    f.add_argument("--top", type=int, default=3)
     args = ap.parse_args(argv)
     if args.cmd == "audit":
         s = run_audit(workers=args.workers, limit=args.limit)
         print(f"processed={s['processed']} skipped={s['skipped']} errors={s['errors']} verdicts={s['verdicts']}")
+    elif args.cmd == "fix":
+        r = run_fix(prompt_path=Path(args.prompt), top_n=args.top)
+        print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
+        for x in r["rejected"]:
+            print(f"  rejected {x['cause_id']}: {x['reason']}")
     else:
         causes = run_issues()
         print(f"{len(causes)} causes -> {CAUSES_PATH}")
