@@ -8,6 +8,7 @@ because the captured Buy Lead is not available), or unavailable.
 from __future__ import annotations
 
 import re
+from math import isclose
 
 from .models import AuditRecord, CallRecord, Evidence, Finding, Ledger, Silence, Turn
 
@@ -565,7 +566,8 @@ def _qty_captured(led: Ledger) -> bool:
             return False
         k = to_base(1, ub) / to_base(1, ua)
         blo, bhi = blo * k, bhi * k
-    return (alo, ahi) == (blo, bhi) or (blo == bhi == ahi and alo < ahi)
+    # unit conversion can introduce float rounding (0.7 kg -> 700.0000000000001 g), so compare with a tolerance
+    return (isclose(alo, blo) and isclose(ahi, bhi)) or (blo == bhi and isclose(bhi, ahi) and alo < ahi)
 
 
 def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
@@ -610,8 +612,9 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
             captured = _qty_captured(led)
             soft = None  # (onset, reason) of the first unanswered re-ask that is only NonFatal
             for r in unanswered:
-                first = min(g for g in gave if seg(g) == seg(r))
-                if first in unclear:  # (a) matrix: "if voice not clear then Non Fatal"
+                # the buyer turn the re-ask follows: the latest one before it in the same segment
+                latest = max(g for g in gave if seg(g) == seg(r) and g < r)
+                if latest in unclear:  # (a) matrix: "if voice not clear then Non Fatal"
                     soft = soft or (r, f"buyer's quantity '{said}' was in unclear audio and the bot asked again")
                 elif captured:  # (b) the right quantity is already captured: the re-ask is a redundant question
                     soft = soft or (

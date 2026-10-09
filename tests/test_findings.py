@@ -394,7 +394,8 @@ def test_f6_frustration_before_threshold_does_not_make_fatal_but_after_does():
 def test_f6_call_ending_after_fourth_ask_is_nonfatal_and_worst_slot_reported():
     """Regression for review round 1 finding: the worst looping slot is reported. A call end alone is NonFatal (#95).
 
-    Reporting the wrong slot would point the prompt fix at a question that was not the loop.
+    Reporting the wrong slot would point the prompt fix at a question that was not the loop. When both slots are
+    Fatal, the one with more asks must win the tie-break; the test irritates the buyer after both onsets for that.
     """
     call = mk_call(12)  # turns 0..11
     bots = [bt(0, "quantity")] + [bt(i, "name") for i in (2, 4, 6, 8)] + [bt(10, "city")]
@@ -405,10 +406,10 @@ def test_f6_call_ending_after_fourth_ask_is_nonfatal_and_worst_slot_reported():
     assert by(audit_call(call2, _loop_led(call2, bots2)))["looping"].status == "NonFatal"
     call3 = mk_call(9)  # 0..8; 4th at 6, turns 7,8 after -> the call ends right after, but nobody is irritated
     assert by(audit_call(call3, _loop_led(call3, bots2)))["looping"].status == "NonFatal"
-    # two looping slots: worst (Fatal one) is reported
+    # two looping slots, both Fatal: the tie-break must pick the one with more asks
     call4 = mk_call(30)
     bots4 = [bt(0, "quantity")] + [bt(i, "city") for i in (2, 4, 6, 8)] + [bt(i, "name") for i in (10, 12, 14, 16, 18)]
-    users = [UserTurnLabel(idx=17, frustrated=0.9)]
+    users = [UserTurnLabel(idx=9, frustrated=0.9), UserTurnLabel(idx=17, frustrated=0.9)]
     f = by(audit_call(call4, _loop_led(call4, bots4, users)))["looping"]
     assert f.status == "Fatal" and "name" in f.reason  # both Fatal, name has more asks
     f2 = by(audit_call(call4, _loop_led(call4, bots4, [UserTurnLabel(idx=9, frustrated=0.9)])))["looping"]
@@ -686,6 +687,40 @@ def test_95_unanswered_reask_on_unclear_audio_quantity_turn_is_nonfatal():
     assert f.status == "NonFatal" and f.onset_turn == 2 and "unclear" in f.reason
     call.turns[1].audio_unclear = False
     assert _missed95(call, bots, _GAVE, kept=None).status == "Fatal"
+
+
+def test_95_unclear_audio_uses_the_latest_quantity_turn_before_the_reask():
+    """An unanswered re-ask is excused only by unclear audio on the buyer's latest quantity turn before it.
+
+    The rule must read the quantity turn the re-ask actually follows, not the first one in the segment. Reading the
+    earliest turn inverts both orders. An unclear first answer with a clear repeat must stay Fatal because the re-ask
+    follows the clear turn; the earliest-turn check excused it as NonFatal. A clear first answer with an unclear
+    repeat must be NonFatal because the re-ask follows the unclear turn; the earliest-turn check graded it Fatal.
+    """
+    bots = [bt(0, "quantity"), bt(4, "quantity")]
+    users = [UserTurnLabel(idx=1, gave_value_for="quantity"), UserTurnLabel(idx=3, gave_value_for="quantity")]
+    # unclear earliest answer, clear repeat: the re-ask follows the clear turn -> Fatal, no captured quantity
+    call = mk_call(12)
+    call.turns[1].audio_unclear = True
+    f = _missed95(call, bots, users, kept=None)
+    assert f.status == "Fatal" and f.onset_turn == 4
+    # clear earliest answer, unclear repeat: the re-ask follows the unclear turn -> NonFatal
+    call2 = mk_call(12)
+    call2.turns[3].audio_unclear = True
+    f2 = _missed95(call2, bots, users, kept=None)
+    assert f2.status == "NonFatal" and "unclear" in f2.reason
+
+
+def test_95_qty_captured_compares_converted_values_with_a_tolerance():
+    """A captured quantity that matches after unit conversion must count as captured despite float rounding.
+
+    "0.7 kg" converted into grams is 700.0000000000001, so exact equality called a correct capture missing and
+    graded an unanswered re-ask Fatal. The lead is right, so the fault is at most NonFatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said="0.7 kg", kept="700 g")
+    assert f.status == "NonFatal" and f.onset_turn == 2
 
 
 def test_95_unanswered_reask_with_no_captured_quantity_stays_fatal():
