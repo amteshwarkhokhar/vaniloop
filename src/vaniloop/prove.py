@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,11 @@ class Plan:
     def max_replays(self) -> int:
         """Old and new for every target and seed, plus per guard one NEW replay and two more on a NEW Fatal."""
         return 2 * len(self.targets) * self.k + 3 * len(self.guards)
+
+    @property
+    def warm_replays(self) -> int:
+        """What --workers computes ahead: old and new for every target and seed, one NEW seed-0 replay per guard."""
+        return 2 * len(self.targets) * self.k + len(self.guards)
 
 
 @dataclass
@@ -178,6 +184,38 @@ def real_audit_fn(call: CallRecord) -> AuditRecord:
     return audit_call(call, extract_ledger(call))
 
 
+def warm_cache(plan: Plan, replay_fn: ReplayFn, audit_fn: AuditFn, workers: int) -> int:
+    """Run every first-round replay and its audit in a thread pool, so the sequential gate reads them from the cache.
+
+    The jobs follow the gate's own order (seed-major), so the replays it needs first finish first. Nothing is
+    recorded here: only the gate's own calls write rows. A failed job is printed and skipped, and the gate runs it
+    again. Returns the number of failed jobs.
+    """
+    jobs = [(item, bot_prompt, seed) for seed in range(plan.k) for item in plan.targets
+            for bot_prompt in (plan.old_prompt, plan.new_prompt)]  # fmt: skip
+    jobs += [(item, plan.new_prompt, 0) for item in plan.guards]
+
+    def work(job):
+        (call, ledger, fork), bot_prompt, seed = job
+        audit_fn(replay_fn(call, ledger, fork, bot_prompt, seed).call)
+
+    failed = 0
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="warm")
+    try:
+        futures = {pool.submit(work, job): job for job in jobs}
+        for future in as_completed(futures):
+            error = future.exception()
+            if error is not None:
+                (call, _, _), bot_prompt, seed = futures[future]
+                failed += 1
+                label = "old" if bot_prompt == plan.old_prompt else "new"
+                print(f"warm-up failed (the gate runs it again): {call.call_id} {label} seed {seed}: "
+                      f"{type(error).__name__}: {str(error)[:200]}")  # fmt: skip
+    finally:  # a stopped run (Ctrl-C) must not start the replays still queued
+        pool.shutdown(wait=True, cancel_futures=True)
+    return failed
+
+
 def run_prove(
     cause_id: str,
     prompt_path: Path,
@@ -185,6 +223,7 @@ def run_prove(
     k: int = 3,
     guards: int = 10,
     max_turns: int = 12,
+    workers: int = 1,
     dry_run: bool = False,
     calls_path: Path = CALLS_PATH,
     ledgers_path: Path = LEDGERS_PATH,
@@ -199,6 +238,8 @@ def run_prove(
     """Check, pick calls, then (unless dry_run) replay, decide and record. Every stop comes before the first replay.
 
     A run writes one gates row and one replays row per replay. A dry run makes no LLM call and writes no file.
+    With workers > 1 the first-round replays are computed in a thread pool before the gate starts (see warm_cache);
+    the gate and the rows stay the same, only the wall time shrinks.
     """
     if not cause_id.startswith("cause_"):
         raise SystemExit(f"cause id '{cause_id}' does not look like cause_<parameter>")
@@ -207,6 +248,8 @@ def run_prove(
         raise SystemExit(f"{cause_id} needs audio timing and a text replay has none, so the gate cannot judge it")
     if k < 2:
         raise SystemExit(f"--k must be at least 2, got {k}")
+    if workers < 1:
+        raise SystemExit(f"--workers must be at least 1, got {workers}")
     old, new = build_prompts(cause_id, prompt_path, patches_path)
     calls = {
         r["call_id"]: CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)
@@ -257,7 +300,15 @@ def run_prove(
         written += 1
         return audit
 
-    costs_before = len(read_jsonl(llm.COSTS_PATH))
+    costs_before = len(read_jsonl(llm.COSTS_PATH))  # before the warm-up: its replays are part of this run's cost
+    if workers > 1:
+        print(
+            f"warm-up: {plan.warm_replays} replays, each with its audit, on {workers} workers before the gate. "
+            f"The gate stops early on a futility reject or on unresolved seed-0 evidence, and then never needs "
+            f"some of them; warming has already paid for those."
+        )
+        failed = warm_cache(plan, replay_fn, audit_fn, workers)
+        print(f"warm-up done: {plan.warm_replays - failed} of {plan.warm_replays} ok, {failed} failed")
     result = gate.run_gate(
         cause_id,
         plan.parameter,

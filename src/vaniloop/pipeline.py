@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--k", type=int, default=3)
     pv.add_argument("--guards", type=int, default=10)
     pv.add_argument("--max-turns", type=int, default=12)
+    pv.add_argument("--workers", type=int, default=1)
     pv.add_argument("--dry-run", action="store_true")
     g = sub.add_parser("grade-sample")
     g.add_argument("--n", type=int, default=20)
@@ -179,6 +180,7 @@ def main(argv: list[str] | None = None) -> None:
             k=args.k,
             guards=args.guards,
             max_turns=args.max_turns,
+            workers=args.workers,
             dry_run=args.dry_run,
         )
         print("\n".join(describe(out)))
