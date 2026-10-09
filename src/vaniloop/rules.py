@@ -412,7 +412,9 @@ def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
 
 def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     """VANI prompt L1261: a valid quantity is stored and the bot moves on WITHOUT a read-back, so a missing read-back
-    is not a fault. It is a miss only if the bot asked for quantity again after the buyer gave it (ignored)."""
+    is not a fault. A re-ask after the buyer gave it is a fault. It is Fatal only if the buyer never gives the
+    quantity again: then the lead likely has none. A re-ask the buyer answers costs a turn but loses nothing,
+    so it is NonFatal (official Fatal definition: wrong or missing buyer info in the lead)."""
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said:
         return Finding(
@@ -442,13 +444,23 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
             )
     reasked.sort()
     if reasked:
+        r = reasked[0]
+        if any(g > r and seg(g) == seg(r) for g in gave):
+            return Finding(
+                parameter="qty_missed",
+                status="NonFatal",
+                basis="spoken_proxy",
+                onset_turn=r,
+                reason=f"buyer said quantity '{said}', the bot asked again and the buyer repeated it",
+                evidence=[_ev(call, r)],
+            )
         return Finding(
             parameter="qty_missed",
             status="Fatal",
             basis="spoken_proxy",
-            onset_turn=reasked[0],
+            onset_turn=r,
             reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
-            evidence=[_ev(call, reasked[0])],
+            evidence=[_ev(call, r)],
         )
     return Finding(
         parameter="qty_missed",

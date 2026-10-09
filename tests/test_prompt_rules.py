@@ -100,6 +100,17 @@ def test_qty_missed_fatal_when_bot_asks_again_after_buyer_answer():
     assert f.status == "Fatal" and f.onset_turn == 2
 
 
+def test_qty_missed_nonfatal_when_the_buyer_repeats_after_the_reask():
+    """A re-ask the buyer answers again is NonFatal at the re-ask turn: the quantity still reaches the lead.
+
+    Found on 7 real calls where the bot misheard once and then captured the right value. As Fatal they
+    inflated the Fatal rate against the human audit.
+    """
+    u = [UserTurnLabel(idx=1, gave_value_for="quantity"), UserTurnLabel(idx=3, gave_value_for="quantity")]
+    f = _missed([bt(0, "quantity"), bt(2, "quantity"), bt(4, "city")], u, kept="10")
+    assert f.status == "NonFatal" and f.onset_turn == 2
+
+
 def test_qty_missed_unknown_without_a_label_for_the_answer():
     """With no label marking a buyer answer as a quantity, qty_missed must be Unknown, not Pass or Fatal.
 
@@ -322,8 +333,8 @@ def test_qty_missed_ignores_quantity_ask_for_a_new_product():
         product_changed_at_turn=3,
     )
     assert by(audit_call(call, led))["qty_missed"].status == "Pass"
-    led.product_changed_at_turn = None  # without the change the second ask looks like an ignored answer
-    assert by(audit_call(call, led))["qty_missed"].status == "Fatal"
+    led.product_changed_at_turn = None  # without the change the second ask is a re-ask; the buyer answered it
+    assert by(audit_call(call, led))["qty_missed"].status == "NonFatal"
 
 
 def test_qty_missed_still_fatal_when_reasked_inside_the_new_segment():
