@@ -9,6 +9,7 @@ import types
 import pytest
 
 from vaniloop import llm as llm_mod
+from vaniloop.llm import BudgetExceeded
 from vaniloop.models import BotTurnLabel, CallRecord, Ledger, Turn, UserTurnLabel
 from vaniloop.replay import BOT_FORMAT, UNCLEAR_TEXT, BuyerBrief, buyer_brief, replay, replay_id, replay_result
 from vaniloop.rules import audit_call
@@ -205,9 +206,11 @@ def test_provider_kwargs_carry_temperature_seed_and_retries(monkeypatch, tmp_pat
 
 
 def test_replay_passes_temperature_seed_no_retries():
-    """Regression for review round 1 finding: replay must pass temperature and seed and disable provider retries.
+    """Regression for review round 1 finding: replay must pass temperature and seed, retry a bad reply twice and
+    leave SDK transport retries off.
 
-    A missing setting would make the fork reproducibly different from the run it is compared against.
+    A missing setting would make the fork reproducibly different from the run it is compared against, and
+    retries=0 would let one malformed reply end a paid run.
     """
     kws = []
 
@@ -216,7 +219,7 @@ def test_replay_passes_temperature_seed_no_retries():
         return {"text": "x", "end_call": False, "hang_up": False}
 
     replay(mk_call(), 4, "P", brief(), max_turns=2, seed=9, llm=llm)
-    assert all(k["temperature"] == 0.7 and k["seed"] == 9 and k["retries"] == 0 and k["max_retries"] == 0 for k in kws)
+    assert all(k["temperature"] == 0.7 and k["seed"] == 9 and k["retries"] == 2 and k["max_retries"] == 0 for k in kws)
 
 
 def test_adversarial_goal_stays_out_of_system_prompts():
@@ -464,3 +467,91 @@ def test_bot_format_tells_the_bot_that_a_handoff_or_closing_line_ends_the_call()
     replay(mk_call(), 4, "PROMPT", brief(), max_turns=1, llm=stub([("naam?", False)], log=log))
     assert log[0][1].endswith(BOT_FORMAT)
     assert "handoff" in BOT_FORMAT and "closing" in BOT_FORMAT and "end_call true" in BOT_FORMAT
+
+
+# ---- malformed replies (#59) ----
+
+
+def test_malformed_reply_is_retried_and_a_stable_cache_hit(monkeypatch, tmp_path):
+    """A model reply that fails once must be asked again and give a normal replay, with only the valid reply cached.
+
+    With retries=0 one unterminated string or proxy error page ends the gate run with no result. Caching a bad
+    reply would make the next run repeat the failure instead of hitting the stored good turn.
+    """
+    replies = ["{'text': 'naam?'", '{"text": "naam?", "end_call": true}']
+    calls = []
+
+    class Comp:
+        def create(self, **kw):
+            calls.append(kw)
+            msg = types.SimpleNamespace(content=replies[min(len(calls) - 1, 1)])
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+    class Client:
+        def __init__(self, **kw):
+            self.chat = types.SimpleNamespace(completions=Comp())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=Client))
+    monkeypatch.setattr(llm_mod, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(llm_mod, "COSTS_PATH", tmp_path / "costs.jsonl")
+    monkeypatch.delenv("LLM_BUDGET_USD", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "http://x")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    r = replay_result(mk_call(), 4, "P", brief(), max_turns=1)
+    assert r.ended_by == "end_call" and r.call.turns[-1].text == "naam?" and len(calls) == 2
+    again = replay_result(mk_call(), 4, "P", brief(), max_turns=1)  # served from the cache: no new request
+    assert again.call == r.call and len(calls) == 2
+
+
+def test_stub_failing_once_then_answering_gives_a_normal_replay():
+    """A stub that raises RuntimeError once and then answers must still give a normal replay of the same turns.
+
+    This protects the contract that the llm callable owns the retry: replay must pass retries above zero.
+    """
+    seen = []
+
+    def llm(system, user, **kw):
+        seen.append(kw["retries"])
+        if len(seen) == 1 and kw["retries"] == 0:
+            raise RuntimeError("model returned unparseable or invalid JSON after 1 tries")
+        return {"text": "naam?", "end_call": True}
+
+    r = replay_result(mk_call(), 4, "P", brief(), llm=llm)
+    assert r.ended_by == "end_call" and [t.text for t in r.call.turns[4:]] == ["naam?"]
+
+
+def test_a_reply_that_keeps_failing_ends_as_invalid_output_without_raising():
+    """A reply that keeps raising RuntimeError must end the replay as invalid_output, keep the turns so far, not raise.
+
+    The gate counts invalid_output as a failed trial. An exception would end the run with no gate result after
+    the paid warm-up, which is what happened on the qty_missed gate.
+    """
+
+    def always_bad(system, user, **kw):
+        raise RuntimeError("model returned unparseable or invalid JSON after 3 tries")
+
+    r = replay_result(mk_call(), 4, "P", brief(), llm=always_bad)
+    assert r.ended_by == "invalid_output" and len(r.call.turns) == 4
+    calls = [0]
+
+    def bad_on_buyer(system, user, **kw):
+        calls[0] += 1
+        if kw["cache_tag"].startswith("replay:user"):
+            raise RuntimeError("proxy 502")
+        return {"text": "naam?", "end_call": False}
+
+    r = replay_result(mk_call(), 4, "P", brief(), llm=bad_on_buyer)
+    assert r.ended_by == "invalid_output" and [t.speaker for t in r.call.turns[4:]] == ["bot"]
+
+
+def test_a_budget_stop_still_raises():
+    """BudgetExceeded from the LLM must propagate out of replay_result, not become invalid_output.
+
+    It is a RuntimeError subclass. Swallowing it would let a run go on past the spend cap while it looks inconclusive.
+    """
+
+    def over_budget(system, user, **kw):
+        raise BudgetExceeded("LLM budget reached")
+
+    with pytest.raises(BudgetExceeded):
+        replay_result(mk_call(), 4, "P", brief(), llm=over_budget)

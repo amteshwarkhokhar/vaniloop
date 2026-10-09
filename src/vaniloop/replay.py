@@ -16,10 +16,11 @@ import random
 from pydantic import BaseModel, Field
 
 from .ledger import render_transcript
-from .llm import complete_json
+from .llm import BudgetExceeded, complete_json
 from .models import CallRecord, Ledger, Turn
 
 SEC_PER_TURN = 6.0
+LLM_RETRIES = 2  # a malformed reply is asked again; only valid replies are cached, so a retried turn is a stable hit
 TEMPERATURE = 0.7
 BUYER_SYSTEM = (
     "You play a buyer on a phone call with a voice bot. The user message contains a JSON data block "
@@ -132,11 +133,17 @@ def replay_result(
         history = CallRecord(call_id=call.call_id, duration_sec=0, turns=turns)
         seen = _heard(turns, unclear) if speaker == "bot" else history
         block = _data_block(render_transcript(seen), brief if speaker == "user" else None)
-        kw = dict(validate=_is_dict, temperature=TEMPERATURE, seed=seed, retries=0, max_retries=0)
-        if speaker == "bot":
-            out = llm(bot_prompt, f"{block}\n\n{BOT_FORMAT}", cache_tag=f"replay:bot:{ns}", **kw)
-        else:
-            out = llm(BUYER_SYSTEM, f"{block}\n\nYour next line (JSON only):", cache_tag=f"replay:user:{ns}", **kw)
+        kw = dict(validate=_is_dict, temperature=TEMPERATURE, seed=seed, retries=LLM_RETRIES, max_retries=0)
+        try:
+            if speaker == "bot":
+                out = llm(bot_prompt, f"{block}\n\n{BOT_FORMAT}", cache_tag=f"replay:bot:{ns}", **kw)
+            else:
+                out = llm(BUYER_SYSTEM, f"{block}\n\nYour next line (JSON only):", cache_tag=f"replay:user:{ns}", **kw)
+        except BudgetExceeded:
+            raise  # a budget stop must end the run
+        except RuntimeError:  # the model kept returning malformed replies after the retries
+            ended_by = "invalid_output"
+            break
         text = out.get("text") if isinstance(out, dict) else None
         if not isinstance(text, str):
             ended_by = "invalid_output"
