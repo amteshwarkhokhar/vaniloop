@@ -27,11 +27,17 @@ def server():
     thread.join(timeout=5)
 
 
-def get(srv, path: str):
-    """GET a raw path with http.client, which sends it unchanged (no dot-segment cleanup)."""
+def get(srv, path: str, host: str | None = ...):
+    """GET a path with http.client. host='' really omits Host (putrequest), because request() would add it back."""
     conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
     try:
-        conn.request("GET", path)
+        if host is ...:
+            conn.request("GET", path)
+        else:
+            conn.putrequest("GET", path, skip_host=True)
+            if host:
+                conn.putheader("Host", host)
+            conn.endheaders()
         resp = conn.getresponse()
         return resp.status, resp.getheader("Content-Type") or "", resp.read()
     finally:
@@ -42,6 +48,149 @@ def get_json(srv, path: str):
     status, ctype, body = get(srv, path)
     assert "application/json" in ctype
     return status, json.loads(body)
+
+
+def test_static_nul_byte_returns_400(server):
+    """A NUL byte in a static path is a 400 before any filesystem call; resolve() raises on NUL and kills the GET."""
+    status, ctype, body = get(server, "/static/%00")
+    assert status == 400
+    assert "application/json" in ctype
+    assert json.loads(body) == {"error": "bad request"}
+
+
+def test_calls_survive_malformed_rows(tmp_path):
+    """A bad audit row must not drop the /api/calls or /api/call connection; the valid rows stay there."""
+    lines = [
+        json.dumps({"call_id": [], "verdict": "Fatal"}),
+        json.dumps(
+            {
+                "call_id": "good_1",
+                "verdict": "Fatal",
+                "scope": "bl_collection",
+                "findings": [
+                    {"parameter": "looping", "status": "NonFatal", "onset_turn": 2},
+                    {"parameter": "intent", "status": "Fatal", "onset_turn": 8},
+                ],
+            }
+        ),
+        json.dumps({"call_id": "bad_findings", "verdict": "NonFatal", "findings": {"status": "Fatal"}}),
+        json.dumps({"call_id": "bad_finding", "verdict": "NonFatal", "findings": [42, {"status": "Unknown"}]}),
+    ]
+    (tmp_path / "audits.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / "calls.jsonl").write_text(
+        json.dumps({"call_id": "good_1", "turns": "x", "silences": 7})
+        + "\n"
+        + json.dumps({"call_id": 9, "duration_sec": 1.0})
+        + "\n",
+        encoding="utf-8",
+    )
+    srv = web.make_server(0, tmp_path)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, rows = get_json(srv, "/api/calls")
+        assert status == 200
+        assert [r["call_id"] for r in rows] == ["good_1", "bad_findings", "bad_finding"]
+        assert rows[0]["first_fault"] == {"parameter": "looping", "status": "NonFatal", "reason": None}
+        status, body = get_json(srv, "/api/call/good_1")
+        assert status == 200
+        assert body["call"].get("turns") == [] and body["call"].get("silences") == []
+        assert body["audit"]["findings"][0] == {"parameter": "looping", "status": "NonFatal", "onset_turn": 2}
+        status, body = get_json(srv, "/api/call/bad_findings")
+        assert status == 200 and body["audit"]["findings"] == []
+        status, _ = get_json(srv, "/api/summary")
+        assert status == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+def test_first_fault_picks_earliest_onset_then_fatal():
+    """first_fault picks the earliest failing onset, even when a later finding is Fatal; severity-first picks turn 8."""
+    audit = {
+        "findings": [
+            {"parameter": "later_fatal", "status": "Fatal", "onset_turn": 8},
+            {"parameter": "early", "status": "NonFatal", "onset_turn": 2},
+        ]
+    }
+    assert web._first_fault(audit) == {"parameter": "early", "status": "NonFatal", "reason": None}
+
+
+def test_first_fault_breaks_ties_by_fatal_before_nonfatal():
+    """Two failing findings on the same turn must pick the Fatal one; the tie break decides what the UI calls out."""
+    audit = {
+        "findings": [
+            {"parameter": "nf", "status": "NonFatal", "onset_turn": 5},
+            {"parameter": "ftl", "status": "Fatal", "onset_turn": 5},
+        ]
+    }
+    assert web._first_fault(audit)["parameter"] == "ftl"
+
+
+def test_first_fault_put_findings_without_onset_last():
+    """A failing finding with no onset must lose to one with an onset and serialise its None reason as null."""
+    audit = {
+        "findings": [
+            {"parameter": "no_onset", "status": "Fatal"},
+            {"parameter": "late", "status": "NonFatal", "onset_turn": 9},
+        ]
+    }
+    assert web._first_fault(audit) == {"parameter": "late", "status": "NonFatal", "reason": None}
+
+
+def test_calls_sorts_unknown_durations_last(tmp_path):
+    """NaN, inf and missing durations sort as unknown, last per verdict, serialised as null; a bad compare raises."""
+    audits = "\n".join(json.dumps({"call_id": c, "verdict": "Pass"}) for c in ("nan", "inf", "ok_10", "ok_100"))
+    calls = "\n".join(
+        json.dumps(c)
+        for c in (
+            {"call_id": "nan", "duration_sec": float("nan")},
+            {"call_id": "inf", "duration_sec": float("inf")},
+            {"call_id": "ok_10", "duration_sec": 10},
+            {"call_id": "ok_100", "duration_sec": 100},
+        )
+    )
+    (tmp_path / "audits.jsonl").write_text(audits + "\n", encoding="utf-8")
+    (tmp_path / "calls.jsonl").write_text(calls + "\n", encoding="utf-8")
+    srv = web.make_server(0, tmp_path)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, rows = get_json(srv, "/api/calls")
+        assert status == 200
+        assert [r["duration_sec"] for r in rows] == [100, 10, None, None]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+def test_host_allowlist_blocks_rebound_dns(server):
+    """A non-loopback Host header must get 403, forbidden host, on every route; a rebound name would read the API."""
+    for path in ("/api/calls", "/api/summary", "/api/call/web_01"):
+        status, ctype, body = get(server, path, host="attacker.example:8765")
+        assert status == 403
+        assert "application/json" in ctype
+        assert json.loads(body) == {"error": "forbidden host"}
+    assert get(server, "/", host="attacker.example:8765")[0] == 403
+
+
+def test_missing_host_header_gets_403(server):
+    """A request without any Host header must get 403 ("forbidden host"); a bare client could still read the API."""
+    status, _, body = get(server, "/api/calls", host="")
+    assert status == 403
+    assert json.loads(body) == {"error": "forbidden host"}
+
+
+def test_loopback_hosts_pass_the_allowlist(server):
+    """127.0.0.1, localhost and [::1] remain in, in the bare form and with a port; the browser must keep working."""
+    for host in ("127.0.0.1", "localhost", "[::1]", "127.0.0.1:8765", "LOCALHOST"):
+        assert web.host_allowed(host) is True
+    assert web.host_allowed("attacker.example") is False
+    for host in ("127.0.0.1", "localhost", "127.0.0.1:8765", "[::1]:8765"):
+        status, _, _ = get(server, "/api/calls", host=host)
+        assert status == 200
 
 
 def test_server_binds_to_loopback_only(server):

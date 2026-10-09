@@ -27,6 +27,8 @@ DEFAULT_PORT = 8765
 IST = timezone(timedelta(hours=5, minutes=30))
 VERDICTS = ("Fatal", "NonFatal", "NeedsReview", "Pass")
 SEVERITY = {v: i for i, v in enumerate(VERDICTS)}
+ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+LIST_FIELDS = ("findings", "turns", "silences")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 
 
@@ -47,22 +49,45 @@ def clean(value):
     return value
 
 
+def _valid(rows: list[dict]) -> list[dict]:
+    """Keep rows a route can use: a non-empty string call_id and, where present, list-shaped list fields."""
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cid = row.get("call_id")
+        if not isinstance(cid, str) or not cid:
+            continue
+        for name in LIST_FIELDS:
+            value = row.get(name)
+            if value is not None and not isinstance(value, list):
+                row[name] = []
+        out.append(row)
+    return out
+
+
 def _audits(d: Path) -> list[dict]:
-    return dedupe_by_call_id(read_jsonl(d / "audits.jsonl"))
+    return dedupe_by_call_id(_valid(read_jsonl(d / "audits.jsonl")))
 
 
 def _calls(d: Path) -> dict[str, dict]:
-    return {r["call_id"]: r for r in dedupe_by_call_id(read_jsonl(d / "calls.jsonl"))}
+    return {r["call_id"]: r for r in _valid(dedupe_by_call_id(read_jsonl(d / "calls.jsonl")))}
 
 
 def _first_fault(audit: dict) -> dict | None:
-    """The finding to show on a call row: the worst failing finding, earliest onset first. Unknown if none fails."""
+    """The showing fault: earliest failing onset, ties Fatal first, no-onset last. Unknown if no finding fails."""
     findings = [f for f in audit.get("findings") or [] if isinstance(f, dict)]
     failing = [f for f in findings if f.get("status") in ("Fatal", "NonFatal")]
     pool = failing or [f for f in findings if f.get("status") == "Unknown"]
     if not pool:
         return None
-    pool.sort(key=lambda f: (f.get("status") != "Fatal", f.get("onset_turn") is None, f.get("onset_turn") or 0))
+
+    def order(f: dict):
+        onset = f.get("onset_turn")
+        has_onset = isinstance(onset, (int, float)) and not isinstance(onset, bool) and math.isfinite(onset)
+        return (not has_onset, float(onset) if has_onset else 0, SEVERITY.get(f.get("status"), len(SEVERITY)))
+
+    pool.sort(key=order)
     f = pool[0]
     return {"parameter": f.get("parameter"), "status": f.get("status"), "reason": f.get("reason")}
 
@@ -119,8 +144,36 @@ def calls(d: Path) -> list[dict]:
                 "first_fault": _first_fault(a),
             }
         )
-    rows.sort(key=lambda r: (SEVERITY.get(r["verdict"], len(SEVERITY)), -(r["duration_sec"] or 0)))
+    rows.sort(key=lambda r: (SEVERITY.get(r["verdict"], len(SEVERITY)), *duration_key(r["duration_sec"])))
     return rows
+
+
+def duration_key(value):
+    """Sort key for duration_sec: finite numbers descending, anything else unknown and last (it serialises as null)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return (1, 0)
+    return (0, -float(value))
+
+
+def host_name(host: str | None) -> str | None:
+    """The host part of a Host header with any port removed, including IPv6 literals like [::1]:8765."""
+    if not host:
+        return None
+    if host.startswith("["):
+        end = host.find("]")
+        if end == -1:
+            return None
+        return host[1:end]
+    name, sep, port = host.rpartition(":")
+    if not sep or not port.isdigit() or not name:
+        return host
+    return name
+
+
+def host_allowed(host: str | None) -> bool:
+    """True only when the Host header names loopback, so a rebound DNS name cannot read the API."""
+    name = host_name(host)
+    return name is not None and name.lower() in ALLOWED_HOSTS
 
 
 def call_detail(d: Path, call_id: str) -> dict | None:
@@ -170,10 +223,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, body, "application/json; charset=utf-8")
 
     def _static(self, rel: str) -> None:
-        """Serve a file from STATIC_DIR. Anything that resolves outside it is refused with 403."""
+        """Serve a file from STATIC_DIR. A NUL byte is a bad request; anything resolving outside is refused with 403."""
+        if "\x00" in rel:
+            self._json({"error": "bad request"}, 400)
+            return
         base = STATIC_DIR.resolve()
         target = (base / rel).resolve()
-        if not target.is_relative_to(base) or ".." in Path(rel).parts or "\x00" in rel:
+        if not target.is_relative_to(base) or ".." in Path(rel).parts:
             self._json({"error": "forbidden"}, 403)
         elif not target.is_file():
             self._json({"error": "not found"}, 404)
@@ -182,6 +238,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, target.read_bytes(), ctype)
 
     def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+        if not host_allowed(self.headers.get("Host")):
+            self._json({"error": "forbidden host"}, 403)
+            return
         path = unquote(urlsplit(self.path).path)
         d = self.data
         if path in ("/", "/index.html"):
