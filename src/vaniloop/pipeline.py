@@ -201,8 +201,9 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("regrade")
     sub.add_parser("categorize")
     f = sub.add_parser("fix")
-    f.add_argument("--prompt", required=True)
+    f.add_argument("--prompt", default=None, help="the VANI prompt file; not needed with --dry-run")
     f.add_argument("--top", type=int, default=3)
+    f.add_argument("--dry-run", action="store_true", help="list patch / ticket / watch per cause; no LLM call")
     rf = sub.add_parser("refix")
     rf.add_argument("--cause", required=True)
     rf.add_argument("--prompt", required=True)
@@ -245,10 +246,25 @@ def main(argv: list[str] | None = None) -> None:
             f"-> {CATEGORIES_PATH}"
         )
     elif args.cmd == "fix":
-        r = run_fix(prompt_path=Path(args.prompt), top_n=args.top)
-        print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
+        if args.prompt is None and not args.dry_run:
+            ap.error("fix needs --prompt unless --dry-run")
+        kw = {"prompt_path": Path(args.prompt)} if args.prompt else {}
+        r = run_fix(causes_path=CAUSES_PATH, out_path=PATCHES_PATH, top_n=args.top, dry_run=args.dry_run, **kw)
+        if args.dry_run:
+            for x in r["plan"]:
+                print(f"  {x['action']:6} {x['cause_id']} [{x['status']}] type={x['type']} "
+                      f"suspected={x['suspected_type'] or '-'}: {x['why']}")  # fmt: skip
+            return
+        print(
+            f"{len(r['patches'])} patches, {len(r['rejected'])} rejected, {len(r['tickets'])} tickets, "
+            f"{len(r['watched'])} watched -> {PATCHES_PATH}"
+        )
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")
+        for cid in r["tickets"]:
+            print(f"  ticket {cid}: runs/tickets/{cid}.md")
+        for cid in r["watched"]:
+            print(f"  watch {cid}")
     elif args.cmd == "refix":
         r = run_refix(args.cause, Path(args.prompt))
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
@@ -267,6 +283,7 @@ def main(argv: list[str] | None = None) -> None:
             workers=args.workers,
             dry_run=args.dry_run,
             attempt=args.attempt,
+            causes_path=CAUSES_PATH,
         )
         print("\n".join(describe(out)))
     elif args.cmd == "rootcause":

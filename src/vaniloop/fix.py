@@ -1,4 +1,4 @@
-"""FIX: one small, verbatim-anchored prompt edit per ranked cause."""
+"""FIX: one small, verbatim-anchored prompt edit per patchable cause; an evidence ticket per tool or data cause."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+from collections import Counter
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -23,6 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 PATCHES_PATH = ROOT / "runs" / "patches.json"
 GATES_PATH = ROOT / "runs" / "gates.jsonl"  # same files as prove.py; fix cannot import prove (prove imports fix)
 REPLAYS_PATH = ROOT / "runs" / "replays.jsonl"
+TICKETS_DIR = ROOT / "runs" / "tickets"
+TICKET_TYPES = ("tool", "data")  # suspected_type values that a prompt edit cannot fix: they get a ticket, no patch
+AUDIO_PARAMETERS = {"dead_air"}  # judged from audio silences: a delay is a runtime issue, a text replay has none
 MAX_CHANGED_LINES = 15
 MAX_ATTEMPTS = 2  # patch attempts per cause; prove gates each at alpha / MAX_ATTEMPTS (Bonferroni over the looks)
 MAX_EXAMPLES = 3  # evidence quotes sent per cause
@@ -31,6 +35,7 @@ MAX_REFIX_EVIDENCE = 4  # failing NEW-prompt replay lines sent to a refix
 EVIDENCE_PART_CHARS = 70  # reason and bot line each, so one evidence line stays under EXAMPLE_CHARS
 REJECTED_OLD_CHARS = 300  # how much of a rejected anchor is kept in the rejected row
 _LINE_NUMBER = re.compile(r"^\d+: ", re.M)  # the "N: " prefix of the numbered prompt view
+_PHONE_LIKE = re.compile(r"\+?\d[\d \-]{5,}\d")  # a run of 7+ digits: redacted from ticket quotes
 
 SYSTEM = (
     "You edit the system prompt of VANI, a voice bot that calls buyers. "
@@ -183,6 +188,8 @@ def propose_patch(
 
     if cause.type == "channel":  # bad audio is never patched, whatever its status says (#71)
         return reject("channel cause: bad audio is not fixed with a prompt patch")
+    if cause.parameter in AUDIO_PARAMETERS:  # prove cannot gate it, so a patch would be unprovable
+        return reject(f"{cause.parameter} is an audio-timing cause: a delay is a runtime issue, not a prompt patch")
     try:
         system = SYSTEM if previous is None else SYSTEM + REFIX_SYSTEM
         out = llm(system, _user_message(cause, examples, prompt_text, previous), **_retry_kwargs(llm))
@@ -235,6 +242,110 @@ def apply_patch(prompt_text: str, patch: PromptPatch) -> str:
     return prompt_text.replace(patch.old_text, patch.new_text, 1)
 
 
+def route(cause: Cause) -> tuple[str, str]:
+    """Decide what the fix stage does with a cause. Returns (action, why); action is patch, ticket or watch.
+
+    watch: a channel cause (bad audio), an audio-timing cause (dead_air: a delay is a runtime issue and prove has no
+    audio to judge it), or a status outside FIXABLE_STATUSES (outlier, single_category, watch, isolated). Neither a
+    patch nor a ticket is written. run_fix also moves a patch cause with no usable evidence here.
+    ticket: a fixable cause whose suspected_type is tool or data. Evidence goes to runs/tickets, no patch.
+    patch: every other fixable cause. That includes flow_logic causes such as looping, because `type` alone does
+    not say the prompt is innocent: only suspected_type tool or data does.
+    """
+    if cause.type == "channel":
+        return "watch", "channel cause: bad audio"
+    if cause.parameter in AUDIO_PARAMETERS:
+        return "watch", f"{cause.parameter}: a delay is a runtime issue, not a prompt issue"
+    if cause.status not in FIXABLE_STATUSES:
+        return "watch", f"status {cause.status}"
+    if cause.suspected_type in TICKET_TYPES:
+        return "ticket", f"suspected {cause.suspected_type}: a prompt edit does not fix it"
+    return "patch", "prompt-side cause"
+
+
+def require_not_ticket(cause_id: str, causes_path: Path) -> None:
+    """Stop with SystemExit when causes.json holds this cause with suspected_type tool or data.
+
+    refix and a real prove call this before any LLM call. A missing file or cause is not refused here.
+    """
+    try:
+        raw = json.loads(Path(causes_path).read_text(encoding="utf-8")).get("causes", [])
+    except (OSError, ValueError, AttributeError):
+        return
+    row = next((c for c in raw if isinstance(c, dict) and c.get("cause_id") == cause_id), None)
+    if row is not None and row.get("suspected_type") in TICKET_TYPES:
+        raise SystemExit(
+            f"{cause_id} is a {row['suspected_type']} cause: it gets an evidence ticket "
+            f"(runs/tickets/{cause_id}.md), not a patch, a refix or a gate run"
+        )
+
+
+def require_patchable(cause_id: str, causes_path: Path) -> None:
+    """require_fixable (status, channel) plus require_not_ticket (tool or data). Both stop before any LLM call."""
+    require_not_ticket(cause_id, causes_path)
+    require_fixable(cause_id, causes_path)
+
+
+def require_not_audio(cause: Cause) -> None:
+    """Stop with SystemExit when the cause is judged from audio (dead_air): no patch, no refix, no gate run."""
+    if cause.parameter in AUDIO_PARAMETERS:
+        raise SystemExit(
+            f"{cause.cause_id} is an audio-timing cause ({cause.parameter}): a delay is a runtime issue, "
+            "so it takes no patch, no refix and no gate run"
+        )
+
+
+def _ticket_quote(text: str) -> str:
+    """One line, phone-like digit runs redacted, cut to EXAMPLE_CHARS. Names cannot be detected: see the ticket."""
+    return _PHONE_LIKE.sub("[number]", _one_line(text, 10_000))[:EXAMPLE_CHARS]
+
+
+def ticket_text(cause: Cause, audits: dict[str, AuditRecord], gate_rows: list[dict], category_of) -> str:
+    """The evidence ticket of a tool or data cause, as markdown: calls, onset turns, gate rows, category spread."""
+    members = [*cause.fatal_calls, *cause.nonfatal_calls]
+    lines = [
+        f"# Ticket: {cause.name}",
+        "",
+        f"- cause: {cause.cause_id} (parameter {cause.parameter}, type {cause.type}, status {cause.status})",
+        f"- suspected type: {cause.suspected_type} (informational: a real verdict needs traces)",
+        "- no prompt patch is written for this cause",
+        "",
+        "## Member calls",
+        f"- fatal ({len(cause.fatal_calls)}): {', '.join(cause.fatal_calls) or 'none'}",
+        f"- nonfatal ({len(cause.nonfatal_calls)}): {', '.join(cause.nonfatal_calls) or 'none'}",
+        f"- symptom ({len(cause.symptom_calls)}): {', '.join(cause.symptom_calls) or 'none'}",
+        "",
+        "## Evidence (one line each, phone-like numbers redacted; check names before sharing)",
+    ]
+    for call_id in members:
+        audit = audits.get(call_id)
+        finding = None
+        if audit is not None:
+            finding = next(
+                (f for f in audit.findings if f.parameter == cause.parameter and f.status in ("Fatal", "NonFatal")),
+                None,
+            )
+        if finding is None:
+            lines.append(f"- {call_id}: no failing finding in the audit")
+            continue
+        onset = "unknown" if finding.onset_turn is None else finding.onset_turn
+        quote = next((_ticket_quote(e.quote) for e in finding.evidence if e.quote), "")
+        lines.append(
+            f"- {call_id} [{finding.status}] onset turn {onset}: {_ticket_quote(finding.reason)}"
+            + (f" | quote: {quote}" if quote else "")
+        )
+    spread = Counter(category_of(call_id) for call_id in members)
+    lines += ["", "## Category spread"]
+    lines += [f"- {cat}: {n}" for cat, n in sorted(spread.items(), key=lambda kv: (-kv[1], kv[0]))] or ["- none"]
+    lines += ["", "## Gate rows"]
+    rows = [r for r in gate_rows if r.get("cause_id") == cause.cause_id]
+    lines += [
+        f"- attempt {r.get('attempt', 1)}: {r.get('decision')} ({_one_line(r.get('reason', ''), EXAMPLE_CHARS)})"
+        for r in rows
+    ] or ["- none"]
+    return "\n".join(lines) + "\n"
+
+
 def run_fix(
     causes_path: Path = CAUSES_PATH,
     prompt_path: Path = ROOT / "data" / "reference" / "vani_prompt_sarvam.md",
@@ -242,27 +353,62 @@ def run_fix(
     top_n: int = 3,
     llm=complete_json,
     audits_path: Path = AUDITS_PATH,
+    gates_path: Path = GATES_PATH,
+    tickets_dir: Path = TICKETS_DIR,
+    category_of=None,
+    dry_run: bool = False,
 ) -> dict:
+    """Route each cause (see `route`): patch the first top_n patch causes, write a ticket per tool or data cause.
+
+    A patch cause with no usable evidence (no member call has a failing quote in the audits) is watched instead.
+
+    A dry run only returns {"plan": [...]}: one row per cause with its action, no LLM call and no file written.
+    Otherwise returns {"patches", "rejected", "tickets", "watched"} (the last two are lists of cause ids).
+    """
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
-    ranked = [
-        Cause.model_validate(c)
-        for c in doc.get("causes", [])
-        if c.get("status") in FIXABLE_STATUSES and c.get("type") != "channel"  # a channel cause is never patched
-    ]
-    prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
+    causes = [Cause.model_validate(c) for c in doc.get("causes", [])]
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
+    examples: dict[str, list[str]] = {}
+    routed = []
+    for c in causes:
+        action, why = route(c)
+        if action == "patch":
+            examples[c.cause_id] = evidence_examples(c, audits)
+            if not examples[c.cause_id]:  # no quote to anchor a prompt edit on: do not spend an LLM call on a guess
+                action, why = "watch", "no usable evidence: no member call has a failing quote in the audits"
+        routed.append((c, action, why))
     out = Path(out_path)
     existing = _read_doc(out)
     held: dict[str, int] = {}
     for x in [*existing.get("patches", []), *existing.get("history", [])]:
         held[x.get("cause_id")] = max(held.get(x.get("cause_id"), 0), x.get("attempt", 1))
+    to_patch = [c for c, action, _ in routed if action == "patch"][:top_n]
+    if dry_run:
+        plan = []
+        for c, action, why in routed:
+            if action == "patch" and c not in to_patch:
+                why = f"{why}; beyond --top {top_n}, not patched this run"
+            elif action == "patch" and c.cause_id in held:
+                why = f"{why}; already has attempt {held[c.cause_id]}, use refix"
+            plan.append(
+                {"cause_id": c.cause_id, "action": action, "status": c.status, "type": c.type,
+                 "suspected_type": c.suspected_type, "why": why}
+            )  # fmt: skip
+        return {"plan": plan}
+    tickets = [c for c, action, _ in routed if action == "ticket"]
+    if tickets:
+        category_of = category_of or _default_category_of(Path(causes_path).parent)
+        gate_rows = read_jsonl(Path(gates_path))
+        for c in tickets:
+            _write_text(Path(tickets_dir) / f"{c.cause_id}.md", ticket_text(c, audits, gate_rows, category_of))
+    prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
     rejected: list[dict] = []
     patches = []
-    for cause in ranked[:top_n]:
+    for cause in to_patch:
         if cause.cause_id in held:  # a rerun must not reset attempts or drop history: only refix moves a patch on
             print(f"cause {cause.cause_id} already has attempt {held[cause.cause_id]}; use refix")
             continue
-        p = propose_patch(cause, evidence_examples(cause, audits), prompt_text, llm=llm, rejected=rejected)
+        p = propose_patch(cause, examples[cause.cause_id], prompt_text, llm=llm, rejected=rejected)
         if p is not None:
             patches.append(p)
     lock_path = out.with_name(out.name + ".lock")
@@ -278,7 +424,18 @@ def run_fix(
             _write_doc(out, result)
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
-    return {"patches": result["patches"], "rejected": rejected}
+    return {
+        "patches": result["patches"],
+        "rejected": rejected,
+        "tickets": [c.cause_id for c in tickets],
+        "watched": [c.cause_id for c, action, _ in routed if action == "watch"],
+    }
+
+
+def _default_category_of(runs: Path):
+    from .issue import _call_categories  # same call_id -> category map that `pipeline issues` uses
+
+    return _call_categories(runs)
 
 
 def _read_doc(path: Path) -> dict:
@@ -290,6 +447,13 @@ def _write_doc(out: Path, doc: dict) -> None:
     tmp = out.with_name(out.name + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, out)  # atomic, same pattern as issue.py
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _one_line(text: object, limit: int) -> str:
@@ -339,12 +503,14 @@ def run_refix(
 ) -> dict:
     """Write a second patch for a cause whose patch the gate rejected, from what the replays showed.
 
-    Stops with SystemExit, before any LLM call, when the cause, its patch or its latest gate row is missing, when
-    the patch is already attempt MAX_ATTEMPTS, when the gate shipped the patch, or when that gate row is not for
-    the current patch's attempt. On success the rejected patch moves to `history` (with its gate decision) and
-    the new patch becomes current with attempt + 1. A refused proposal writes nothing and comes back in
-    `rejected`. Returns {"patches": [new patch] or [], "rejected": [...]}.
+    Stops with SystemExit, before any LLM call, when the cause is a tool or data cause (it gets a ticket), when the
+    cause, its patch or its latest gate row is missing, when the patch is already attempt MAX_ATTEMPTS, when the
+    gate shipped the patch, or when that gate row is not for the current patch's attempt. On success the rejected
+    patch moves to `history` (with its gate decision) and the new patch becomes current with attempt + 1. A
+    refused proposal writes nothing and comes back in `rejected`. Returns {"patches": [new patch] or [],
+    "rejected": [...]}.
     """
+    require_not_ticket(cause_id, Path(causes_path))  # first: a tool or data cause takes no patch, so say so
     patches_path = Path(patches_path)
     doc = json.loads(patches_path.read_text(encoding="utf-8")) if patches_path.exists() else {}
     slots = [i for i, x in enumerate(doc.get("patches", [])) if x.get("cause_id") == cause_id]
@@ -372,6 +538,7 @@ def run_refix(
     if cause is None:
         raise SystemExit(f"{cause_id} is not in {causes_path}")
     require_fixable(cause_id, Path(causes_path))  # a demoted cause keeps its old patch but takes no new one
+    require_not_audio(cause)  # prove cannot gate it, so a second patch could never be proven
     previous = {
         "old_text": current.old_text,
         "new_text": current.new_text,
