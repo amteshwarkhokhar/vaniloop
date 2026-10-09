@@ -4,6 +4,7 @@ import pytest
 from test_findings import bt, by, mk_call, mk_led
 
 from vaniloop import issue, rules
+from vaniloop.models import UserTurnLabel
 from vaniloop.rules import audit_call, rule_intent
 
 
@@ -18,27 +19,48 @@ def _refusal(*bots, **kw):
     return call, mk_led(call, list(bots), **kw)
 
 
-def test_refusal_call_that_keeps_collecting_is_fatal_with_onset():
-    """A refusal call where the bot asks for quantity after the buyer's first turn must grade Fatal at that bot turn.
+def test_refusal_call_that_confirms_a_lead_is_fatal_with_onset():
+    """A refusal call where the bot goes on to confirm a lead must grade Fatal at the confirm turn.
 
     This is the buying-intent row of the matrix (always Fatal). A miss would let a lead be posted for a non-buyer.
     """
     call, led = _refusal(bt(0, "greeting"), bt(2, "quantity"), bt(4, "spec", spec_name="brand"), bt(6, "confirm"))
     f = rule_intent(call, led)
-    assert f.status == "Fatal" and f.onset_turn == 2 and f.basis == "spoken_proxy"
-    assert [e.turn_idx for e in f.evidence] == [2]
+    assert f.status == "Fatal" and f.onset_turn == 6 and f.basis == "spoken_proxy"
+    assert [e.turn_idx for e in f.evidence] == [6]
     a = audit_call(call, led)
-    assert a.verdict == "Fatal" and a.first_fault_turn == 2 and by(a)["intent"].status == "Fatal"
+    assert a.verdict == "Fatal" and a.first_fault_turn == 6 and by(a)["intent"].status == "Fatal"
 
 
-@pytest.mark.parametrize("slot", ["quantity", "unit", "spec", "confirm", "handoff"])
-def test_every_collecting_slot_counts_after_the_refusal(slot):
-    """Each of quantity, unit, spec, confirm and handoff, spoken after the first user turn, must grade Fatal.
+@pytest.mark.parametrize("slot", ["confirm", "handoff"])
+def test_confirm_and_handoff_after_the_refusal_are_fatal(slot):
+    """A confirm or a handoff after the first user turn must grade Fatal, because each moves the lead towards posting.
 
-    If one slot were left out, a bot could collect through it and a refusal call would still pass.
+    If one were left out, a bot could post through it and a refusal call would still pass.
     """
     call, led = _refusal(bt(4, slot))
     assert rule_intent(call, led).status == "Fatal" and rule_intent(call, led).onset_turn == 4
+
+
+@pytest.mark.parametrize("slot", ["quantity", "unit", "spec"])
+def test_an_ask_without_a_confirm_is_not_a_refusal_fault(slot):
+    """VANI's normal opening asks for a quantity, unit or spec before the buyer refuses. An ask alone must Pass.
+
+    Grading it Fatal would mark most real refusal calls Fatal and rank intent first by mistake (verifier probe E2).
+    """
+    call, led = _refusal(bt(2, slot), bt(4, "other"))
+    assert rule_intent(call, led).status == "Pass"
+
+
+def test_buyer_who_gives_values_after_refusal_scope_goes_to_review():
+    """If the buyer gives requirement values, the buyer may have changed their mind. Intent must be Unknown, not Fatal.
+
+    A Fatal here would blame the bot for serving a buyer who now wants the item (verifier probe E1).
+    """
+    call, led = _refusal(bt(4, "quantity"), bt(8, "confirm"), users=[UserTurnLabel(idx=5, gave_value_for="quantity")])
+    f = rule_intent(call, led)
+    assert f.status == "Unknown" and f.onset_turn == 8
+    assert audit_call(call, led).verdict == "NeedsReview"
 
 
 def test_refusal_call_that_closes_politely_passes():
@@ -58,7 +80,7 @@ def test_collecting_before_the_first_user_turn_is_not_a_refusal_fault():
 
     Counting it would fail a call for something the bot said before the buyer could refuse.
     """
-    call, led = _refusal(bt(0, "quantity"), bt(2, "other"))
+    call, led = _refusal(bt(0, "handoff"), bt(2, "other"))
     assert rule_intent(call, led).status == "Pass"
 
 
