@@ -19,7 +19,7 @@ button{ font:inherit; color:inherit; background:none; border:0; padding:0; curso
 code,.mono{ font-family:var(--mono); font-variant-numeric:tabular-nums; }
 code{ font-size:.88em; background:var(--slate); border:1px solid var(--seam); border-radius:2px; padding:1px 6px; }
 :focus-visible{ outline:1px solid var(--champagne); outline-offset:3px; border-radius:2px; }
-main:focus{ outline:none; }
+main:focus,h1[tabindex="-1"]:focus{ outline:none; }
 .label{ margin:0; font:500 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--ash); }
 .wrap{ max-width:1240px; margin:0 auto; padding:0 var(--gutter); }
 
