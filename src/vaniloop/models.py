@@ -20,6 +20,11 @@ class Turn(BaseModel):
     start_sec: float
     end_sec: float
     text: str
+    # Audio-only signals from transcription (None = not available, e.g. older transcripts)
+    tone: Literal["calm", "irritated", "confused", "unknown"] | None = None  # user turns
+    overlap: bool | None = None  # this turn started while the other side was still speaking
+    audio_unclear: bool | None = None  # audio too noisy or faint to transcribe with confidence
+    bot_misheard: bool | None = None  # bot turns: the reply shows the bot misunderstood the user's last turn
 
 
 class Silence(BaseModel):
