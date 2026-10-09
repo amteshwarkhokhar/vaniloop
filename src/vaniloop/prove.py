@@ -175,7 +175,7 @@ def _run_cost(rows_before: int, plan: Plan) -> float:
 
 def real_replay_fn(max_turns: int) -> ReplayFn:
     def fn(call: CallRecord, ledger: Ledger, fork: int, bot_prompt: str, seed: int):
-        return replay.replay_result(call, fork, bot_prompt, replay.buyer_brief(call, ledger), max_turns, seed)
+        return replay.replay_result(call, fork, bot_prompt, replay.buyer_brief(call, ledger, fork), max_turns, seed)
 
     return fn
 

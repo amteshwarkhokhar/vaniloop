@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import random
 import sys
 import types
 
@@ -9,7 +10,7 @@ import pytest
 
 from vaniloop import llm as llm_mod
 from vaniloop.models import BotTurnLabel, CallRecord, Ledger, Turn, UserTurnLabel
-from vaniloop.replay import buyer_brief, replay, replay_id, replay_result
+from vaniloop.replay import UNCLEAR_TEXT, BuyerBrief, buyer_brief, replay, replay_id, replay_result
 from vaniloop.rules import audit_call
 
 
@@ -333,3 +334,121 @@ def test_replay_ids_differ_by_fork_brief_and_seed():
     assert replay_id("c1", 4, brief(), 12, "P", 0) != replay_id("c1", 4, b2, 12, "P", 0)
     assert replay_id("c1", 4, brief(), 12, "P", 0) != replay_id("c1", 4, brief(), 12, "P", 1)
     assert replay_id("c1", 4, brief(), 12, "P", 0) != replay_id("c1", 4, brief(), 5, "P", 0)
+
+
+# ---- noisy channel (#55) ----
+
+
+def flagged_call(unclear=(), misheard=(), n=10) -> CallRecord:
+    """Bot-first call of n turns: user turns at odd idx. `unclear` flags user idx, `misheard` flags bot idx."""
+    turns = [
+        Turn(
+            idx=i,
+            speaker="bot" if i % 2 == 0 else "user",
+            start_sec=i * 6.0,
+            end_sec=i * 6.0 + 6,
+            text=f"line{i}",
+            audio_unclear=True if i in unclear else None,
+            bot_misheard=True if i in misheard else None,
+        )
+        for i in range(n)
+    ]
+    return CallRecord(call_id="c1", duration_sec=n * 6.0, turns=turns)
+
+
+def test_unclear_rate_is_the_flagged_share_of_post_fork_user_turns():
+    """buyer_brief must set unclear_rate to the share of user turns at or after the fork that the bot did not hear.
+
+    A user turn counts when it is audio_unclear or the next bot turn is bot_misheard. Pre-fork flags must not count,
+    no flags must give 0.0 and the rate must cap at 0.8. A wrong rate makes the replay channel cleaner or noisier
+    than the call it forks, and the old prompt would again never loop in a replay.
+    """
+    led = mk_ledger()
+    # fork 2: user turns 3, 5, 7, 9. Turn 3 is audio_unclear, turn 5 is followed by a misheard bot turn 6.
+    # Turn 1 is flagged too but sits before the fork. Turn 9 is clean.
+    call = flagged_call(unclear={1, 3}, misheard={6})
+    assert buyer_brief(call, led, 2).unclear_rate == 0.5
+    assert buyer_brief(call, led, 0).unclear_rate == 0.6  # fork 0 also counts turn 1: 3 of 5
+    assert buyer_brief(flagged_call(unclear={3}, misheard={4, 8}), led, 2).unclear_rate == 0.5  # 2 of 4 again
+    assert buyer_brief(mk_call(), led, 2).unclear_rate == 0.0  # older transcript: no flags at all
+    assert buyer_brief(call, led, len(call.turns)).unclear_rate == 0.0  # no user turn after the fork
+    assert buyer_brief(flagged_call(unclear={3, 5, 7, 9}), led, 2).unclear_rate == 0.8  # 4 of 4 caps at 0.8
+    assert buyer_brief(flagged_call(unclear={3}, misheard={4}), led, 2).unclear_rate == 0.25  # one turn counts once
+
+
+def test_bot_hears_placeholder_while_record_and_buyer_keep_real_text():
+    """An unclear buyer turn must show [unclear audio] to the bot only, and the record must keep the real text.
+
+    If the bot saw the real text the channel would stay clean. If the buyer or the record lost the text, the buyer
+    could not keep its story straight and the audit would grade the placeholder instead of the call.
+    """
+    log: list = []
+    user_lines = [("MARK-A", False), ("MARK-B", False)]
+    b = brief().model_copy(update={"unclear_rate": 1.0})  # every generated buyer turn is unclear
+    out = replay(mk_call(), 4, "BOT", b, max_turns=4, llm=stub([("naam?", False)], user_lines, log=log))
+    bot_msgs = [u for _, u, tag in log if tag.startswith("replay:bot")]
+    buyer_msgs = [u for _, u, tag in log if tag.startswith("replay:user")]
+    assert UNCLEAR_TEXT not in bot_msgs[0]  # nothing generated yet
+    assert UNCLEAR_TEXT in bot_msgs[1] and "MARK-A" not in bot_msgs[1]  # bot hears the placeholder
+    assert "MARK-A" in buyer_msgs[1] and UNCLEAR_TEXT not in buyer_msgs[0] + buyer_msgs[1]  # buyer sees its words
+    assert [(t.text, t.audio_unclear) for t in out.turns[5::2]] == [("MARK-A", True), ("MARK-B", True)]
+    assert all(t.audio_unclear is None for t in out.turns[4::2])  # bot turns are never flagged
+
+
+def test_turns_before_the_fork_stay_verbatim_even_when_flagged():
+    """Pre-fork turns must reach the bot with their real text and keep their flags, even at unclear_rate 1.0.
+
+    The noise applies to generated turns only. Rewriting the shared prefix would change what the original call
+    said and break the match between the replay and the call it forks.
+    """
+    call = flagged_call(unclear={1, 3})
+    log: list = []
+    b = brief().model_copy(update={"unclear_rate": 1.0})
+    out = replay(call, 4, "BOT", b, max_turns=3, llm=stub([("naam?", False)], log=log))
+    bot_msgs = [u for _, u, tag in log if tag.startswith("replay:bot")]
+    assert all("line1" in u and "line3" in u for u in bot_msgs)  # the prefix is verbatim in every bot request
+    assert UNCLEAR_TEXT not in bot_msgs[0] and UNCLEAR_TEXT in bot_msgs[1]  # while the generated turn is hidden
+    assert [t.model_dump() for t in out.turns[:4]] == [t.model_dump() for t in call.turns[:4]]
+
+
+def unclear_idx(seed: int, rate: float = 0.5, max_turns: int = 12) -> list[int]:
+    out = replay(
+        mk_call(), 2, "P", brief().model_copy(update={"unclear_rate": rate}), max_turns, seed, stub([("naam?", False)])
+    )
+    return [t.idx for t in out.turns if t.audio_unclear]
+
+
+def test_same_seed_makes_the_same_turns_unclear():
+    """The unclear turns must follow random.Random(f"{seed}:{call_id}:{idx}") so one seed always gives the same turns.
+
+    A changing choice would make old and new replays face different noise and the lift could come from luck. The
+    requests must also repeat exactly, or the cache would miss on a rerun.
+    """
+    first = unclear_idx(0)
+    assert first and first == unclear_idx(0)
+    assert first == [i for i in range(3, 14, 2) if random.Random(f"0:c1:{i}").random() < 0.5]  # the stated formula
+    assert any(unclear_idx(s) != first for s in range(1, 9))  # a different seed can change the turns
+    logs = []
+    for _ in range(2):
+        log: list = []
+        b = brief().model_copy(update={"unclear_rate": 0.5})
+        replay(mk_call(), 2, "P", b, max_turns=8, seed=0, llm=stub([("naam?", False)], log=log))
+        logs.append(log)
+    assert logs[0] == logs[1] and len(logs[0]) == 8
+
+
+def test_unclear_rate_zero_changes_nothing():
+    """At unclear_rate 0 no turn may be flagged, the bot must see real text and the buyer brief must stay as before.
+
+    Flags on the original call must not leak into a replay unless buyer_brief turned them into a rate. Otherwise the
+    clean-channel replays and their cached requests would change under existing runs.
+    """
+    log: list = []
+    call = flagged_call(unclear={1, 3, 5, 7, 9}, misheard={2, 4})
+    out = replay(call, 4, "P", brief(), max_turns=6, llm=stub([("naam?", False)], log=log))
+    assert all(t.audio_unclear is None for t in out.turns[4:])
+    assert all(UNCLEAR_TEXT not in u and "unclear_rate" not in u for _, u, _ in log)
+    assert BuyerBrief().unclear_rate == 0.0
+    assert replay_id("c1", 4, brief(), 12, "P", 0) != replay_id(
+        "c1", 4, brief().model_copy(update={"unclear_rate": 0.5}), 12, "P", 0
+    )  # but a noisy replay must not share an id with a clean one
