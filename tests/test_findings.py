@@ -783,6 +783,31 @@ def test_95_qty_captured_rejects_an_unrecognised_unit_word():
     assert f.status == "Fatal" and f.onset_turn == 2
 
 
+@pytest.mark.parametrize("said", ["10 ka", "10 chahiye", "10 hi"])
+def test_95_qty_captured_treats_a_hinglish_filler_as_no_unit(said):
+    """A filler word after the number ("10 ka", "10 chahiye") is not a unit, so it matches a captured "10".
+
+    Review round 3: any word after the number counted as an unknown unit, so a matching quantity graded Fatal on an
+    unanswered re-ask. Hinglish answers often carry such fillers, so this would inflate Fatal on real calls.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said=said, kept="10")
+    assert f.status == "NonFatal" and f.onset_turn == 2
+
+
+@pytest.mark.parametrize("said", ["10 boxes", "10 packets", "10 pairs"])
+def test_95_qty_captured_rejects_other_packing_units(said):
+    """Guard: a packing unit other than "set" must also not equal the same number of pieces.
+
+    Narrowing unknown words to fillers must not let "10 boxes" match "10 pieces" and hide a quantity error.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said=said, kept="10 pieces")
+    assert f.status == "Fatal" and f.onset_turn == 2
+
+
 def test_95_qty_captured_keeps_a_bare_number_matching_a_stated_unit():
     """Guard: a bare "10" against "10 pieces" keeps today's NonFatal, because a bare number is still "no unit".
 
