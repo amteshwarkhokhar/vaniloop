@@ -347,7 +347,8 @@ def _arm(res, audit: AuditRecord, params: list[str], gating: set[str]) -> dict:
 
     Missing evidence is an error, never a fault-free result: a NeedsReview verdict, a missing, Unknown or
     NotApplicable finding for a patched parameter, a fault that starts before the fork or has no placeable onset,
-    a Fatal with no placeable onset, and an Unknown finding on a gating parameter.
+    and, for every gating parameter, a missing or Unknown finding or a Fatal with no placeable onset. An advisory
+    parameter never blocks, whatever its finding says.
     """
 
     def after(f):
@@ -361,8 +362,10 @@ def _arm(res, audit: AuditRecord, params: list[str], gating: set[str]) -> dict:
             bad.append(f"{p} finding {status}")
         elif status in FAILING and after(found[p]) is not True:
             bad.append(f"{p} fault not after the fork")
+    for g in sorted(gating - set(found) - set(params)):
+        bad.append(f"{g} finding missing")  # a Pass guard call patches nothing: its Fatal check needs this finding
     for f in audit.findings:
-        if (f.status == "Fatal" and after(f) is None) or (f.status == "Unknown" and f.parameter in gating):
+        if f.parameter in gating and (f.status == "Unknown" or (f.status == "Fatal" and after(f) is None)):
             bad.append(f"{f.parameter} {f.status} without evidence")
     if audit.verdict == "NeedsReview":
         bad.append("verdict NeedsReview")

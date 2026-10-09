@@ -576,6 +576,46 @@ def test_missing_evidence_in_a_replay_blocks_the_pass(tmp_path, odd):
     assert out.row["causes"]["cause_looping"]["status"] == "dropped"  # 11 resolved calls dropped: only the gap blocks
 
 
+def _edit_new_audit(stubs, base, edit):
+    """Make `edit(findings)` rewrite the NEW audit of golden call `base`. Other audits stay as the stub makes them."""
+    inner = stubs.audit_fn
+
+    def audit_fn(call):
+        rec = inner(call)
+        if call.call_id == f"{base}__new":
+            rec = rec.model_copy(update={"findings": edit(rec.findings)})
+        return rec
+
+    stubs.audit_fn = audit_fn
+    return stubs
+
+
+def test_a_pass_call_with_no_gating_finding_is_unresolved_not_clean(tmp_path):
+    """A NEW replay of a Pass call that has no finding for a gating parameter must be unresolved, not fault-free.
+
+    A Pass call patches no parameter, so only the gating Fatal guard can see it. Without a finding, the guard would
+    read the gap as clean and let a patch pass on a call the audit could not judge.
+    """
+    stubs = _edit_new_audit(CheckStubs(), "gp00", lambda fs: [f for f in fs if f.parameter != "looping"])
+    out, _, _ = check(tmp_path, stubs)
+    assert out.row["passed"] is False and out.row["unresolved"] == 1
+    assert "unresolved replay" in out.row["reason"]
+
+
+def test_an_advisory_fatal_with_no_onset_does_not_block(tmp_path):
+    """A Fatal on an advisory parameter whose onset cannot be placed must not block the check.
+
+    Advisory rules grade unlike the owner, so they never block. Only a gating Fatal needs a placeable onset.
+    """
+
+    def drop_onset(fs):
+        return [f.model_copy(update={"onset_turn": None}) if f.parameter == "qty_probing" else f for f in fs]
+
+    stubs = _edit_new_audit(CheckStubs(pass_fatal="qty_probing"), "gp00", drop_onset)
+    out, _, _ = check(tmp_path, stubs)
+    assert out.row["passed"] is True and out.row["unresolved"] == 0
+
+
 def test_a_golden_call_that_cannot_be_replayed_blocks_the_check(tmp_path):
     """With the Pass calls missing from the call input, the check must stop before any replay and write no row.
 
