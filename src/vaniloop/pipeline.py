@@ -1,4 +1,4 @@
-"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|grade-sample`."""
+"""Pipeline runner. `python -m vaniloop.pipeline audit|regrade|issues|fix|prove|grade-sample`."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord, Ledger
+from .prove import describe, run_prove
 from .rules import audit_call
 
 RUNS = AUDITS_PATH.parent
@@ -148,6 +149,14 @@ def main(argv: list[str] | None = None) -> None:
     f = sub.add_parser("fix")
     f.add_argument("--prompt", required=True)
     f.add_argument("--top", type=int, default=3)
+    pv = sub.add_parser("prove")
+    pv.add_argument("--cause", required=True)
+    pv.add_argument("--prompt", required=True)
+    pv.add_argument("--n", type=int, default=5)
+    pv.add_argument("--k", type=int, default=3)
+    pv.add_argument("--guards", type=int, default=10)
+    pv.add_argument("--max-turns", type=int, default=12)
+    pv.add_argument("--dry-run", action="store_true")
     g = sub.add_parser("grade-sample")
     g.add_argument("--n", type=int, default=20)
     args = ap.parse_args(argv)
@@ -162,6 +171,17 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")
+    elif args.cmd == "prove":
+        out = run_prove(
+            args.cause,
+            Path(args.prompt),
+            n=args.n,
+            k=args.k,
+            guards=args.guards,
+            max_turns=args.max_turns,
+            dry_run=args.dry_run,
+        )
+        print("\n".join(describe(out)))
     elif args.cmd == "grade-sample":
         ids = run_grade_sample(n=args.n)
         print(f"{len(ids)} calls -> {GRADE_SAMPLE_PATH}")
