@@ -160,7 +160,9 @@ def test_f4_parse_quantity_none(text):
 
 def _qty(said, kept):
     call = mk_call()
-    led = mk_led(call, [bt(0, "quantity")], buyer_facts={"quantity": said},
+    # the buyer answers at turn 1 and the bot asks again at turn 2 when nothing was captured (ignored)
+    bots = [bt(0, "quantity")] + ([] if kept else [bt(2, "quantity")])
+    led = mk_led(call, bots, [UserTurnLabel(idx=1, gave_value_for="quantity")], buyer_facts={"quantity": said},
                  bot_confirmed={"product": "pump", **({"quantity": kept} if kept else {})})
     return by(audit_call(call, led))
 
@@ -214,7 +216,7 @@ def test_f6_per_spec_name_and_severity():
             bt(8, "spec", spec_name="brand", fits_confirmed_product=True),
             bt(10, "spec", spec_name="brand", fits_confirmed_product=True)]
     f = by(audit_call(call, _loop_led(call, bots)))["looping"]
-    assert f.status == "NonFatal" and "brand" in f.reason and f.onset_turn == 10
+    assert f.status == "NonFatal" and "brand" in f.reason and f.onset_turn == 8  # spec limit is 2
     # different specs, each asked once -> no loop (old code merged them under slot "spec")
     bots = [bt(0, "quantity")] + [bt(i, "spec", spec_name=f"s{i}", fits_confirmed_product=True) for i in (2, 4, 6, 8, 10)]
     assert by(audit_call(call, _loop_led(call, bots)))["looping"].status == "Pass"
@@ -269,10 +271,11 @@ def test_f7_product_and_qty_onsets():
                  product_changed_at_turn=3, bot_confirmed={"product": "old"})
     f = by(audit_call(call, led))
     assert f["product_change"].onset_turn == 4  # first bot turn after the change at turn 3
-    led2 = mk_led(call, [bt(0, "quantity"), bt(8, "handoff")], buyer_facts={"quantity": "10"},
-                  bot_confirmed={"product": "pump"})
+    led2 = mk_led(call, [bt(0, "quantity"), bt(8, "quantity")], [UserTurnLabel(idx=1, gave_value_for="quantity")],
+                  buyer_facts={"quantity": "10"}, bot_confirmed={"product": "pump"})
     assert by(audit_call(call, led2))["qty_missed"].onset_turn == 8
-    led3 = mk_led(call, [bt(0, "quantity")], buyer_facts={"quantity": "10"}, bot_confirmed={"product": "pump"})
+    led3 = mk_led(call, [bt(0, "quantity")], [UserTurnLabel(idx=1, gave_value_for="quantity")],
+                  buyer_facts={"quantity": "10"}, bot_confirmed={"product": "pump"})  # moved on, no read-back
     assert by(audit_call(call, led3))["qty_missed"].onset_turn is None
     assert audit_call(call, led3).first_fault_turn is None
 

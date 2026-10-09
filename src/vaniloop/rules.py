@@ -14,13 +14,17 @@ from .models import AuditRecord, CallRecord, Evidence, Finding, Ledger
 DEAD_AIR_SEC = 5.0  # matrix: dead air > 5 s
 # TODO: matrix allows 8 s on noisy lines; noise detection is not built yet, so this is not used.
 DEAD_AIR_NOISY_SEC = 8.0
-LOOP_MAX_ASKS = 3  # matrix: "probing more than 1+2 times" -> 4th ask of one slot is a loop
-LOOP_END_TURNS = 2  # call ending within this many turns of the 4th ask counts as a fatal loop
+LOOP_MAX_ASKS = 3  # default ask limit for slots without their own limit
+# VANI prompt L69: product 4, quantity 3, each spec 2, name 3, city 3. The first ask past the limit is the onset.
+SLOT_LIMITS = {"product": 4, "quantity": 3, "spec": 2, "name": 3, "city": 3}
+RESET_SLOTS = ("product", "quantity", "spec")  # a product change (L83) restarts these allowances
+LOOP_END_TURNS = 2  # call ending within this many turns of the first ask past the limit counts as a fatal loop
 FRUSTRATED_P = 0.6
 HUMAN_P = 0.6
 SHORT_CALL_SEC = 10.0
 MIN_COVERAGE = 0.8
 LOOP_SLOTS = ("product", "quantity", "unit", "name", "city")
+ENRICH_FORBIDDEN_SLOTS = ("quantity", "unit", "spec", "name", "city", "handoff")  # collecting for the new product
 BL_SCOPES = ("bl_collection", "oncall_astbuy")
 # Assumption: quantity is a defined field for every category in a BL call. If False, qty_probing is Unknown.
 QTY_ALWAYS_DEFINED = True
@@ -187,39 +191,58 @@ def _end_of_call_within(call: CallRecord, idx: int, n: int) -> bool:
     return sum(1 for t in call.turns if t.idx > idx) <= n
 
 
+def _limit(key: str) -> int:
+    return SLOT_LIMITS["spec" if key.startswith("spec:") else key] if (key.startswith("spec:") or key in SLOT_LIMITS) else LOOP_MAX_ASKS
+
+
 def rule_looping(call: CallRecord, led: Ledger) -> Finding:
-    asks: dict[str, list[int]] = {}
-    unnamed_specs: list[int] = []
+    """Per-slot ask limits (VANI prompt L69). A product change (L83) starts a fresh allowance for product, quantity
+    and each spec: asks before the change and asks after it are counted separately. Name and city are never reset."""
+    change = led.product_changed_at_turn
+    asks: dict[tuple[str, int], list[int]] = {}
+    unnamed_specs: dict[int, list[int]] = {}  # segment -> idx of spec asks with no spec name
     for b in sorted(led.bot_turns, key=lambda b: b.idx):
         if b.slot in LOOP_SLOTS:
-            asks.setdefault(b.slot, []).append(b.idx)
+            key = b.slot
+        elif b.slot == "spec" and b.spec_name:
+            key = f"spec:{b.spec_name.strip().lower()}"
         elif b.slot == "spec":
-            if b.spec_name:
-                asks.setdefault(f"spec:{b.spec_name.strip().lower()}", []).append(b.idx)
-            else:
-                unnamed_specs.append(b.idx)
-    results = []  # (fatal, n_asks, key, idxs, why)
-    for key, idxs in asks.items():
-        if len(idxs) <= LOOP_MAX_ASKS:
+            key = None
+        else:
             continue
-        fourth = idxs[LOOP_MAX_ASKS]
-        irritated = any(u.frustrated >= FRUSTRATED_P for u in led.user_turns if u.idx > fourth)
-        ends = _end_of_call_within(call, fourth, LOOP_END_TURNS)
-        why = "buyer irritated after the 4th ask" if irritated else "call ended right after the 4th ask" if ends else "no sign of irritation"
-        results.append((irritated or ends, len(idxs), key, idxs, why))
+        seg = 1 if change is not None and b.idx > change and (b.slot in RESET_SLOTS) else 0
+        if key is None:
+            unnamed_specs.setdefault(seg, []).append(b.idx)
+            continue
+        asks.setdefault((key, seg), []).append(b.idx)
+    results = []  # (fatal, n_asks, key, idxs, why, limit)
+    for (key, _seg), idxs in asks.items():
+        limit = _limit(key)
+        if len(idxs) <= limit:
+            continue
+        over = idxs[limit]
+        irritated = any(u.frustrated >= FRUSTRATED_P for u in led.user_turns if u.idx > over)
+        ends = _end_of_call_within(call, over, LOOP_END_TURNS)
+        why = ("buyer irritated after the ask past the limit" if irritated
+               else "call ended right after the ask past the limit" if ends else "no sign of irritation")
+        results.append((irritated or ends, len(idxs), key, idxs, f"limit {limit}; {why}", limit))
     if not results:
-        if len(unnamed_specs) > LOOP_MAX_ASKS:
-            return Finding(parameter="looping", status="Unknown", basis="observed",
-                           reason=f"{len(unnamed_specs)} spec questions without a spec name; repeats cannot be told apart",
-                           evidence=[_ev(call, i) for i in unnamed_specs])
+        spec_limit = SLOT_LIMITS["spec"]
+        for seg, idxs in sorted(unnamed_specs.items()):
+            named_max = max((len(v) for (k, sg), v in asks.items() if k.startswith("spec:") and sg == seg), default=0)
+            if len(idxs) + named_max > spec_limit:
+                return Finding(parameter="looping", status="Unknown", basis="observed",
+                               reason=f"{len(idxs)} spec question(s) without a spec name (plus {named_max} for the most asked "
+                                      f"named spec) could pass the limit of {spec_limit}; repeats cannot be told apart",
+                               evidence=[_ev(call, i) for i in idxs])
         return Finding(parameter="looping", status="Pass", basis="observed",
-                       reason=f"no slot asked more than {LOOP_MAX_ASKS} times")
-    fatal, n, key, idxs, why = max(results, key=lambda r: (r[0], r[1]))
+                       reason="no slot asked more than its limit (product 4, quantity 3, each spec 2, other 3)")
+    fatal, n, key, idxs, why, _lim = max(results, key=lambda r: (r[0], r[1]))
     label = key.replace("spec:", "spec '") + ("'" if key.startswith("spec:") else "")
     others = f"; {len(results) - 1} other looping slot(s)" if len(results) > 1 else ""
     return Finding(parameter="looping", status="Fatal" if fatal else "NonFatal", basis="observed",
                    reason=f"bot asked for {label} {n} times ({why}){others}",
-                   evidence=[_ev(call, i) for i in idxs], onset_turn=min(r[3][LOOP_MAX_ASKS] for r in results))
+                   evidence=[_ev(call, i) for i in idxs], onset_turn=min(r[3][r[5]] for r in results))
 
 
 def rule_category_isq(call: CallRecord, led: Ledger) -> Finding:
@@ -261,13 +284,35 @@ def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
 
 
 def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
+    """VANI prompt L1261: a valid quantity is stored and the bot moves on WITHOUT a read-back, so a missing read-back
+    is not a fault. It is a miss only if the bot asked for quantity again after the buyer gave it (ignored)."""
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said:
         return Finding(parameter="qty_missed", status="NotApplicable", reason="buyer gave no quantity", basis="observed")
-    if not kept:
-        return Finding(parameter="qty_missed", status="Fatal", basis="spoken_proxy", onset_turn=_handoff_turn(led),
-                       reason=f"buyer said quantity '{said}' but the bot never confirmed it")
-    return Finding(parameter="qty_missed", status="Pass", reason="a quantity was confirmed", basis="spoken_proxy")
+    gave = sorted(u.idx for u in led.user_turns if u.gave_value_for == "quantity")
+    if kept and not gave:
+        return Finding(parameter="qty_missed", status="Pass", reason="a quantity was captured", basis="spoken_proxy")
+    if not gave:
+        return Finding(parameter="qty_missed", status="Unknown", basis="spoken_proxy",
+                       reason=f"buyer said quantity '{said}' but no turn is labelled as giving it; cannot tell if it was captured")
+    change = led.product_changed_at_turn
+
+    def seg(i: int) -> int:  # a product change starts a new quantity (L83): compare only inside one segment
+        return 1 if change is not None and i > change else 0
+
+    reasked = []
+    for sg in (0, 1):
+        first = [g for g in gave if seg(g) == sg]
+        if first:
+            reasked += sorted(b.idx for b in led.bot_turns if b.slot == "quantity" and seg(b.idx) == sg and b.idx > first[0])
+    reasked.sort()
+    if reasked:
+        return Finding(parameter="qty_missed", status="Fatal", basis="spoken_proxy", onset_turn=reasked[0],
+                       reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
+                       evidence=[_ev(call, reasked[0])])
+    return Finding(parameter="qty_missed", status="Pass", basis="spoken_proxy",
+                   reason="a quantity was captured and the bot did not ask again" if kept
+                   else "buyer gave a quantity and the bot moved on (no read-back needed)")
 
 
 def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
@@ -292,6 +337,9 @@ def rule_qty_accuracy(call: CallRecord, led: Ledger) -> Finding:
     onset = _handoff_turn(led)
     if (alo, ahi) == (blo, bhi):
         return Finding(parameter="qty_accuracy", status="Pass", reason="quantities match", basis="spoken_proxy")
+    if blo == bhi == ahi and alo < ahi:  # VANI prompt L1255: a range is stored as its maximum
+        return Finding(parameter="qty_accuracy", status="Pass", basis="spoken_proxy",
+                       reason=f"range captured as its maximum (buyer said '{said}', bot kept '{kept}')")
     if blo == bhi and alo < ahi and alo <= blo <= ahi:
         return Finding(parameter="qty_accuracy", status="NonFatal", basis="spoken_proxy", onset_turn=onset,
                        reason=f"range collapsed to one value (buyer said '{said}', bot confirmed '{kept}')")
@@ -332,12 +380,71 @@ def rule_qty_unit(call: CallRecord, led: Ledger) -> Finding:
                    reason="units are the same kind; values are checked by qty_accuracy")
 
 
+def _product_confirmed(led: Ledger) -> bool:
+    """The bot confirmed a product: bot_confirmed has it, or the last bot product/confirm turn is answered by the buyer,
+    the buyer gives no later product answer, and the buyer did not change the product at or after that turn."""
+    if led.bot_confirmed.get("product"):
+        return True
+    handoff = _handoff_turn(led)  # evidence after the first handoff turn does not count
+    before = lambda i: handoff is None or i < handoff  # noqa: E731
+    asks = sorted(b.idx for b in led.bot_turns if b.slot in ("product", "confirm") and before(b.idx))
+    if not asks:
+        return False
+    last = asks[-1]
+    answers = sorted(u.idx for u in led.user_turns if u.gave_value_for == "product" and last < u.idx and before(u.idx))
+    if len(answers) != 1:
+        return False
+    change = led.product_changed_at_turn
+    return change is None or change < last
+
+
+def _enrich_deflection(call: CallRecord, led: Ledger) -> bool | None:
+    """L597-603 (enrich variant): after the product change the bot may ask whether the old product is still needed
+    (product/confirm turns) but collects nothing for the new one, then closes: its LAST turn is labelled "other" and
+    the call ends within 3 turns of the change. True = deflection, False = not, None = clarified but no close seen."""
+    c = led.product_changed_at_turn
+    later = [b for b in led.bot_turns if b.idx > c]
+    if any(b.slot in ENRICH_FORBIDDEN_SLOTS for b in later):
+        return False
+    bot_idxs = [t.idx for t in call.turns if t.speaker == "bot"]
+    last = max(bot_idxs, default=None)
+    closing = last is not None and last > c and any(b.idx == last and b.slot == "other" for b in later)
+    if closing and _end_of_call_within(call, c, 3):
+        return True
+    return None if any(b.slot in ("product", "confirm") for b in later) and not closing else False
+
+
 def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
     """Parameter id stays "product_change" (dashboard and issue names depend on it)."""
-    if led.scope not in BL_SCOPES:
-        return Finding(parameter="product_change", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed")
     kept = led.bot_confirmed.get("product")
     ev = [_ev(call, led.product_changed_at_turn)] if led.product_changed_at_turn is not None else []
+    if led.scope == "seller_unavailable_handoff":
+        # L1175, L1701: a handoff needs a confirmed product first. Pass only with evidence of the confirmation.
+        if led.product_match is False:
+            return Finding(parameter="product_change", status="NonFatal", basis="spoken_proxy", evidence=ev,
+                           onset_turn=_handoff_turn(led),
+                           reason=f"wrong product handed off (buyer wants '{led.final_product}', bot confirmed '{kept}')")
+        if not _product_confirmed(led):
+            return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
+                           onset_turn=_handoff_turn(led), reason="handoff call with no evidence the bot confirmed a product")
+        return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
+                       reason="handoff call with a confirmed product")
+    if led.scope not in BL_SCOPES:
+        return Finding(parameter="product_change", status="NotApplicable", reason=f"scope is {led.scope}", basis="observed")
+    if led.variant == "enrich" and led.product_changed_at_turn is not None:
+        collected = sorted(b.idx for b in led.bot_turns
+                           if b.idx > led.product_changed_at_turn and b.slot in ENRICH_FORBIDDEN_SLOTS)
+        if collected:  # L599-603: the enrich bot must not collect for the new product
+            return Finding(parameter="product_change", status="NonFatal", basis="spoken_proxy", evidence=ev,
+                           onset_turn=collected[0],
+                           reason="enrich variant: bot collected requirements for the new product after the change")
+        d = _enrich_deflection(call, led)
+        if d:
+            return Finding(parameter="product_change", status="Pass", basis="spoken_proxy", evidence=ev,
+                           reason="enrich variant: buyer wanted another product and the bot closed the call without collecting it")
+        if d is None:
+            return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
+                           reason="enrich variant: bot clarified the product change but the call shows no closing turn")
     if not kept:
         return Finding(parameter="product_change", status="Unknown", basis="spoken_proxy", evidence=ev,
                        reason="bot never confirmed a product")

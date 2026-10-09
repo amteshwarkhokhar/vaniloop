@@ -56,6 +56,7 @@ def test_282_camera_call_is_fatal_for_wrong_category_and_name_loop():
 def test_133_seller_unavailable_handoff_passes_without_quantity():
     call = load_transcript(T / "133_90852837_DSXGKXVH5.json")
     led = Ledger(call_id=call.call_id, scope="seller_unavailable_handoff", final_product="commercial office cleaning",
+                 bot_confirmed={"product": "commercial office cleaning"}, product_match=True,
                  bot_turns=[bot(0, "product"), bot(2, "handoff")])
     a = audit_call(call, full(call, led))
     assert a.verdict == "Pass"
