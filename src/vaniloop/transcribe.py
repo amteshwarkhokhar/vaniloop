@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import random
 import subprocess
@@ -70,11 +71,27 @@ def _bool(x) -> bool | None:
 
 
 def _num(x) -> float | None:
-    return float(x) if isinstance(x, int | float) and not isinstance(x, bool) else None
+    """Return x as a finite float, or None for bools, strings, non-finite numbers and ints too large for a float."""
+    if isinstance(x, bool) or not isinstance(x, int | float):
+        return None
+    try:
+        value = float(x)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _cost(x) -> float | None:
+    """Parse a cost header tolerantly: a missing, non-numeric or non-finite value gives None, never an exception."""
+    try:
+        value = float(x)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
 
 
 def normalise_turns(raw, duration: float) -> list[dict]:
-    """Keep only well-formed turns. Clamp times to the audio, sort by start, reset fields of the wrong type."""
+    """Keep only well-formed turns. Clamp times to the audio, sort by the unrounded start, reset wrong types."""
     turns = []
     for t in raw if isinstance(raw, list) else []:
         if not isinstance(t, dict) or t.get("speaker") not in ("bot", "user"):
@@ -89,16 +106,19 @@ def normalise_turns(raw, duration: float) -> list[dict]:
         turns.append(
             {
                 "speaker": t["speaker"],
-                "start_sec": round(start, 2),
-                "end_sec": round(end, 2),
+                "start_sec": start,
+                "end_sec": end,
                 "text": text.strip(),
-                "tone": (tone if tone in _TONES else "unknown") if user else None,
+                "tone": (tone if isinstance(tone, str) and tone in _TONES else "unknown") if user else None,
                 "overlap": _bool(t.get("overlap")),
                 "audio_unclear": _bool(t.get("audio_unclear")),
                 "bot_misheard": None if user else _bool(t.get("bot_misheard")),
             }
         )
     turns.sort(key=lambda t: t["start_sec"])
+    for t in turns:
+        t["start_sec"] = round(t["start_sec"], 2)
+        t["end_sec"] = round(t["end_sec"], 2)
     return turns
 
 
@@ -120,11 +140,28 @@ def _client():
     return OpenAI(base_url=base, api_key=key, max_retries=0)
 
 
+def _valid_cache(path: Path, call_id: str) -> bool:
+    """A cache file counts as done only if it parses as a dict with the right call_id and a non-empty turns list."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("call_id") == call_id
+        and isinstance(data.get("turns"), list)
+        and len(data["turns"]) > 0
+    )
+
+
 def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log_path: Path = LOG_PATH) -> dict:
-    """Transcribe one mp3 into out_dir/<call_id>.json. Skip (status "exists") if the file is already there."""
+    """Transcribe one mp3 into out_dir/<call_id>.json. Skip (status "exists") only when a valid cache is there.
+
+    Two processes on the same call can both pay; run one batch at a time.
+    """
     call_id = mp3.stem
     out = Path(out_dir) / f"{call_id}.json"
-    if out.exists():
+    if out.exists() and _valid_cache(out, call_id):
         return {"call_id": call_id, "status": "exists"}
     client = client or _client()
     duration = audio_duration(mp3)
@@ -146,7 +183,8 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
         ],
     )
     resp = raw.parse()
-    cost = raw.headers.get("x-litellm-response-cost")
+    content = resp.choices[0].message.content if resp.choices else None
+    content = content if isinstance(content, str) else ""
     row = {
         "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "call_id": call_id,
@@ -156,22 +194,27 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
         "duration_sec": round(duration, 2),
         "prompt_tokens": getattr(resp.usage, "prompt_tokens", None),
         "completion_tokens": getattr(resp.usage, "completion_tokens", None),
-        "cost_usd": float(cost) if cost else None,
+        "cost_usd": _cost(raw.headers.get("x-litellm-response-cost")),
     }
-    try:
-        text = (resp.choices[0].message.content or "").strip().removeprefix("```json").removesuffix("```")
-        turns = normalise_turns(_find_turns(json.loads(text)), duration)
-    except (ValueError, AttributeError) as e:
-        row.update(status="error", error=f"unparseable output: {e}"[:200])
+    if not resp.choices:
+        row.update(status="error", error="empty choices")
+    elif not content.strip():
+        row.update(status="error", error="empty reply")
     else:
-        if turns:
-            row.update(status="ok", n_turns=len(turns))
+        try:
+            text = content.strip().removeprefix("```json").removesuffix("```")
+            turns = normalise_turns(_find_turns(json.loads(text)), duration)
+        except (ValueError, AttributeError, TypeError, OverflowError, IndexError) as e:
+            row.update(status="error", error=f"unparseable output: {e}"[:200])
         else:
-            row.update(status="error", error="no valid turns")
+            if turns:
+                row.update(status="ok", n_turns=len(turns))
+            else:
+                row.update(status="error", error="no valid turns")
     if row["status"] != "ok":
         raw_dir = log_path.parent / "transcribe_raw"
         raw_dir.mkdir(parents=True, exist_ok=True)
-        (raw_dir / f"{call_id}.txt").write_text(resp.choices[0].message.content or "", encoding="utf-8")
+        (raw_dir / f"{call_id}.txt").write_text(content, encoding="utf-8")
     if row["status"] == "ok":
         doc = {
             "call_id": call_id,
@@ -183,7 +226,7 @@ def transcribe_call(mp3: Path, out_dir: Path = TRANSCRIPTS_DIR, client=None, log
         }
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1, allow_nan=False), encoding="utf-8")
         os.replace(tmp, out)
     with _lock:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,13 +250,25 @@ def select_sample(durations: dict[str, float], n: int, min_sec: float = MIN_SEC,
 
 
 def load_durations(audio_dir: Path = AUDIO_DIR, cache: Path = DURATIONS_PATH) -> dict[str, float]:
-    known = json.loads(cache.read_text()) if cache.exists() else {}
-    for mp3 in sorted(Path(audio_dir).glob("*.mp3")):
-        if mp3.stem not in known:
-            known[mp3.stem] = audio_duration(mp3)
+    """Measured durations for the mp3s in audio_dir now. A missing or corrupt cache starts from {}."""
+    known = {}
+    if cache.exists():
+        try:
+            loaded = json.loads(cache.read_text())
+        except (OSError, ValueError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            known = loaded
+    mp3s = sorted(Path(audio_dir).glob("*.mp3"))
+    durations = {mp3.stem: value for mp3 in mp3s if (value := _num(known.get(mp3.stem))) is not None}
+    for mp3 in mp3s:
+        if mp3.stem not in durations:
+            durations[mp3.stem] = audio_duration(mp3)
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(known, indent=0))
-    return known
+    tmp = cache.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(durations, indent=0))
+    os.replace(tmp, cache)
+    return durations
 
 
 def main() -> None:
@@ -229,6 +284,7 @@ def main() -> None:
     missing = [p.name for p in mp3s if not p.exists()]
     if missing:
         raise SystemExit(f"missing audio: {missing[:5]}")
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)  # before workers, so a failing call can still log
     client = _client()
     with ThreadPoolExecutor(a.workers) as pool:
         rows = list(pool.map(lambda p: _safe(p, client), mp3s))
@@ -245,8 +301,11 @@ def _safe(mp3: Path, client) -> dict:
         return transcribe_call(mp3, client=client)
     except Exception as e:  # one bad call must not stop the batch; the log keeps the reason
         row = {"call_id": mp3.stem, "status": "error", "error": f"{type(e).__name__}: {e}"[:200]}
-        with _lock:
-            append_jsonl(LOG_PATH, [row])
+        try:
+            with _lock:
+                append_jsonl(LOG_PATH, [row])
+        except OSError:  # a failed error log must not hide the failing call from the batch
+            pass
         return row
 
 
