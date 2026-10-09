@@ -1,0 +1,23 @@
+name: pr-body
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  headings:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR body has the six headings and links an issue
+        run: |
+          body=$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")
+          fail=0
+          for h in "## Task" "## Intent" "## Why it was needed" "## Why this approach" "## What changed" "## Proof of work"; do
+            printf '%s\n' "$body" | grep -qx "$h" || { echo "missing heading: $h"; fail=1; }
+          done
+          printf '%s\n' "$body" | grep -qiE '(closes|fixes|resolves) #[0-9]+' || { echo "missing: Closes #<issue>"; fail=1; }
+          printf '%s\n' "$body" | grep -q '^\$ ' || { echo "Proof of work needs a command line starting with \$ "; fail=1; }
+          exit $fail

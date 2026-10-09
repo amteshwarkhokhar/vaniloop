@@ -48,7 +48,8 @@ Data contracts for every stage: `src/vaniloop/models.py`. Change them only in an
 Repo: https://github.com/amteshwarkhokhar/vaniloop (private). Milestones are the loop
 stages: `0 Ingest`, `1 Audit`, `2 Issue`, `3 Fix`, `4 Test`, `5 Demo`.
 
-1. Each task is one issue in a stage milestone (`.github/ISSUE_TEMPLATE/work-order.md`).
+1. Each task is one issue in a stage milestone, made with the work-order form
+   (`.github/ISSUE_TEMPLATE/work-order.yml`; blank issues are off). From the CLI, copy its fields.
    One issue is one PR: at most 600 changed lines and 20 files. Split bigger work.
 2. An issue ends with `## Acceptance`: bullets of the form `- <claim> — done when: <check>`.
    A check is something a test, a command or a file shows. One bullet says what must not change.
@@ -58,6 +59,7 @@ stages: `0 Ingest`, `1 Audit`, `2 Issue`, `3 Fix`, `4 Test`, `5 Demo`.
 4. Run `bin/check` before you commit. CI and the pre-push hook run the same script.
 5. The PR body has six headings (`.github/pull_request_template.md`): Task (`Closes #n`),
    Intent, Why it was needed, Why this approach, What changed (every path), Proof of work.
+   CI (`pr-body.yml`) fails a PR without them, without `Closes #n`, or without a `$ ` command line.
 6. Codex reviews (at most 3 rounds). The owner merges.
 7. Add a line to `docs/DECISIONS.md` when a decision changes.
 
