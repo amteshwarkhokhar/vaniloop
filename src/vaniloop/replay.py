@@ -90,7 +90,7 @@ def replay_result(call: CallRecord, fork_turn: int, bot_prompt: str, brief: Buye
     for _ in range(max_turns):
         history = CallRecord(call_id=call.call_id, duration_sec=0, turns=turns)
         block = _data_block(render_transcript(history), brief if speaker == "user" else None)
-        kw = dict(validate=_is_dict, temperature=TEMPERATURE, seed=seed, retries=0)
+        kw = dict(validate=_is_dict, temperature=TEMPERATURE, seed=seed, retries=0, max_retries=0)
         if speaker == "bot":
             out = llm(bot_prompt, f"{block}\n\n{BOT_FORMAT}", cache_tag=f"replay:bot:{ns}", **kw)
         else:

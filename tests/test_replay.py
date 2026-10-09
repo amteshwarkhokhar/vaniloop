@@ -163,7 +163,7 @@ def test_replay_passes_temperature_seed_no_retries():
         return {"text": "x", "end_call": False, "hang_up": False}
 
     replay(mk_call(), 4, "P", brief(), max_turns=2, seed=9, llm=llm)
-    assert all(k["temperature"] == 0.7 and k["seed"] == 9 and k["retries"] == 0 for k in kws)
+    assert all(k["temperature"] == 0.7 and k["seed"] == 9 and k["retries"] == 0 and k["max_retries"] == 0 for k in kws)
 
 
 def test_adversarial_goal_stays_out_of_system_prompts():
