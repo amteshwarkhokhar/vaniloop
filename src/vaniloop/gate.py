@@ -41,6 +41,8 @@ class Trial(BaseModel):
     failed: bool  # the cause finding is Fatal or NonFatal from the fork on, or the replay was invalid_output
     # a guard: the audit verdict is Fatal. A target: some finding is Fatal with its onset at or after the fork
     fatal: bool
+    # a target: the parameters other than the cause with a Fatal finding at or after the fork (side effects)
+    side_fatals: list[str] = Field(default_factory=list)
     # evidence is missing: Unknown, absent, NotApplicable or pre-fork cause finding, NeedsReview, invalid_output
     unresolved: bool = False
     outcome: str  # how the replay ended: end_call | hang_up | max_turns | invalid_output
@@ -136,6 +138,16 @@ def _rate(trials: list[Trial]) -> float:
     return sum(t.failed for t in trials) / len(trials) if trials else 0.0
 
 
+def _new_side_fatals(old: list[Trial], new: list[Trial]) -> list[tuple[str, str, int, int]]:
+    """(call_id, parameter, new_count, old_count) where NEW has more side-effect Fatal replays than OLD."""
+    counts: dict[tuple[str, str], list[int]] = {}
+    for arm, i in ((old, 0), (new, 1)):
+        for t in arm:
+            for p in set(t.side_fatals):
+                counts.setdefault((t.call_id, p), [0, 0])[i] += 1
+    return [(c, p, n, o) for (c, p), (o, n) in sorted(counts.items()) if n > o]
+
+
 def _per_call(old: list[Trial], new: list[Trial], k: int) -> list[PerCall]:
     counts: dict[str, list[int]] = {}
     for t in old:
@@ -161,11 +173,13 @@ def decide(
     Ship needs all of: complete arms (old and new cover the same call set with exactly one trial per
     seed 0..K-1 per call), lift > 0, p_value <= alpha, pooled new fail rate <= max_new_fail_rate, no
     unresolved trial in any arm (old seeds 0..K-1, new, guards), a guard's NEW Fatal always backed by
-    a recorded re-check result, no Fatal verdict on any NEW target replay, no confirmed guard break
-    and at least min_calls matched calls. Reject on a confirmed guard break, a Fatal on a NEW target
-    replay, or lift <= 0. If OLD never fails (0 failures in every old trial), the replay did not
+    a recorded re-check result, no side-effect Fatal that NEW adds, no confirmed guard break
+    and at least min_calls matched calls. Reject on a confirmed guard break, a side-effect Fatal that NEW
+    adds, or lift <= 0. If OLD never fails (0 failures in every old trial), the replay did not
     reproduce the fault, and the result is inconclusive before the lift rule runs. Target trials
-    count only findings that start at or after the fork (see _trial). A guard Fatal under BOTH prompts
+    count only findings that start at or after the fork (see _trial). A side-effect Fatal is a Fatal on a
+    parameter other than the cause; it adds when, for one call and parameter, NEW has more Fatal replays
+    than OLD (the same Fatal under both prompts is background, not the patch). A guard Fatal under BOTH prompts
     is flaky and does not reject. Everything else is inconclusive with its reason.
     """
     k = k if k is not None else max((t.seed for t in [*old, *new]), default=-1) + 1
@@ -188,7 +202,7 @@ def decide(
                     incomplete.append(f"call '{c}' is missing its {label} seed-{seed} trial")
                 elif n > 1:
                     incomplete.append(f"call '{c}' has {n} {label} trials for seed {seed}")
-    new_fatals = sorted({t.call_id for t in new if t.fatal})
+    new_fatals = _new_side_fatals(old_k, new)
     confirmed = [g for g in checked if g.fatal_new and g.fatal_after_recheck]
     breaks = [g.call_id for g in confirmed if g.fatal_old_seed1 is False]
     flaky = [g.call_id for g in confirmed if g.fatal_old_seed1 is True]
@@ -227,7 +241,9 @@ def decide(
         reason = f"patch breaks {len(breaks)} guard call(s): {', '.join(breaks)}"
     elif new_fatals:
         decision = "reject"
-        reason = f"NEW replay is Fatal on {len(new_fatals)} target call(s): {', '.join(new_fatals)}"
+        reason = "NEW adds a side-effect Fatal: " + "; ".join(
+            f"call '{c}' {p} (NEW {n} vs OLD {o} replays)" for c, p, n, o in new_fatals
+        )
     elif old_k and not any(t.failed for t in old_k):
         decision = "inconclusive"
         reason = f"replay did not reproduce the fault (old 0/{len(old_k)})"
@@ -244,7 +260,7 @@ def decide(
         decision = "ship"
         reason = (
             f"exact permutation p {p:.6g} <= alpha {alpha}, lift {lift:.3f}, "
-            f"new fail rate {new_rate:.3f} <= cap {max_new_fail_rate}, no fatal NEW replay, no guard break"
+            f"new fail rate {new_rate:.3f} <= cap {max_new_fail_rate}, no new side-effect Fatal, no guard break"
         )
     else:
         decision = "inconclusive"
@@ -302,8 +318,9 @@ def _trial(
     A target's cause finding that is Fatal or NonFatal counts as a failure only if its onset is at or after
     the fork. Before the fork (or with no placeable onset) the fault sits in the copied prefix and fails in
     both arms, and NotApplicable shows the replay never reached the situation, so the trial is unresolved.
-    A target's `fatal` is any Fatal finding, on any parameter, with its onset at or after the fork. A Fatal
-    finding on any parameter with an unplaceable onset makes the trial unresolved.
+    A target's `fatal` is any Fatal finding, on any parameter, with its onset at or after the fork, and
+    `side_fatals` lists those parameters except the cause parameter (the permutation test judges that one).
+    A Fatal finding on any parameter with an unplaceable onset makes the trial unresolved.
     """
     audit = audit_fn(res.call)
     invalid = res.ended_by == "invalid_output"
@@ -332,6 +349,13 @@ def _trial(
         seed=seed,
         failed=invalid or cause_failed,
         fatal=any(f.status == "Fatal" and _after_fork(res, f) is True for f in audit.findings),
+        side_fatals=sorted(
+            {
+                f.parameter
+                for f in audit.findings
+                if f.status == "Fatal" and f.parameter != parameter and _after_fork(res, f) is True
+            }
+        ),
         unresolved=unresolved,
         outcome=res.ended_by,
     )
