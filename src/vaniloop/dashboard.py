@@ -1,4 +1,4 @@
-"""Streamlit dashboard: Audit, Grade and Issues views over vaniloop outputs. Drawing lives in viz.py.
+"""Streamlit dashboard: Audit, Grade, Issues and Fix views over vaniloop outputs. Drawing lives in viz.py.
 
 Run: uv run streamlit run src/vaniloop/dashboard.py
 """
@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from vaniloop.fix import PromptPatch
 from vaniloop.grading import (
     HAND_VERDICTS,
     agreement,
@@ -25,12 +26,27 @@ from vaniloop.grading import (
 from vaniloop.issue import KNOWN
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 from vaniloop.models import AuditRecord, CallRecord, Cause
-from vaniloop.viz import CSS, VERDICT_COLOR, VERDICT_LABEL, call_strip, cause_list, findings, lede, script, wall
+from vaniloop.viz import (
+    CSS,
+    VERDICT_COLOR,
+    VERDICT_LABEL,
+    call_strip,
+    cause_list,
+    findings,
+    fix_cards,
+    lede,
+    script,
+    wall,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures"
 VERDICTS = ["Pass", "Fatal", "NonFatal", "NeedsReview"]
 NAMES = {p: v[0] for p, v in KNOWN.items()}  # parameter -> plain name, e.g. qty_probing -> Quantity never asked
+EMPTY_FIX = (
+    "No fixes to show yet. The fix stage writes prompt patches for the top causes: "
+    "`uv run python -m vaniloop.pipeline fix --prompt data/reference/vani_prompt_sarvam.md`."
+)
 
 
 # ---------- data ----------
@@ -90,6 +106,21 @@ def load_causes(d: Path | str) -> list[Cause]:
 def load_calls(d: Path | str) -> dict[str, CallRecord]:
     p = _pick(Path(d), "calls.jsonl", "synthetic_calls.jsonl")
     return {c.call_id: c for c in _models(CallRecord, read_jsonl(p))}
+
+
+def load_patches_doc(d: Path | str) -> tuple[list[PromptPatch], list[dict]] | None:
+    """(patches, rejected) from patches.json. None when the file is missing or unreadable (the latter warns)."""
+    p = _pick(Path(d), "patches.json", "synthetic_patches.json")
+    if p is None:
+        return None
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        patches = _models(PromptPatch, raw.get("patches", []))
+        rejected = [r for r in raw.get("rejected", []) if isinstance(r, dict)]
+        return patches, rejected
+    except Exception as e:
+        st.warning(f"Could not read {p.name}: {type(e).__name__}. Showing no patches.")
+        return None
 
 
 def load_grade_sample(d: Path | str, audits: list[AuditRecord]) -> list[str]:
@@ -383,6 +414,15 @@ def issues_tab(causes: list[Cause], total_calls: int) -> None:
         b.html(f"<span style='color:{VERDICT_COLOR[kind]}'>{VERDICT_LABEL[kind]}</span>")
 
 
+def fix_tab(causes: list[Cause], doc: tuple[list[PromptPatch], list[dict]] | None) -> None:
+    """One card per ranked cause: the prompt patch as a line diff, or why there is none."""
+    patches, rejected = doc if doc is not None else ([], [])
+    if doc is None or not (patches or rejected or any(c.status == "ranked" for c in causes)):
+        st.info(EMPTY_FIX)
+        return
+    st.html(fix_cards(causes, patches, rejected))
+
+
 def main() -> None:
     st.set_page_config(page_title="vaniloop", page_icon="\u260e", layout="wide", initial_sidebar_state="collapsed")
     st.html(CSS)
@@ -409,10 +449,7 @@ def main() -> None:
     elif view == "Issues":
         issues_tab(causes, meta.get("denominator", sum(a.verdict != "NeedsReview" for a in audits)))
     elif view == "Fix":
-        st.info(
-            "No fixes to show yet. The fix stage writes prompt patches for the top causes: "
-            "`uv run python -m vaniloop.pipeline fix --prompt data/reference/vani_prompt_sarvam.md`."
-        )
+        fix_tab(causes, load_patches_doc(data_dir))
     else:
         st.info("No replays to show yet. The test stage replays failing calls with the old and the fixed prompt.")
 

@@ -1,0 +1,28 @@
+{
+ "patches": [
+  {
+   "cause_id": "C-01",
+   "target_start_line": 69,
+   "target_end_line": 71,
+   "old_text": "Synthetic rule A: ask every spec of the product.\nSynthetic rule B: keep specs from earlier answers.\nSynthetic rule C: confirm at the end.",
+   "new_text": "Synthetic rule A: ask every spec of the product.\nSynthetic rule B: drop specs when the product changes.\nSynthetic rule B2: ask the specs again for the new product.\nSynthetic rule C: confirm at the end.",
+   "rationale": "Synthetic rationale: the old rule keeps stale specs, so the new rule resets them on a product change.",
+   "risk": "Synthetic risk: the bot may ask specs twice when the buyer only rephrases the product."
+  },
+  {
+   "cause_id": "C-03",
+   "target_start_line": 120,
+   "target_end_line": 120,
+   "old_text": "Synthetic rule D: wait for the buyer to finish.",
+   "new_text": "Synthetic rule D: reply within two seconds, even with a short filler.",
+   "rationale": "Synthetic rationale: a filler word hides the model delay.",
+   "risk": "Synthetic risk: the bot may talk over a slow buyer."
+  }
+ ],
+ "rejected": [
+  {
+   "cause_id": "C-02",
+   "reason": "old_text not found in prompt"
+  }
+ ]
+}
