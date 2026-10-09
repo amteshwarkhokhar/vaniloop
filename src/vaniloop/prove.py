@@ -1,8 +1,6 @@
-"""TEST stage runner: replay a patch on real calls and let the ship gate decide.
+"""TEST stage runner: replay a Fix patch on real target and guard calls and let the ship gate decide.
 
-`run_prove` joins what Fix wrote (`runs/patches.json`) with what Audit saw (calls, ledgers, audits). It picks
-target calls (failed the cause's parameter) and guard calls (passed), replays old and new prompt on both,
-and records the gate result and every replay. Every check that can stop the run happens before the first
+`run_prove` records the gate result and every replay. Every check that can stop the run comes before the first
 replay, so a bad input costs nothing.
 """
 
@@ -143,13 +141,29 @@ def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path) -> tuple
             f"the patch for {cause_id} does not fit the old prompt: old_text occurs {n} times "
             f"(it must occur exactly once in lines 1-{prompt.MAIN_VARIANT_LINES} of the clean prompt)"
         )
-    return old, apply_patch(old, patch)
+    new = apply_patch(old, patch)
+    if new == old:  # the old/new label in replays.jsonl comes from comparing the two texts
+        raise SystemExit(f"the patch for {cause_id} leaves the prompt unchanged; a no-op patch cannot be tested")
+    return old, new
 
 
-def _cost_since(rows_before: int) -> float:
-    """Sum cost_usd over the cost rows written after the first `rows_before` rows."""
-    costs = [row.get("cost_usd") for row in read_jsonl(llm.COSTS_PATH)[rows_before:]]
-    return sum(c for c in costs if isinstance(c, (int, float)) and not isinstance(c, bool) and 0 <= c < math.inf)
+def _run_cost(rows_before: int, plan: Plan) -> float:
+    """Sum cost_usd of the rows written during the run for this plan's replays, so a parallel run adds nothing.
+
+    A replay turn's cache_tag is replay:<bot|user>:<prompt tag>:<seed>:<call id>:<fork>. Ledger extraction rows
+    carry only a version tag, cannot be attributed and are left out.
+    """
+    tags = {replay.prompt_tag(plan.old_prompt), replay.prompt_tag(plan.new_prompt)}
+    ids = {c.call_id for c, _, _ in [*plan.targets, *plan.guards]}
+    total = 0.0
+    for row in read_jsonl(llm.COSTS_PATH)[rows_before:]:
+        parts = str(row.get("cache_tag", "")).split(":")
+        cost = row.get("cost_usd")
+        if len(parts) < 6 or parts[0] != "replay" or parts[2] not in tags or ":".join(parts[4:-1]) not in ids:
+            continue
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and 0 <= cost < math.inf:
+            total += cost
+    return total
 
 
 def real_replay_fn(max_turns: int) -> ReplayFn:
@@ -230,12 +244,15 @@ def run_prove(
 
     def record_audit(call: CallRecord) -> AuditRecord:
         nonlocal written
-        audit = audit_fn(call)
-        row = {
-            **pending.pop(call.call_id),
-            "call": call.model_dump(mode="json"),
-            "audit": audit.model_dump(mode="json"),
-        }
+        row = {**pending.pop(call.call_id), "call": call.model_dump(mode="json")}
+        try:
+            audit = audit_fn(call)
+            row["audit"] = audit.model_dump(mode="json")
+        except Exception as e:  # the replay is paid for: keep it, and give the gate unresolved evidence
+            reason = f"{type(e).__name__}: {str(e)[:200]}"
+            row.update(audit=None, audit_error=reason)
+            audit = AuditRecord(call_id=call.call_id, verdict="NeedsReview", scope="unclear", findings=[],
+                                flags=["low_confidence"], review_reason=f"audit failed: {reason}")  # fmt: skip
         append_jsonl(replays_path, [row])  # row by row: a stopped paid run keeps the replays it finished
         written += 1
         return audit
@@ -256,7 +273,7 @@ def run_prove(
     gates_path = Path(gates_path)
     gates_path.parent.mkdir(parents=True, exist_ok=True)
     append_jsonl(gates_path, [result.model_dump(mode="json")])
-    return Outcome(plan, result, written, _cost_since(costs_before))
+    return Outcome(plan, result, written, _run_cost(costs_before, plan))
 
 
 def describe(outcome: Outcome) -> list[str]:
@@ -277,5 +294,6 @@ def describe(outcome: Outcome) -> list[str]:
         f"fail rate old {r.old_fail_rate:.3f}, new {r.new_fail_rate:.3f}",
         f"guard breaks {len(r.guard_breaks)}, guard flaky {len(r.guard_flaky)}",
         f"{outcome.replays} replays recorded, LLM cost this run ${outcome.cost_usd:.4f}",
+        "(cost covers attributed rows only: replay turns. Ledger extraction calls cannot be attributed.)",
     ]
     return lines
