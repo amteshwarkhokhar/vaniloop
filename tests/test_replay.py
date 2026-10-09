@@ -528,7 +528,7 @@ def test_a_reply_that_keeps_failing_ends_as_invalid_output_without_raising():
     """
 
     def always_bad(system, user, **kw):
-        raise RuntimeError("model returned unparseable or invalid JSON after 3 tries")
+        raise RuntimeError("model returned unparseable or invalid JSON after 3 tries: Expecting value")
 
     r = replay_result(mk_call(), 4, "P", brief(), llm=always_bad)
     assert r.ended_by == "invalid_output" and len(r.call.turns) == 4
@@ -537,7 +537,7 @@ def test_a_reply_that_keeps_failing_ends_as_invalid_output_without_raising():
     def bad_on_buyer(system, user, **kw):
         calls[0] += 1
         if kw["cache_tag"].startswith("replay:user"):
-            raise RuntimeError("proxy 502")
+            raise RuntimeError("model returned unparseable or invalid JSON after 3 tries: proxy 502 page")
         return {"text": "naam?", "end_call": False}
 
     r = replay_result(mk_call(), 4, "P", brief(), llm=bad_on_buyer)
@@ -555,3 +555,16 @@ def test_a_budget_stop_still_raises():
 
     with pytest.raises(BudgetExceeded):
         replay_result(mk_call(), 4, "P", brief(), llm=over_budget)
+
+
+def test_other_runtime_errors_propagate_instead_of_becoming_invalid_output():
+    """A RuntimeError that is not the malformed-reply failure, such as a missing key, must propagate from replay_result.
+
+    Turning it into invalid_output would let a misconfigured run end inconclusive with no sign of the real cause.
+    """
+
+    def no_key(system, user, **kw):
+        raise RuntimeError("LLM_BASE_URL and LLM_API_KEY must be set in .env (no cached answer for this request)")
+
+    with pytest.raises(RuntimeError, match="LLM_BASE_URL"):
+        replay_result(mk_call(), 4, "P", brief(), llm=no_key)

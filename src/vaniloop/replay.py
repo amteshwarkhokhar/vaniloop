@@ -20,6 +20,7 @@ from .llm import BudgetExceeded, complete_json
 from .models import CallRecord, Ledger, Turn
 
 SEC_PER_TURN = 6.0
+MALFORMED_PREFIX = "model returned unparseable or invalid JSON"  # start of complete_json's message when retries run out
 LLM_RETRIES = 2  # a malformed reply is asked again; only valid replies are cached, so a retried turn is a stable hit
 TEMPERATURE = 0.7
 BUYER_SYSTEM = (
@@ -141,8 +142,10 @@ def replay_result(
                 out = llm(BUYER_SYSTEM, f"{block}\n\nYour next line (JSON only):", cache_tag=f"replay:user:{ns}", **kw)
         except BudgetExceeded:
             raise  # a budget stop must end the run
-        except RuntimeError:  # the model kept returning malformed replies after the retries
-            ended_by = "invalid_output"
+        except RuntimeError as exc:
+            if not str(exc).startswith(MALFORMED_PREFIX):
+                raise  # a missing key or another fault must stop the run, not look like a failed trial
+            ended_by = "invalid_output"  # the model kept returning malformed replies after the retries
             break
         text = out.get("text") if isinstance(out, dict) else None
         if not isinstance(text, str):
