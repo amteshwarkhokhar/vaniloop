@@ -6,6 +6,8 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from vaniloop.dashboard import load_patches_doc
+
 FIX = Path(__file__).parent / "fixtures"
 APP = Path(__file__).resolve().parents[1] / "src" / "vaniloop" / "dashboard.py"
 
@@ -56,6 +58,24 @@ def test_fix_view_says_when_a_cause_has_no_patch(tmp_path, monkeypatch):
     at = AppTest.from_file(str(APP), default_timeout=30).run()
     at.radio(key="view").set_value("Fix").run()
     assert "There is no patch for this cause yet." in _html(at)
+
+
+def test_a_malformed_rejected_row_is_skipped_and_the_view_still_renders(tmp_path, monkeypatch):
+    """A rejected row whose cause_id or reason is not a string is skipped; the good rows still show.
+
+    Found in review: a list cause_id passed the loader and crashed the Fix view with an unhashable-type error.
+    """
+    for f in FIX.iterdir():
+        shutil.copy(f, tmp_path / f.name)
+    doc = json.loads((FIX / "synthetic_patches.json").read_text())
+    doc["rejected"] += [{"cause_id": [], "reason": "bad row"}, {"cause_id": "C-02", "reason": None}, "junk"]
+    (tmp_path / "synthetic_patches.json").write_text(json.dumps(doc))
+    assert load_patches_doc(tmp_path)[1] == [{"cause_id": "C-02", "reason": "old_text not found in prompt"}]
+    monkeypatch.setenv("VANILOOP_DATA", str(tmp_path))
+    at = AppTest.from_file(str(APP), default_timeout=30).run()
+    at.radio(key="view").set_value("Fix").run()
+    assert not at.exception
+    assert "old_text not found in prompt" in _html(at) and "bad row" not in _html(at)
 
 
 def test_missing_patches_file_keeps_the_directive_empty_state(tmp_path, monkeypatch):

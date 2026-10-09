@@ -116,7 +116,11 @@ def load_patches_doc(d: Path | str) -> tuple[list[PromptPatch], list[dict]] | No
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
         patches = _models(PromptPatch, raw.get("patches", []))
-        rejected = [r for r in raw.get("rejected", []) if isinstance(r, dict)]
+        rejected = [  # like _models, skip a malformed row and keep the rest
+            r
+            for r in raw.get("rejected", [])
+            if isinstance(r, dict) and isinstance(r.get("cause_id"), str) and isinstance(r.get("reason"), str)
+        ]
         return patches, rejected
     except Exception as e:
         st.warning(f"Could not read {p.name}: {type(e).__name__}. Showing no patches.")
