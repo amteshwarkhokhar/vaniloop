@@ -122,10 +122,12 @@ def test_looping_prompt_is_flagged_and_fixed_prompt_is_not():
     If both graded the same, the fix stage could not prove that a prompt change removed the loop.
     """
     call = mk_call()
-    # old prompt: asks the name every bot turn, buyer hangs up at the end
+    # old prompt: asks the name every bot turn, buyer hangs up irritated at the end
     loop_user = [("BuyerA", False)] * 3 + [("bye", True)]
     looped = replay(call, 4, "OLD", brief(), max_turns=12, llm=stub([("Aapka naam?", False)], loop_user))
-    a = audit_call(looped, hand_ledger(looped))
+    led = hand_ledger(looped)
+    led.user_turns[-1].frustrated = 0.9  # the buyer is irritated at the hang-up; a loop alone is NonFatal (#95)
+    a = audit_call(looped, led)
     assert {f.parameter: f for f in a.findings}["looping"].status == "Fatal" and "loops" in a.flags
     # patched prompt: asks once, then ends the call
     fixed = replay(
