@@ -47,8 +47,9 @@ INSTRUCTIONS = """Return JSON with exactly these keys:
                   "asks_for_human": probability 0..1 that the buyer asks for a person,
                   "gave_value_for": slot this answer provides a value for, or null,
                   "declined": true when THIS turn says the buyer does not need the product, has no requirement, is not
-                     interested, or wants to stop. A "yes" to a question such as "you don't need this?" counts.
-                     Otherwise false} ]
+                     interested, or wants to stop. Deferrals for this call count: "not now", "maybe later", "call me
+                     later", "already bought". A "yes" to "you don't need this?" counts. A "yes" to "do you need
+                     this?" does not. Otherwise false} ]
 }
 Label EVERY bot turn and EVERY user turn. Use the turn indices shown in brackets."""
 
@@ -145,7 +146,7 @@ def _normalise(d: dict, call: CallRecord) -> dict:
                 "frustrated": _p(u.get("frustrated")),
                 "asks_for_human": _p(u.get("asks_for_human")),
                 "gave_value_for": g if isinstance(g, str) and g in _SLOTS else None,
-                "declined": u.get("declined") is True,
+                "declined": u.get("declined") is True or str(u.get("declined")).strip().lower() == "true",
             }
         )
     out["bot_turns"], out["user_turns"] = bots, users

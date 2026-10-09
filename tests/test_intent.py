@@ -221,3 +221,37 @@ def test_intent_does_not_change_older_findings_on_a_lead_call():
     old = [f for f in a.findings if f.parameter != "intent"]
     assert len(old) == 8 and a.verdict == "Pass"
     assert not [f.parameter for f in a.findings if f.status in ("Fatal", "NonFatal")]
+
+
+def test_bot_confirming_the_refusal_after_a_decline_is_not_fatal():
+    """After "I don't need it", a bot that asks "you don't need this?" and hears "correct" confirms the refusal.
+
+    Grading that confirm as Fatal would punish the correct close (Codex round 2, high).
+    """
+    call, led = _refusal(bt(2, "confirm"), bt(4, "other"), users=_u(1, 3, declined=True))
+    assert rule_intent(call, led).status == "Pass"
+
+
+def test_confirm_after_a_decline_with_no_second_decline_is_fatal():
+    """A confirm after a decline that the buyer does not decline again still confirms a lead, so it must be Fatal.
+
+    Without this guard the refusal-confirm skip would let every confirm after a decline pass.
+    """
+    call, led = _refusal(bt(2, "confirm"), users=_u(1, declined=True))
+    f = rule_intent(call, led)
+    assert f.status == "Fatal" and f.onset_turn == 2
+
+
+@pytest.mark.parametrize("scope", ["bl_collection", "oncall_astbuy"])
+def test_late_cancel_on_a_lead_scope_is_still_graded(scope):
+    """A lead-scope call where the buyer cancels and the bot hands off must be Fatal at the handoff.
+
+    The ledger need not move a late cancel to scope refusal. Skipping the walk on lead scopes gave a false Pass.
+    """
+    call, led = _refusal(
+        bt(4, "handoff"),
+        scope=scope,
+        users=[UserTurnLabel(idx=1, gave_value_for="quantity"), UserTurnLabel(idx=3, declined=True)],
+    )
+    f = rule_intent(call, led)
+    assert f.status == "Fatal" and f.onset_turn == 4
