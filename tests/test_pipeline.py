@@ -1,13 +1,11 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from vaniloop import ledger, pipeline
 from vaniloop.models import CallRecord
 
-CALLS = Path(__file__).resolve().parents[1] / "runs" / "calls.jsonl"
-pytestmark = pytest.mark.skipif(not CALLS.exists(), reason="local call data not present")
+# Three synthetic calls, so the counts below do not change with the local call data in runs/.
+CALLS = Path(__file__).resolve().parent / "fixtures" / "synthetic_calls.jsonl"
 
 FAKE = {
     "scope": "bl_collection",
@@ -22,8 +20,10 @@ FAKE = {
 
 
 def paths(tmp):
+    calls = tmp / "calls.jsonl"
+    calls.write_text("".join(CALLS.read_text().splitlines(keepends=True)[:3]))
     return dict(
-        calls_path=CALLS, ledgers_path=tmp / "l.jsonl", audits_path=tmp / "a.jsonl", errors_path=tmp / "e.jsonl"
+        calls_path=calls, ledgers_path=tmp / "l.jsonl", audits_path=tmp / "a.jsonl", errors_path=tmp / "e.jsonl"
     )
 
 
