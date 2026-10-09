@@ -155,6 +155,7 @@ def _valid_cache(path: Path, call_id: str) -> bool:
             and t.get("speaker") in ("bot", "user")
             and isinstance(t.get("text"), str)
             and _num(t.get("start_sec")) is not None
+            and _num(t.get("end_sec")) is not None  # ingest reads both times; a missing one stops the whole ingest
             for t in turns
         )
     )

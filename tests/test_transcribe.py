@@ -126,6 +126,7 @@ def test_corrupt_cached_transcript_is_transcribed_again(tmp_path, monkeypatch):
         json.dumps({"call_id": "77_123_ABC", "duration_sec": 30, "turns": [None]}),
         json.dumps({"call_id": "77_123_ABC", "duration_sec": 30, "turns": [{**turns[0], "speaker": "narrator"}]}),
         json.dumps({"call_id": "77_123_ABC", "duration_sec": 30, "turns": [{**turns[0], "start_sec": "0"}]}),
+        json.dumps({"call_id": "77_123_ABC", "duration_sec": 30, "turns": [{**turns[0], "end_sec": None}]}),
     ]
     for i, body in enumerate(bad_bodies):
         out = tmp_path / f"t{i}"
