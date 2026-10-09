@@ -24,6 +24,7 @@ PATCHES_PATH = ROOT / "runs" / "patches.json"
 GATES_PATH = ROOT / "runs" / "gates.jsonl"  # same files as prove.py; fix cannot import prove (prove imports fix)
 REPLAYS_PATH = ROOT / "runs" / "replays.jsonl"
 MAX_CHANGED_LINES = 15
+MAX_ATTEMPTS = 2  # patch attempts per cause; prove gates each at alpha / MAX_ATTEMPTS (Bonferroni over the looks)
 MAX_EXAMPLES = 3  # evidence quotes sent per cause
 EXAMPLE_CHARS = 160
 MAX_REFIX_EVIDENCE = 4  # failing NEW-prompt replay lines sent to a refix
@@ -244,16 +245,38 @@ def run_fix(
     ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") in FIXABLE_STATUSES]
     prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
+    out = Path(out_path)
+    existing = _read_doc(out)
+    held: dict[str, int] = {}
+    for x in [*existing.get("patches", []), *existing.get("history", [])]:
+        held[x.get("cause_id")] = max(held.get(x.get("cause_id"), 0), x.get("attempt", 1))
     rejected: list[dict] = []
     patches = []
     for cause in ranked[:top_n]:
+        if cause.cause_id in held:  # a rerun must not reset attempts or drop history: only refix moves a patch on
+            print(f"cause {cause.cause_id} already has attempt {held[cause.cause_id]}; use refix")
+            continue
         p = propose_patch(cause, evidence_examples(cause, audits), prompt_text, llm=llm, rejected=rejected)
         if p is not None:
             patches.append(p)
-    result = {"patches": [p.model_dump() for p in patches], "rejected": rejected}
-    out = Path(out_path)
-    _write_doc(out, result)
-    return result
+    lock_path = out.with_name(out.name + ".lock")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lf:  # the LLM calls are slow: merge into the file as it is now, as refix does
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            fresh = _read_doc(out)
+            have = {x.get("cause_id") for x in fresh.get("patches", [])}
+            have |= {x.get("cause_id") for x in fresh.get("history", [])}
+            merged = [*fresh.get("patches", []), *(p.model_dump() for p in patches if p.cause_id not in have)]
+            result = {**fresh, "patches": merged, "rejected": rejected}
+            _write_doc(out, result)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+    return {"patches": result["patches"], "rejected": rejected}
+
+
+def _read_doc(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 def _write_doc(out: Path, doc: dict) -> None:
@@ -311,9 +334,10 @@ def run_refix(
     """Write a second patch for a cause whose patch the gate rejected, from what the replays showed.
 
     Stops with SystemExit, before any LLM call, when the cause, its patch or its latest gate row is missing, when
-    the gate shipped the patch, or when that gate row is not for the current patch's attempt. On success the rejected
-    patch moves to `history` (with its gate decision) and the new patch becomes current with attempt + 1. A refused
-    proposal writes nothing and comes back in `rejected`. Returns {"patches": [new patch] or [], "rejected": [...]}.
+    the patch is already attempt MAX_ATTEMPTS, when the gate shipped the patch, or when that gate row is not for
+    the current patch's attempt. On success the rejected patch moves to `history` (with its gate decision) and
+    the new patch becomes current with attempt + 1. A refused proposal writes nothing and comes back in
+    `rejected`. Returns {"patches": [new patch] or [], "rejected": [...]}.
     """
     patches_path = Path(patches_path)
     doc = json.loads(patches_path.read_text(encoding="utf-8")) if patches_path.exists() else {}
@@ -321,6 +345,11 @@ def run_refix(
     if not slots:
         raise SystemExit(f"no patch for {cause_id} in {patches_path}; run `pipeline fix` first")
     current = PromptPatch.model_validate(doc["patches"][slots[-1]])
+    if current.attempt >= MAX_ATTEMPTS:
+        raise SystemExit(
+            f"{cause_id} is at attempt {current.attempt}: at most {MAX_ATTEMPTS} attempts per cause, "
+            f"so refix will not write attempt {current.attempt + 1}"
+        )
     gate_row = next((r for r in reversed(read_jsonl(gates_path)) if r.get("cause_id") == cause_id), None)
     if gate_row is None:
         raise SystemExit(f"no gate row for {cause_id} in {gates_path}; run `pipeline prove` first")
