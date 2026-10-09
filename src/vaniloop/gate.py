@@ -156,19 +156,34 @@ def decide(
 ) -> GateResult:
     """Ship iff the patch beats seed noise; reject on breakage; else inconclusive.
 
-    Ship needs all of: lift > 0, p_value <= alpha, pooled new fail rate <= max_new_fail_rate, no
-    unresolved trial in any arm (old seeds 0..K-1, new, guards), no Fatal verdict on any NEW target
-    replay, no confirmed guard break and at least min_calls matched calls. Reject on a confirmed guard
-    break, a Fatal on a NEW target replay, or lift <= 0. A guard Fatal under BOTH prompts is flaky and
-    does not reject. Everything else is inconclusive with its reason.
+    Ship needs all of: complete arms (old and new cover the same call set with exactly one trial per
+    seed 0..K-1 per call), lift > 0, p_value <= alpha, pooled new fail rate <= max_new_fail_rate, no
+    unresolved trial in any arm (old seeds 0..K-1, new, guards), a guard's NEW Fatal always backed by
+    a recorded re-check result, no Fatal verdict on any NEW target replay, no confirmed guard break
+    and at least min_calls matched calls. Reject on a confirmed guard break, a Fatal on a NEW target
+    replay, or lift <= 0. A guard Fatal under BOTH prompts is flaky and does not reject. Everything
+    else is inconclusive with its reason.
     """
     k = k if k is not None else max((t.seed for t in [*old, *new]), default=-1) + 1
     old_k = [t for t in old if t.seed < k]
     u_old, u_new = sum(t.unresolved for t in old_k), sum(t.unresolved for t in new)
     checked = guards or []
     u_guards = sum(g.unresolved for g in checked)
+    recheck_missing = [
+        g.call_id for g in checked if g.fatal_new and (g.fatal_after_recheck is None or g.fatal_old_seed1 is None)
+    ]
+    u_guards += len(recheck_missing)
     unresolved = u_old + u_new + u_guards
     calls = sorted({t.call_id for t in old_k} | {t.call_id for t in new})
+    incomplete: list[str] = []
+    for c in calls:
+        for arm, label in ((old_k, "old"), (new, "new")):
+            for seed in range(k):
+                n = sum(1 for t in arm if t.call_id == c and t.seed == seed)
+                if n == 0:
+                    incomplete.append(f"call '{c}' is missing its {label} seed-{seed} trial")
+                elif n > 1:
+                    incomplete.append(f"call '{c}' has {n} {label} trials for seed {seed}")
     new_fatals = sorted({t.call_id for t in new if t.fatal})
     confirmed = [g for g in checked if g.fatal_new and g.fatal_after_recheck]
     breaks = [g.call_id for g in confirmed if g.fatal_old_seed1 is False]
@@ -182,7 +197,7 @@ def decide(
             [sum(t.failed for t in new if t.call_id == c) for c in calls],
             k,
         )
-        if calls
+        if calls and not incomplete
         else 1.0
     )
     if unresolved:
@@ -191,6 +206,14 @@ def decide(
             f"{unresolved} trial(s) lack conclusive evidence "
             f"(old={u_old}, new={u_new}, guards={u_guards}; "
             f"Unknown/missing finding, NeedsReview or invalid_output)"
+        )
+        if recheck_missing:
+            reason += f"; guard {', '.join(recheck_missing)} has a NEW Fatal with no complete re-check evidence"
+    elif incomplete:
+        decision = "inconclusive"
+        head = "; ".join(incomplete[:3])
+        reason = f"incomplete design: {len(incomplete)} gap(s): {head}" + (
+            f"; +{len(incomplete) - 3} more" if len(incomplete) > 3 else ""
         )
     elif len(calls) < min_calls:
         decision = "inconclusive"
@@ -226,7 +249,7 @@ def decide(
         cause_id=cause_id,
         decision=decision,
         attempt=attempt,
-        p_value=p if unresolved == 0 and len(calls) >= min_calls else float("nan"),
+        p_value=p if unresolved == 0 and not incomplete and len(calls) >= min_calls else float("nan"),
         alpha=alpha,
         lift=lift,
         per_call=_per_call(old_k, new, k),
@@ -315,8 +338,10 @@ def run_gate(
 
     Design pre-flight: raises ValueError before any replay when min_achievable_p(n, k) > alpha (this
     design can never ship whatever happens), with n = len(calls). Replays then run in interleaved
-    order (old seed s, then new seed s, for s in 0..K-1, seed-major across calls). After every target
-    call's seed-0 pair has run, a futility check stops the gate with a reject if NEW failed
+    order (old seed s, then new seed s, for s in 0..K-1, seed-major across calls). If any seed-0
+    replay in either arm lacks conclusive evidence, the gate stops right there with inconclusive: a
+    futility reject would otherwise rest on an invisible OLD baseline. After every target call's
+    seed-0 pair has run, a futility check stops the gate with a reject if NEW failed
     conclusively on every call at seed 0, so the remaining replays and the guards never run. Each
     guard is replayed once under NEW (seed 0); if that is Fatal it is replayed once more under NEW
     (seed 1) and once under OLD (seed 1), and only
@@ -348,7 +373,22 @@ def run_gate(
     for item in calls:
         old.append(run_one(item, old_prompt, 0, "old"))
         new.append(run_one(item, new_prompt, 0, "new"))
-    if all(t.failed and not t.unresolved for t in new):
+    u_old0, u_new0 = sum(t.unresolved for t in old), sum(t.unresolved for t in new)
+    if u_old0 or u_new0:
+        # Futility must not fire on an invisible baseline: an unresolved seed-0 trial in either arm
+        # means the design never ran far enough to judge, so stop as inconclusive before the reject.
+        return _early(
+            cause_id,
+            "inconclusive",
+            f"unresolved seed-0 evidence (old={u_old0}, new={u_new0}); futility cannot be confirmed",
+            k_seeds,
+            n_calls,
+            attempt,
+            old,
+            new,
+            alpha,
+        )
+    if all(t.failed for t in new):
         # Futility: the new prompt failed on every target call at seed 0; stop here, spend nothing more.
         return _early(
             cause_id,

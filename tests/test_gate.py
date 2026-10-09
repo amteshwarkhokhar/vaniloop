@@ -200,6 +200,47 @@ def test_k_seeds_below_two_raises():
 
 
 # ---- the decisions the new rule demands ----
+OLD3 = trials("old", {"a": True, "b": True, "c": True})  # 3 calls, seeds 0 and 1, all failed
+NEW3 = trials("new", {"a": False, "b": False, "c": False})
+
+
+def test_incomplete_arms_are_inconclusive_and_never_compute_a_p():
+    """decide requires both arms to cover the same calls with exactly one trial per seed; gaps withhold.
+
+    Regression for final review finding 1: decide used to convolve whatever trials it was handed,
+    so three OLD trials and a single NEW passing trial per call (or no NEW at all) produced a tiny
+    p and a ship on 3x-less evidence than the design states; every gap must be inconclusive with
+    the missing call and seed named, and the p must stay nan because no fair test was run.
+    """
+    # NEW covers the calls but only seed 0: one trial per call instead of one per seed.
+    thin_new = [t for t in NEW3 if t.seed == 0]
+    r = decide(OLD3, thin_new, GUARD_OK, k=2)
+    assert r.decision == "inconclusive" and r.p_value != r.p_value
+    assert "call 'a' is missing its new seed-1 trial" in r.reason and "call 'c'" in r.reason
+    # NEW arm entirely empty: every call is missing from one arm.
+    r_empty = decide(OLD3, [], GUARD_OK, k=2)
+    assert r_empty.decision == "inconclusive" and "missing its new seed-0 trial" in r_empty.reason
+    # A call present in only one arm is named too.
+    only_old = OLD3 + trials("old", {"d": True}, k=2)
+    r_uncovered = decide(only_old, NEW3, GUARD_OK, k=2)
+    assert r_uncovered.decision == "inconclusive" and "call 'd' is missing its new seed-0 trial" in r_uncovered.reason
+    # A duplicated trial is as much a gap as a missing one: the design says exactly one.
+    dup = NEW3 + [t.model_copy() for t in NEW3 if t.call_id == "a" and t.seed == 0]
+    r_dup = decide(OLD3, dup, GUARD_OK, k=2)
+    assert r_dup.decision == "inconclusive" and "has 2 new trials for seed 0" in r_dup.reason
+
+
+def test_complete_arms_still_ship_the_same_evidence():
+    """The completeness rule adds no friction: the full-design evidence it protects still ships.
+
+    Control for finding 1: the same calls at the same seeds in both arms is exactly what the
+    futility-surviving path of run_gate hands decide, and that case must keep shipping at
+    p = (1/6)^3 so the new check cannot deadlock every real gate run into inconclusive.
+    """
+    r = decide(OLD3, NEW3, GUARD_OK, k=2)
+    assert r.decision == "ship" and r.p_value == pytest.approx((1 / 6) ** 3) and not r.reason.startswith("incomplete")
+
+
 def test_reviewer_null_scenario_does_not_ship():
     """All old replays fail on 3 calls at K=2 and one new replay passes: p = 0.5 > alpha, no ship.
 
@@ -326,13 +367,30 @@ def test_lift_positive_but_new_rate_over_cap_is_inconclusive():
 def test_cap_at_exactly_half_still_ships():
     """A new fail rate exactly at the 0.5 cap does not veto: only above the cap blocks.
 
-    If the cap check were `>=` instead of `>`, a patch that fixes exactly half the calls would be
-    framed as too weak despite meeting the stated cap, and the rule would contradict itself.
+    Regression for final review finding 4: the old version used a 0.4 rate and allowed
+    inconclusive, so a cap written as `>=` would still have passed; with K=4 and exactly two NEW
+    failures per call the rate is exactly 0.5 and the decision must be a ship, since only a rate
+    strictly above the cap is too weak to install.
     """
-    old = trials("old", {c: True for c in "abcd"}, k=5)
-    new = [t.model_copy(update={"failed": t.seed < 2}) for t in trials("new", {c: True for c in "abcd"}, k=5)]
-    r = decide(old, new, GUARD_OK, k=5)  # new rate 0.4? No: 2 of 5 = 0.4; set fails = 2.5? use 2 of 4?
-    assert r.new_fail_rate <= 0.5 and ("ship" == r.decision or "p" in r.reason)
+    old = trials("old", {c: True for c in "abcd"}, k=4)
+    new = [t.model_copy(update={"failed": t.seed < 2}) for t in trials("new", {c: True for c in "abcd"}, k=4)]
+    r = decide(old, new, GUARD_OK, k=4)
+    assert r.new_fail_rate == pytest.approx(0.5)  # exactly two NEW failures per call out of K=4
+    assert r.decision == "ship"  # a `>=` cap would veto this exact boundary
+
+
+def test_cap_rate_above_half_never_ships():
+    """A new fail rate above the 0.5 cap is inconclusive even with a real lift and a tiny p.
+
+    Boundary proof for finding 4's fix: one more NEW failure per call than the 0.5 case pushes the
+    pooled rate over the cap, and the cap must veto that while it tolerated exactly 0.5, so the
+    check cannot have slipped to a looser bound like 0.75.
+    """
+    old = trials("old", {c: True for c in "abcd"}, k=4)
+    new = [t.model_copy(update={"failed": t.seed < 3}) for t in trials("new", {c: True for c in "abcd"}, k=4)]
+    r = decide(old, new, GUARD_OK, k=4)
+    assert r.new_fail_rate == pytest.approx(0.75) and r.decision == "inconclusive"
+    assert "exceeds the cap" in r.reason
 
 
 # ---- guards: seed-0 fatal triggers a re-check; only a confirmed break rejects ----
@@ -413,6 +471,27 @@ def test_guard_unresolved_at_seed0_blocks_ship():
     assert r.decision == "inconclusive" and "guards=1" in r.reason
 
 
+def test_guard_new_fatal_without_recheck_evidence_is_inconclusive():
+    """A guard with a NEW Fatal but no recorded re-check result is unresolved: inconclusive, not ship.
+
+    Regression for final review finding 2: the confirmed-break rule required fatal_after_recheck
+    and read its absence as not-Fatal, so a half-run re-check (say a crash between the two guard
+    replays) left a real break invisible and the gate shipped; missing re-check evidence must
+    veto instead, while fully recorded re-checks keep the confirmed-break and flaky rules.
+    """
+    gap = GuardCheck(call_id="g1", fatal_new=True)  # no fatal_after_recheck, no fatal_old_seed1
+    r = decide(OLD3, NEW3, [gap], k=2)
+    assert r.decision == "inconclusive" and r.p_value != r.p_value
+    assert "no complete re-check evidence" in r.reason and "g1" in r.reason
+    # Controls: with the re-check recorded, the usual rules apply unchanged.
+    confirmed = GuardCheck(call_id="g1", fatal_new=True, fatal_after_recheck=True, fatal_old_seed1=False)
+    r_confirmed = decide(OLD3, NEW3, [confirmed], k=2)
+    assert r_confirmed.decision == "reject" and r_confirmed.guard_breaks == ["g1"]
+    flaky = GuardCheck(call_id="g1", fatal_new=True, fatal_after_recheck=True, fatal_old_seed1=True)
+    r_flaky = decide(OLD3, NEW3, [flaky], k=2)
+    assert r_flaky.decision == "ship" and r_flaky.guard_flaky == ["g1"]
+
+
 def test_guard_recheck_unresolved_blocks():
     """A guard whose seed-1 NEW re-check replay yields no conclusive evidence blocks the decision.
 
@@ -468,6 +547,41 @@ def test_futility_stops_even_when_old_would_look_perfect():
 
     r, log = gate(b, guards=("g1", "g2"))
     assert r.decision == "reject" and not any(cid.startswith("g") for cid, _p, _s in log)
+
+
+def test_unresolved_old_seed0_blocks_futility_reject():
+    """OLD seed-0 replays with no conclusive evidence block the futility reject on wiped-out NEW seed-0s.
+
+    Regression for final review finding 3: the futility stop looked only at the NEW arm, so with
+    every OLD seed-0 replay invalid the gate rejected on an invisible OLD baseline; an unresolved
+    trial in either arm must abort as inconclusive before the futility rule can fire.
+    """
+
+    def b(cid, prompt, seed):
+        if prompt == "OLD" and seed == 0:
+            return "Pass", "Pass", "invalid_output"  # the OLD baseline never got a readable replay
+        return "Fatal", "Fatal", "end_call"  # everything else: old s>0 and NEW all fail conclusively
+
+    r, log = gate(b)
+    assert r.decision == "inconclusive" and "unresolved seed-0 evidence" in r.reason
+    assert ("a", "NEW", 1) not in log  # the stop still happened: no replays after the seed-0 pairs
+
+
+def test_unresolved_new_seed0_blocks_futility_reject():
+    """A NEW seed-0 replay with no conclusive evidence also blocks the futility stop.
+
+    Symmetry check for finding 3's fix: one garbage NEW seed-0 replay must neither fire the
+    futility reject (it is not a conclusive failure) nor let the design continue as if the call
+    had passed, because the remaining seeds cannot repair missing evidence about seed 0.
+    """
+
+    def b(cid, prompt, seed):
+        if prompt == "OLD":
+            return "Fatal", "Fatal", "end_call"
+        return ("Pass", "Pass", "invalid_output") if (cid, seed) == ("a", 0) else ("Fatal", "Fatal", "end_call")
+
+    r, _log = gate(b)
+    assert r.decision == "inconclusive" and "unresolved seed-0 evidence" in r.reason
 
 
 def test_single_new_pass_at_seed0_disproves_futility():
