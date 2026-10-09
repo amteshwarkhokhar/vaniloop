@@ -126,6 +126,8 @@ def run_regrade(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AU
                 for r in ledgers
                 if r.get("call_id") in calls
             ]
+            if not audits:  # calls and ledgers share no call id: keep the audits that exist
+                raise SystemExit(f"regrade found no ledger for any of the {len(calls)} calls; audits left unchanged")
             out = Path(audits_path)
             tmp = out.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text("".join(json.dumps(a.model_dump(mode="json")) + "\n" for a in audits), encoding="utf-8")

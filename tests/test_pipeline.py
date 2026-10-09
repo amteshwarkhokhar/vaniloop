@@ -107,3 +107,20 @@ def test_regrade_refuses_to_replace_audits_when_inputs_are_missing(tmp_path):
     with pytest.raises(SystemExit):
         pipeline.run_regrade(tmp_path / "no_calls.jsonl", tmp_path / "no_ledgers.jsonl", audits)
     assert "keep" in audits.read_text()
+
+
+def test_regrade_keeps_audits_when_calls_and_ledgers_share_no_call(tmp_path, monkeypatch):
+    """regrade stops before touching audits.jsonl when no ledger matches any call.
+
+    Review round 2 found that non-empty but disjoint inputs passed the guard and replaced audits with an empty file.
+    """
+    monkeypatch.setattr(ledger, "complete_json", lambda *a, **k: dict(FAKE))
+    p = paths(tmp_path)
+    pipeline.run_audit(**p)
+    p["ledgers_path"].write_text(
+        "".join(json.dumps({**r, "call_id": f"other-{i}"}) + "\n" for i, r in enumerate(lines(p["ledgers_path"])))
+    )
+    p["audits_path"].write_text('{"call_id": "keep", "verdict": "Pass"}\n')
+    with pytest.raises(SystemExit):
+        pipeline.run_regrade(p["calls_path"], p["ledgers_path"], p["audits_path"])
+    assert "keep" in p["audits_path"].read_text()
