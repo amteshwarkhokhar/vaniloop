@@ -13,6 +13,16 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from vaniloop.grading import (
+    HAND_VERDICTS,
+    agreement,
+    failing_parameters,
+    known_parameters,
+    load_grades,
+    reveal,
+    save_grade,
+)
+from vaniloop.issue import KNOWN
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 from vaniloop.models import AuditRecord, CallRecord, Cause
 
@@ -82,6 +92,21 @@ def load_calls(d: Path | str) -> dict[str, CallRecord]:
     return {c.call_id: c for c in _models(CallRecord, read_jsonl(p))}
 
 
+def load_grade_sample(d: Path | str, audits: list[AuditRecord]) -> list[str]:
+    """The saved grade sample ids, or the first 20 audits when the file is absent or unusable."""
+    p = Path(d) / "grade_sample.json"
+    if p.exists():
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            valid = {a.call_id for a in audits}
+            picked = [r for r in raw if isinstance(r, str) and r in valid] if isinstance(raw, list) else []
+            if picked:
+                return picked
+        except Exception:  # a broken sample must fall back, not crash the view
+            pass
+    return [a.call_id for a in audits[:20]]
+
+
 # ---------- helpers ----------
 def audits_frame(audits: list[AuditRecord]) -> pd.DataFrame:
     rows = []
@@ -137,6 +162,26 @@ def pct(n: int, total: int) -> str:
     return f"{(100 * n / total):.0f}%" if total else "0%"
 
 
+def transcript_frame(call: CallRecord) -> pd.DataFrame:
+    """Transcript rows for the Grade view: idx, speaker, start_sec, text, tone, overlap.
+
+    tone and overlap are optional Turn fields added on another branch; getattr keeps this
+    view working when a call was produced before those fields existed.
+    """
+    rows = [
+        {
+            "idx": t.idx,
+            "speaker": t.speaker,
+            "start_sec": t.start_sec,
+            "text": t.text,
+            "tone": getattr(t, "tone", None),
+            "overlap": getattr(t, "overlap", None),
+        }
+        for t in call.turns
+    ]
+    return pd.DataFrame(rows, columns=["idx", "speaker", "start_sec", "text", "tone", "overlap"])
+
+
 # ---------- views ----------
 def render_detail(a: AuditRecord, call: CallRecord | None) -> None:
     st.subheader(f"{a.call_id}: {a.verdict}")
@@ -181,6 +226,127 @@ def render_detail(a: AuditRecord, call: CallRecord | None) -> None:
             st.audio(str(audio), start_time=int(start or 0))
         else:
             st.caption("Audio file not available.")
+
+
+def grade_tab(audits: list[AuditRecord], calls: dict[str, CallRecord], data_dir: Path) -> None:
+    """Blind hand-grading: grade one call, then reveal the audit and the agreement table."""
+    if not audits:
+        st.warning("No audits found in this data source.")
+        return
+    audit_by_id = {a.call_id: a for a in audits}
+    sample = [cid for cid in load_grade_sample(data_dir, audits) if cid in audit_by_id]
+    ids = sample or [a.call_id for a in audits]
+    grades_path = data_dir / "hand_grades.jsonl"
+    grades = load_grades(grades_path)
+    labels = {cid: (f"\u2713 {cid}" if cid in grades else f"   {cid}") for cid in ids}
+    if st.session_state.get("grade_sel") not in ids:
+        st.session_state["grade_sel"] = ids[0]
+    sel = st.selectbox("Call", ids, format_func=labels.get, key="grade_sel")
+    call = calls.get(sel)
+    st.subheader(sel)
+    if call is None:
+        st.warning("No call record found for this call.")
+    else:
+        audio = resolve_audio(call.audio_path)
+        if audio:
+            st.audio(str(audio))
+        else:
+            st.caption("Audio file not available.")
+        rows = transcript_frame(call)
+        rows["start_sec"] = rows["start_sec"].map("{:.1f}".format)
+        st.table(rows)  # st.table wraps text; a dataframe cuts long turns
+
+    existing = grades.get(sel) or {}
+    all_params = known_parameters(audits)
+    default_params = [p for p in existing.get("parameters", []) if p in all_params]
+    default_verdict = existing.get("verdict") if existing.get("verdict") in HAND_VERDICTS else HAND_VERDICTS[0]
+    default_turn = existing.get("first_fault_turn")
+    # Widgets are keyed by call id: unsaved choices on one call must never be saved under another.
+    with st.form(f"grade_form_{sel}"):
+        verdict = st.radio(
+            "Your verdict",
+            list(HAND_VERDICTS),
+            index=list(HAND_VERDICTS).index(default_verdict),
+            horizontal=True,
+            key=f"grade_verdict_{sel}",
+        )
+        params = st.multiselect(
+            "Failing parameters",
+            all_params,
+            default=default_params,
+            format_func=lambda p: f"{p}: {KNOWN[p][0]}" if p in KNOWN else p,
+            key=f"grade_params_{sel}",
+        )
+        fault_turn = st.number_input(
+            "First fault turn (optional)",
+            min_value=-1,
+            value=int(default_turn) if default_turn is not None else -1,
+            key=f"grade_turn_{sel}",
+        )
+        note = st.text_area("Note", value=existing.get("note", ""), key=f"grade_note_{sel}")
+        submitted = st.form_submit_button("Save grade")
+    if submitted:
+        save_grade(
+            grades_path,
+            {
+                "call_id": sel,
+                "verdict": verdict,
+                "parameters": list(params),
+                "first_fault_turn": None if fault_turn < 0 else int(fault_turn),
+                "note": note,
+            },
+        )
+        grades = load_grades(grades_path)
+
+    rev = reveal(sel, grades, audits)
+    if rev is None:
+        st.caption("Grade this call to reveal the audit verdict and the agreement table.")
+        return
+
+    st.divider()
+    st.markdown("**Reveal**")
+    hand_col, audit_col = st.columns(2)
+    with hand_col:
+        st.markdown("*Your grade*")
+        st.write(f"Verdict: {rev['hand'].get('verdict')}")
+        st.write(f"Failing parameters: {', '.join(rev['hand'].get('parameters') or []) or 'none'}")
+    with audit_col:
+        st.markdown("*Audit*")
+        if rev["audit"] is None:
+            st.write("No audit for this call.")
+        else:
+            st.write(f"Verdict: {rev['audit'].verdict}")
+            st.write(f"Failing parameters: {', '.join(failing_parameters(rev['audit'])) or 'none'}")
+    if rev["verdict_match"]:
+        st.success("Verdict match")
+    else:
+        st.error("Verdict mismatch")
+    st.caption(f"Shared failing parameters: {', '.join(rev['param_overlap']) or 'none'}")
+
+    agree = agreement(grades, audits)
+    st.markdown("**Agreement**")
+    m1, m2 = st.columns(2)
+    m1.metric("Calls graded", agree["graded"])
+    m2.metric(
+        "Verdict agreement",
+        f"{agree['verdict_agree']}/{agree['graded']} ({pct(agree['verdict_agree'], agree['graded'])})",
+    )
+    if agree["per_parameter"]:
+        pdf = pd.DataFrame(
+            [
+                {
+                    "parameter": p,
+                    "agree": v["agree"],
+                    "n": v["n"],
+                    "rate": "n/a" if v["rate"] is None else f"{v['rate'] * 100:.0f}%",
+                }
+                for p, v in agree["per_parameter"].items()
+            ]
+        )
+        st.dataframe(pdf, use_container_width=True, hide_index=True)
+    if agree["mismatches"]:
+        st.markdown("**Mismatches**")
+        st.dataframe(pd.DataFrame(agree["mismatches"], columns=["call_id", "hand", "audit"]), hide_index=True)
 
 
 def audit_tab(audits: list[AuditRecord], calls: dict[str, CallRecord]) -> None:
@@ -272,10 +438,12 @@ def main() -> None:
         st.caption(f"{len(audits)} audits, {len(causes)} causes, {len(calls)} calls")
     st.title("vaniloop")
     view = st.radio(
-        "View", ["Audit", "Issues", "Fix", "Test"], horizontal=True, key="view", label_visibility="collapsed"
+        "View", ["Audit", "Grade", "Issues", "Fix", "Test"], horizontal=True, key="view", label_visibility="collapsed"
     )
     if view == "Audit":
         audit_tab(audits, calls)
+    elif view == "Grade":
+        grade_tab(audits, calls, data_dir)
     elif view == "Issues":
         issues_tab(causes, meta.get("denominator", sum(a.verdict != "NeedsReview" for a in audits)))
     elif view == "Fix":

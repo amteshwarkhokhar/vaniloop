@@ -1,17 +1,20 @@
-"""Pipeline runner. `python -m vaniloop.pipeline audit|issues`."""
+"""Pipeline runner. `python -m vaniloop.pipeline audit|issues|fix|grade-sample`."""
 
 from __future__ import annotations
 
 import argparse
 import fcntl
+import json
+import os
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .fix import PATCHES_PATH, run_fix
+from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
-from .issue import AUDITS_PATH, CAUSES_PATH, run_issues
+from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord
@@ -20,6 +23,7 @@ from .rules import audit_call
 RUNS = AUDITS_PATH.parent
 LEDGERS_PATH = RUNS / "ledgers.jsonl"
 ERRORS_PATH = RUNS / "errors.jsonl"
+GRADE_SAMPLE_PATH = RUNS / "grade_sample.json"
 
 
 LOCK_MSG = "another audit run is active"
@@ -84,6 +88,21 @@ def _run_audit(calls_path, ledgers_path, audits_path, errors_path, workers, limi
     return {"processed": len(todo) - errors, "skipped": skipped, "errors": errors, "verdicts": dict(verdicts)}
 
 
+def run_grade_sample(
+    n: int = 20,
+    audits_path: Path = AUDITS_PATH,
+    out_path: Path = GRADE_SAMPLE_PATH,
+) -> list[str]:
+    """Pick a verdict-spread sample of audited calls and write the ids to grade_sample.json atomically."""
+    ids = grade_sample(load_audits(Path(audits_path)), n=n)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(ids, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, out)  # atomic, same pattern as issue.py
+    return ids
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="vaniloop.pipeline")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -94,6 +113,8 @@ def main(argv: list[str] | None = None) -> None:
     f = sub.add_parser("fix")
     f.add_argument("--prompt", required=True)
     f.add_argument("--top", type=int, default=3)
+    g = sub.add_parser("grade-sample")
+    g.add_argument("--n", type=int, default=20)
     args = ap.parse_args(argv)
     if args.cmd == "audit":
         s = run_audit(workers=args.workers, limit=args.limit)
@@ -103,6 +124,11 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")
+    elif args.cmd == "grade-sample":
+        ids = run_grade_sample(n=args.n)
+        print(f"{len(ids)} calls -> {GRADE_SAMPLE_PATH}")
+        for call_id in ids:
+            print(f"  {call_id}")
     else:
         causes = run_issues()
         print(f"{len(causes)} causes -> {CAUSES_PATH}")
