@@ -19,7 +19,7 @@
     const oldR = num(g.old_fail_rate);
     const newR = num(g.new_fail_rate);
     return `<li class="gate">
-      <span class="gcause"><b>${esc(names.get(g.cause_id) || g.cause_id)}</b>
+      <span class="gcause"><b>${esc(names.get(g.cause_id) || V.name(String(g.cause_id || "").replace(/^cause_/, "")))}</b>
         <span class="label">${esc(g.cause_id)}<span class="sep">/</span>Attempt ${esc(g.attempt ?? 1)}</span></span>
       <span class="gdec"><span class="chip t-${tone}">${esc(word)}</span></span>
       <span class="rates" role="img" aria-label="Fail rate ${pct(oldR)} on the old prompt, ${pct(newR)} on the new prompt">
