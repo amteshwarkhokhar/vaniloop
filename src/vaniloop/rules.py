@@ -433,7 +433,7 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     change = led.product_changed_at_turn
 
     def seg(i: int) -> int:  # a product change starts a new quantity (L83): compare only inside one segment
-        return 1 if change is not None and i > change else 0
+        return 1 if change is not None and i >= change else 0  # the change turn itself belongs to the new product
 
     reasked = []
     for sg in (0, 1):
@@ -444,22 +444,34 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
             )
     reasked.sort()
     if reasked:
-        r = reasked[0]
-        if any(g > r and seg(g) == seg(r) for g in gave):
+        unanswered = [r for r in reasked if not any(g > r and seg(g) == seg(r) for g in gave)]
+        if unanswered:  # any re-ask the buyer never answered may leave the lead without a quantity
+            r = unanswered[0]
             return Finding(
                 parameter="qty_missed",
-                status="NonFatal",
+                status="Fatal",
                 basis="spoken_proxy",
                 onset_turn=r,
-                reason=f"buyer said quantity '{said}', the bot asked again and the buyer repeated it",
+                reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
+                evidence=[_ev(call, r)],
+            )
+        r = reasked[0]
+        if not kept:  # the buyer answered every re-ask, but no captured value shows the answer was usable
+            return Finding(
+                parameter="qty_missed",
+                status="Unknown",
+                basis="spoken_proxy",
+                onset_turn=r,
+                reason=f"buyer said quantity '{said}', the bot asked again and the buyer answered, "
+                "but no captured quantity is visible",
                 evidence=[_ev(call, r)],
             )
         return Finding(
             parameter="qty_missed",
-            status="Fatal",
+            status="NonFatal",
             basis="spoken_proxy",
             onset_turn=r,
-            reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
+            reason=f"buyer said quantity '{said}', the bot asked again and the buyer repeated it",
             evidence=[_ev(call, r)],
         )
     return Finding(

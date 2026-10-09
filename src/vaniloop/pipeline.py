@@ -119,6 +119,8 @@ def run_regrade(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AU
         try:
             calls = {r["call_id"]: r for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)}
             ledgers = dedupe_by_call_id(read_jsonl(ledgers_path), last_wins=True)
+            if not calls or not ledgers:  # never replace real audits with an empty file
+                raise SystemExit(f"regrade needs calls and ledgers; found {len(calls)} calls, {len(ledgers)} ledgers")
             audits = [
                 audit_call(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
                 for r in ledgers
