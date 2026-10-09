@@ -27,6 +27,14 @@ REPLAYS_PATH = ROOT / "runs" / "replays.jsonl"
 TICKETS_DIR = ROOT / "runs" / "tickets"
 TICKET_TYPES = ("tool", "data")  # suspected_type values that a prompt edit cannot fix: they get a ticket, no patch
 AUDIO_PARAMETERS = {"dead_air"}  # judged from audio silences: a delay is a runtime issue, a text replay has none
+# Traces a ticketed cause needs before anyone may call it tool or data (#90): no trace field exists yet, so a
+# ticket never claims proof either.
+TRACE_FIELDS = (
+    "call-start values: product, category, spec list and unit list the call started with",
+    "VANI speech-to-text of every turn, bot and buyer",
+    "tool calls with their arguments and results",
+    "turn timings (when each turn started and ended)",
+)
 MAX_CHANGED_LINES = 15
 MAX_ATTEMPTS = 2  # patch attempts per cause; prove gates each at alpha / MAX_ATTEMPTS (Bonferroni over the looks)
 MAX_EXAMPLES = 3  # evidence quotes sent per cause
@@ -245,22 +253,27 @@ def apply_patch(prompt_text: str, patch: PromptPatch) -> str:
 def route(cause: Cause) -> tuple[str, str]:
     """Decide what the fix stage does with a cause. Returns (action, why); action is patch, ticket or watch.
 
-    watch: a channel cause (bad audio), an audio-timing cause (dead_air: a delay is a runtime issue and prove has no
-    audio to judge it), or a status outside FIXABLE_STATUSES (outlier, single_category, watch, isolated). Neither a
-    patch nor a ticket is written. run_fix also moves a patch cause with no usable evidence here.
-    ticket: a fixable cause whose suspected_type is tool or data. Evidence goes to runs/tickets, no patch.
-    patch: every other fixable cause. That includes flow_logic causes such as looping, because `type` alone does
-    not say the prompt is innocent: only suspected_type tool or data does.
+    watch: bad audio (owner speech, or a channel cause), a runtime cause (dead_air: a delay is a runtime issue and
+    prove has no audio to judge it), an unresolved cause with no suspect to trace, or a status outside
+    FIXABLE_STATUSES (outlier, single_category, watch, isolated). Neither a patch nor a ticket is written. run_fix
+    also moves a patch cause with no usable evidence here.
+    ticket: an unresolved cause with a tool or data suspect (#90). Evidence goes to runs/tickets, no patch. On an
+    old causes.json without owner fields the refused suspected_type rule still applies.
+    patch: only a fixable cause whose owner is prompt. That includes flow_logic causes such as looping, because
+    `type` alone does not say the prompt is innocent: the owner does.
     """
-    if cause.type == "channel":
+    if cause.owner == "speech" or cause.type == "channel":
         return "watch", "channel cause: bad audio"
-    if cause.parameter in AUDIO_PARAMETERS:
+    if cause.owner == "runtime" or cause.parameter in AUDIO_PARAMETERS:
         return "watch", f"{cause.parameter}: a delay is a runtime issue, not a prompt issue"
     if cause.status not in FIXABLE_STATUSES:
         return "watch", f"status {cause.status}"
-    if cause.suspected_type in TICKET_TYPES:
-        return "ticket", f"suspected {cause.suspected_type}: a prompt edit does not fix it"
-    return "patch", "prompt-side cause"
+    suspect = cause.suspect or cause.suspected_type
+    if suspect in TICKET_TYPES and cause.owner in ("unresolved", None):
+        return "ticket", f"suspected {suspect}: a prompt edit does not fix it"
+    if cause.owner == "prompt" or cause.owner is None:
+        return "patch", "prompt-side cause"
+    return "watch", f"owner {cause.owner}: no prompt edit or ticket routes it"
 
 
 def require_not_ticket(cause_id: str, causes_path: Path) -> None:
@@ -337,6 +350,8 @@ def ticket_text(cause: Cause, audits: dict[str, AuditRecord], gate_rows: list[di
     spread = Counter(category_of(call_id) for call_id in members)
     lines += ["", "## Category spread"]
     lines += [f"- {cat}: {n}" for cat, n in sorted(spread.items(), key=lambda kv: (-kv[1], kv[0]))] or ["- none"]
+    lines += ["", "## Traces needed to judge it (none of the above is proof yet)"]
+    lines += [f"- {field}" for field in TRACE_FIELDS]
     lines += ["", "## Gate rows"]
     rows = [r for r in gate_rows if r.get("cause_id") == cause.cause_id]
     lines += [

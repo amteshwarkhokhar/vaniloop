@@ -972,6 +972,58 @@ def test_data_cause_gets_a_ticket_with_evidence_and_no_patch(tmp_path):
     assert not any(line.strip().startswith("line two") for line in text.splitlines())  # no multi-line quote
 
 
+def test_owner_fields_route_watch_ticket_and_patch_and_old_files_still_route():
+    """route: owner speech or runtime is watched, unresolved with a suspect is a ticket, prompt is patched.
+
+    Without it the owner fields would be display-only and a speech or runtime fault could take a patch slot (#90).
+    An old causes.json row without owner fields must still route by suspected_type, so loading never breaks.
+    """
+    speech = typed_cause("ch", owner="speech")
+    assert route(speech)[0] == "watch" and route(speech)[1] == "channel cause: bad audio"
+    runtime = typed_cause("da", owner="runtime", parameter="dead_air")
+    assert route(runtime)[0] == "watch" and "runtime" in route(runtime)[1]
+    assert route(typed_cause("da2", owner="runtime"))[0] == "watch"  # any runtime owner, not just dead_air
+    data = typed_cause("isq", owner="unresolved", suspect="data", parameter="category_isq")
+    assert route(data)[0] == "ticket"
+    tool = typed_cause("pc", owner="unresolved", suspect="tool", parameter="product_change")
+    assert route(tool)[0] == "ticket"
+    assert route(typed_cause("loop", owner="prompt"))[0] == "patch"
+    assert route(typed_cause("isq2", suspected="data", parameter="category_isq"))[0] == "ticket"  # no owner: old rule
+    assert route(typed_cause("l2"))[0] == "patch"  # no owner and no suspect: patched as before
+
+
+def test_ticket_lists_the_trace_fields_needed_and_unresolved_gets_no_patch(tmp_path):
+    """A ticket must name every trace field an unresolved cause needs: call-start values, per-turn speech-to-text
+    and timings, tool calls with arguments and results, and write no patch.
+
+    Without it the owner of a data or tool suspect would not know what to collect, and the ticket would read as a
+    verdict when it carries missing evidence at best (#90).
+    """
+    data = typed_cause(
+        "cause_isq", owner="unresolved", owner_evidence="missing", suspect="data", parameter="category_isq"
+    )
+    tool = typed_cause(
+        "cause_pc", owner="unresolved", owner_evidence="missing", suspect="tool", parameter="product_change"
+    )
+    kw = typed_files(tmp_path, [data, tool])
+    r = run_fix(llm=_boom, **kw)
+    assert r["patches"] == [] and sorted(r["tickets"]) == ["cause_isq", "cause_pc"]
+    text = (kw["tickets_dir"] / "cause_isq.md").read_text()
+    for needle in (
+        "Traces needed",
+        "product",
+        "category",
+        "spec list",
+        "unit list",
+        "speech-to-text",
+        "tool call",
+        "argument",
+        "timing",
+    ):
+        assert needle in text
+    assert "no prompt patch is written for this cause" in text  # the existing ticket contract is unchanged
+
+
 def test_channel_and_outlier_causes_get_neither_patch_nor_ticket_and_are_watched(tmp_path):
     """Channel causes and outliers (also single_category and watch) must get no patch and no ticket, only a watch.
 

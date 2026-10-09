@@ -4,6 +4,7 @@ import pytest
 
 from vaniloop import categorize, gate
 from vaniloop.issue import (
+    KNOWN,
     NOT_REPRODUCED_PREFIX,
     UNKNOWN_CATEGORY,
     build_causes,
@@ -12,7 +13,7 @@ from vaniloop.issue import (
     run_issues,
     wilson,
 )
-from vaniloop.models import AuditRecord, Finding, Turn
+from vaniloop.models import AuditRecord, Finding, Ledger, Turn
 
 
 def aud(cid, verdict="Fatal", **statuses):
@@ -277,6 +278,16 @@ def turns_for(n=12, **flags):
     return out
 
 
+def led(call_id, **slots):
+    """A synthetic ledger: slot -> (buyer value, bot value). None drops that side."""
+    return Ledger(
+        call_id=call_id,
+        scope="bl_collection",
+        buyer_facts={s: v[0] for s, v in slots.items() if v[0] is not None},
+        bot_confirmed={s: v[1] for s, v in slots.items() if v[1] is not None},
+    )
+
+
 def by_param(causes):
     return {c.parameter: c for c in causes}
 
@@ -343,26 +354,58 @@ def test_equal_onsets_and_all_missing_onsets_make_co_roots():
     assert c["qty_accuracy"].symptom_calls == ["a", "b", "c"]
 
 
-def test_misheard_onset_makes_a_channel_cause_with_status_watch():
-    """A root whose onset turn has bot_misheard must go to a type=channel cause with status watch, even at 3 calls.
+def test_misheard_onset_with_a_value_mismatch_is_channel_and_a_pure_re_ask_is_not():
+    """A misheard re-ask is channel only when the ledger's bot-confirmed quantity differs from what the buyer said.
 
-    Without it a bad line would be read as a prompt fault and a patch would be written for a problem of the audio.
+    Gemini sets bot_misheard on every re-ask, so without the ledger check every qty_missed root became a speech
+    fault: a re-ask with equal buyer and bot quantities must stay a prompt cause owned by the prompt (#90).
     """
     audits = [aud_on(c, qty_missed=("Fatal", 4)) for c in "abc"]
     turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
-    causes = build_causes(audits, turns)
+    wrong = {c: led(c, quantity=("50 kg", "15 kg")) for c in "abc"}  # buyer said 50, the bot captured 15
+    causes = build_causes(audits, turns, wrong)
     assert [(c.type, c.status, c.parameter) for c in causes] == [("channel", "watch", "qty_missed")]
+    assert (causes[0].owner, causes[0].owner_evidence, causes[0].suspect, causes[0].owner_note) == (
+        "speech",
+        "likely",
+        None,
+        None,
+    )
     assert causes[0].cause_id != "cause_qty_missed" and causes[0].fatal_calls == ["a", "b", "c"]
     assert causes[0].fixability == 0.0
+    equal = {c: led(c, quantity=("50 kg", "50 kg")) for c in "abc"}
+    causes = build_causes(audits, turns, equal)
+    assert [(c.type, c.owner, c.owner_evidence) for c in causes] == [("prompt", "prompt", "likely")]
+    one_side = {c: led(c, quantity=("50 kg", None)) for c in "abc"}
+    assert build_causes(audits, turns, one_side)[0].type == "channel"  # bot captured nothing: a mismatch
     audits += [aud_on(c, qty_missed=("Fatal", 4)) for c in "de"]  # two clean calls (no turns flagged)
     turns.update({c: turns_for() for c in "de"})
-    c = {x.cause_id: x for x in build_causes(audits, turns)}
+    leds = {**wrong, "d": led("d"), "e": led("e")}
+    c = {x.cause_id: x for x in build_causes(audits, turns, leds)}
     assert c["cause_qty_missed"].fatal_calls == ["d", "e"] and c["cause_channel_qty_missed"].fatal_calls == [
         "a",
         "b",
         "c",
     ]
     assert c["cause_qty_missed"].type == "prompt"
+    assert [x.type for x in build_causes(audits, turns)] == ["prompt"]  # no ledgers: a re-ask stays a prompt fault
+
+
+def test_qty_unit_channel_reads_the_unit_slot_only_when_the_ledger_has_one():
+    """A misheard qty_unit root must compare the unit slot when the ledger has one, else the quantity slot.
+
+    Without the fallback a unit fault on a ledger without a unit slot could never read as channel, and without
+    the check a quantity mismatch under equal units would fake one (#90).
+    """
+    audits = [aud_on(c, qty_unit=("Fatal", 4)) for c in "abc"]
+    turns = {c: turns_for(t4="bot_misheard") for c in "abc"}
+    units = {c: led(c, quantity=("500 g", "500 g"), unit=("kg", "g")) for c in "abc"}
+    causes = build_causes(audits, turns, units)
+    assert causes[0].type == "channel"  # quantities match, the units differ: the unit slot decided
+    no_units = {c: led(c, quantity=("5", "3")) for c in "abc"}
+    assert build_causes(audits, turns, no_units)[0].type == "channel"  # no unit slot: the quantity mismatch decided
+    equal = {c: led(c, quantity=("5", "5")) for c in "abc"}
+    assert [c.type for c in build_causes(audits, turns, equal)] == ["prompt"]  # nothing differs: a re-ask, not speech
 
 
 def test_unclear_user_turn_right_before_the_onset_is_a_channel_fault():
@@ -388,7 +431,10 @@ def test_only_the_root_can_be_channel_and_no_turns_means_no_channel():
     c = by_param(build_causes(audits, turns))
     assert c["qty_missed"].type == "prompt" and "looping" not in c
     flagged = {c: turns_for(t2="bot_misheard") for c in "abc"}
-    assert build_causes(audits, flagged)[0].type == "channel"
+    wrong = {c: led(c, quantity=("30 kg", "3 kg")) for c in "abc"}
+    assert build_causes(audits, flagged, wrong)[0].type == "channel"  # misheard onset captures a different value
+    assert build_causes(audits, flagged, {c: led(c, quantity=("30 kg", "30 kg")) for c in "abc"})[0].type == "prompt"
+    assert build_causes(audits, flagged)[0].type == "prompt"  # no ledger: rule (b) cannot show
     assert build_causes(audits, {})[0].type == "prompt" and build_causes(audits)[0].type == "prompt"
     no_onset = [aud_on(c, looping=("Fatal", None)) for c in "abc"]
     assert build_causes(no_onset, {c: turns_for(t0="bot_misheard") for c in "abc"})[0].type == "flow_logic"
@@ -400,7 +446,7 @@ def test_channel_cause_stays_watch_and_is_refused_by_fix(tmp_path):
     Without it the three-call support and two-category tests would rank a bad-audio cause and refix could patch it.
     """
     audits = [aud_on(c, looping=("Fatal", 4)) for c in "abc"]
-    causes = build_causes(audits, {c: turns_for(t4="bot_misheard") for c in "abc"})
+    causes = build_causes(audits, {c: turns_for(t3="audio_unclear") for c in "abc"})  # looping: rule (a) only
     out, outliers = classify_causes(causes, cat_map(a="food", b="services", c="other"), [SHIPPED])
     assert [(c.type, c.status) for c in out] == [("channel", "watch")]
     assert outliers[0]["condition"] == "channel" and outliers[0]["status"] == "watch"
@@ -429,6 +475,32 @@ def test_suspected_type_flags_tool_and_data_without_changing_status():
     assert c["product_change"].type == "prompt" and c["product_change"].status == "ranked"
 
 
+def test_owner_and_evidence_follow_the_mapping_and_no_cause_is_proof():
+    """Every parameter's cause must carry its documented owner, evidence and suspect, and no cause is proof.
+
+    No trace fields exist yet, so an owner_evidence of proof would overclaim, and a swapped mapping would send a
+    prompt fault to a data ticket or hide who owns a speech fault (#90).
+    """
+    audits = [aud(p, **{p: "Fatal"}) for p in KNOWN]  # one failing call per known parameter
+    audits.append(aud("zeta", zeta="Fatal"))  # an unknown parameter falls back to the default owner
+    leds = {p: led(p) for p in (*KNOWN, "zeta")}
+    causes = {x.parameter: x for x in build_causes(audits, {p: turns_for() for p in leds}, leds)}
+    assert causes["dead_air"].owner == "runtime" and causes["dead_air"].owner_evidence == "likely"
+    assert causes["category_isq"].owner == "unresolved" and causes["category_isq"].owner_evidence == "missing"
+    assert causes["category_isq"].suspect == "data" and causes["product_change"].suspect == "tool"
+    assert causes["product_change"].owner == "unresolved" and causes["product_change"].owner_evidence == "missing"
+    assert causes["qty_probing"].owner == "prompt"
+    assert causes["qty_probing"].owner_note == "applicability assumed: unit list not visible"
+    for p in ("looping", "qty_missed", "qty_accuracy", "qty_unit", "zeta"):
+        assert (causes[p].owner, causes[p].owner_evidence, causes[p].suspect, causes[p].owner_note) == (
+            "prompt",
+            "likely",
+            None,
+            None,
+        )
+    assert all(x.owner_evidence != "proof" for x in causes.values())
+
+
 def test_run_issues_reads_calls_and_writes_symptoms_and_the_onset_count(tmp_path):
     """run_issues must read calls.jsonl beside causes.json, write the channel split and report calls it cannot order.
 
@@ -436,18 +508,31 @@ def test_run_issues_reads_calls_and_writes_symptoms_and_the_onset_count(tmp_path
     calls have no onset order) on real runs.
     """
     audits = tmp_path / "audits.jsonl"
-    rows = [aud_on(c, qty_missed=("Fatal", 4)) for c in "abc"]
+    rows = [aud_on(c, qty_missed=("Fatal", 4)) for c in "abc"]  # call a is misheard and captured a wrong value
     rows += [aud_on("d", qty_missed=("Fatal", 4), looping=("Fatal", 9))]
     rows += [aud_on("e", looping=("Fatal", None), dead_air=("Fatal", None))]  # cannot be ordered
     audits.write_text("\n".join(r.model_dump_json() for r in rows) + "\n")
     calls = [{"call_id": "a", "duration_sec": 9, "turns": [t.model_dump() for t in turns_for(t4="bot_misheard")]}]
     (tmp_path / "calls.jsonl").write_text("\n".join(json.dumps(c) for c in calls) + "\n")
+    rows = [  # call a's ledger: buyer said 50, the bot captured 15, so the misheard re-ask is channel (#90)
+        {
+            "call_id": "a",
+            "scope": "bl_collection",
+            "buyer_facts": {"quantity": "50 kg"},
+            "bot_confirmed": {"quantity": "15 kg"},
+        },
+    ]
+    (tmp_path / "ledgers.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     causes = run_issues(audits, tmp_path / "causes.json")
     doc = json.loads((tmp_path / "causes.json").read_text())
     got = {c["cause_id"]: c for c in doc["causes"]}
     assert (
         got["cause_channel_qty_missed"]["fatal_calls"] == ["a"] and got["cause_channel_qty_missed"]["status"] == "watch"
     )
+    assert (got["cause_channel_qty_missed"]["owner"], got["cause_qty_missed"]["owner_evidence"]) == (
+        "speech",
+        "likely",
+    )  # causes.json carries the new fields (#90)
     assert got["cause_qty_missed"]["fatal_calls"] == ["b", "c", "d"]
     assert got["cause_looping"]["fatal_calls"] == ["e"]
     assert got["cause_qty_missed"]["symptom_calls"] == [] and len(causes) == len(doc["causes"])

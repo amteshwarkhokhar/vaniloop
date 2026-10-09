@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from .jsonl import dedupe_by_call_id, read_jsonl
-from .models import AuditRecord, Cause, Turn
+from .models import AuditRecord, Cause, Ledger, Turn
 
 ROOT = Path(__file__).resolve().parents[2]
 AUDITS_PATH = ROOT / "runs" / "audits.jsonl"
@@ -27,6 +27,26 @@ STATUS_ORDER = {"ranked": 0, "pattern_unconfirmed": 0, "watch": 1, "outlier": 2,
 FIXABILITY = {"prompt": 1.0, "flow_logic": 0.5, "asr": 0.25, "channel": 0.0}
 CHANNEL_FLAGS = ("bot_misheard", "audio_unclear")  # Turn fields that say the line, not the prompt, failed
 SUSPECTED_TYPE = {"product_change": "tool", "category_isq": "data"}  # flagged only: a real verdict needs traces
+# parameter -> the ledger slot whose spoken value a channel rule (b) compares (#90). qty_unit falls back to
+# quantity when the ledger has no unit slot (see _slot_for); looping and dead_air have no slot: rule (a) only.
+SLOT_OF = {
+    "qty_missed": "quantity",
+    "qty_accuracy": "quantity",
+    "qty_unit": "quantity",  # falls back to quantity when the ledger has no unit slot (see _slot_for)
+    "qty_probing": "quantity",
+    "product_change": "product",
+    "category_isq": "spec",
+}
+# parameter -> (owner, owner_evidence, suspect, owner_note) (#90). No trace fields exist yet, so nothing here
+# is proof. Every parameter not listed is owned by the prompt with likely evidence, as the type usually says.
+OWNER_OF = {
+    "dead_air": ("runtime", "likely", None, None),
+    "category_isq": ("unresolved", "missing", "data", None),
+    "product_change": ("unresolved", "missing", "tool", None),
+    "qty_probing": ("prompt", "likely", None, "applicability assumed: unit list not visible"),
+}
+OTHER_OWNER = ("prompt", "likely", None, None)  # every other prompt or flow_logic cause
+SPEECH_OWNER = ("speech", "likely", None, None)  # every channel cause: the line, not the prompt, failed
 
 # parameter -> (name, description, type)
 KNOWN = {
@@ -82,11 +102,59 @@ def _dedupe(audits: list[AuditRecord]) -> list[AuditRecord]:
     return list({a.call_id: a for a in audits}.values())
 
 
-def _channel_turn(turns: Sequence[Turn], onset: int) -> bool:
-    """True if the onset turn, or the nearest user turn before it, has bot_misheard or audio_unclear set."""
+def _norm_value(text: str | None) -> str:
+    """A slot value compared for equality: stripped, lowercased, inner whitespace collapsed to one space."""
+    return " ".join(str(text).split()).lower()
+
+
+def _value_mismatch(led: Ledger, slot: str) -> bool:
+    """True when the ledger's buyer value and the bot's confirmed value for `slot` differ.
+
+    Values are compared after normalisation (strip, lowercase, collapse spaces); for quantity the two sides are
+    parsed with the rules.py helpers first, so '50' and 'fifty' agree. A value on only one side is a mismatch
+    (the buyer said it, the bot never captured it); both empty is no mismatch.
+    """
+    said, kept = led.buyer_facts.get(slot), led.bot_confirmed.get(slot)
+    if not _norm_value(said) and not _norm_value(kept):
+        return False
+    if slot == "quantity":
+        from .rules import parse_quantity  # lazy: rules imports only models today, issue must not import it first
+
+        pa, pb = parse_quantity(said), parse_quantity(kept)
+        if pa is not None and pb is not None:
+            return pa != pb
+    return _norm_value(said) != _norm_value(kept)
+
+
+def _slot_for(param: str, led: Ledger | None) -> str | None:
+    """The ledger slot the channel rule (b) compares for this parameter, None when there is no such slot.
+
+    qty_unit compares the unit slot when the ledger has one (either side stated a unit), else the quantity
+    fallback of SLOT_OF. dead_air and looping have no slot, so only rule (a) can make them channel.
+    """
+    if param == "qty_unit" and led is not None and (led.buyer_facts.get("unit") or led.bot_confirmed.get("unit")):
+        return "unit"
+    return SLOT_OF.get(param)
+
+
+def _channel_turn(turns: Sequence[Turn], onset: int, slot: str | None, led: Ledger | None) -> bool:
+    """True only when the audio, not the prompt, failed at or before the onset turn.
+
+    (a) audio_unclear on the onset turn or the nearest user turn before it, or (b) bot_misheard on one of them AND
+    the ledger shows a spoken value mismatch for `slot` (see _value_mismatch). A re-ask alone, even with
+    bot_misheard, is not channel: Gemini sets bot_misheard on every re-ask (#90). Without the call's ledger, (b)
+    cannot show and only (a) makes the cause channel.
+    """
     near = [t for t in turns if t.idx == onset]
     near += sorted((t for t in turns if t.speaker == "user" and t.idx < onset), key=lambda t: t.idx)[-1:]
-    return any(getattr(t, f) is True for t in near for f in CHANNEL_FLAGS)
+    if any(t.audio_unclear is True for t in near):
+        return True  # (a): the audio there is unclear, so the words may never have arrived
+    return (
+        slot is not None
+        and led is not None
+        and any(t.bot_misheard is True for t in near)
+        and _value_mismatch(led, slot)
+    )
 
 
 def decide_roots(audit: AuditRecord) -> dict[str, dict]:
@@ -116,17 +184,27 @@ def decide_roots(audit: AuditRecord) -> dict[str, dict]:
     return found
 
 
-def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] | None = None) -> list[Cause]:
+def build_causes(
+    audits: list[AuditRecord],
+    turns: Mapping[str, Sequence[Turn]] | None = None,
+    ledgers: Mapping[str, Ledger] | None = None,
+) -> list[Cause]:
     """One cause per failing parameter, counted on the calls where that parameter is the call's root finding.
 
     A call where the parameter failed but an earlier finding is the root goes to `symptom_calls` and counts for
     nothing. A cause with no root call is not listed. See decide_roots for the tie rule.
-    A root finding whose onset turn, or the nearest user turn before it, has bot_misheard or audio_unclear set in
-    `turns` (call_id -> turns, from calls.jsonl) is a channel fault. Channel roots are grouped per parameter into
-    causes with type "channel", cause_id `cause_channel_<parameter>`, status watch and fixability 0: bad audio is
-    not patched in the prompt. With `turns` None or without the call, no root is a channel fault.
+    A root is a channel fault only when the audio, not the prompt, failed at its onset (see _channel_turn): the
+    onset turn or the nearest user turn before it has audio_unclear, or it has bot_misheard and the call's ledger
+    shows a spoken value mismatch for the parameter's slot (qty_* -> quantity, qty_unit -> unit when the ledger
+    has a unit slot, product_change -> product, category_isq -> spec). A re-ask alone, even with bot_misheard, is
+    a prompt fault (#90). With `turns` or `ledgers` None, or without the call, the missing part is out and the
+    other rule still applies.
+    Every cause gets an owner, an owner_evidence, a suspect (for unresolved ones) and an owner_note from
+    OWNER_OF and the type (channel -> speech, dead_air -> runtime). No cause is ever marked proof: no trace
+    fields exist yet.
     """
     calls = turns or {}
+    leds = ledgers or {}
     audits = _dedupe(audits)
     audited = [a for a in audits if a.verdict != "NeedsReview"]
     n = len(audited)
@@ -134,7 +212,12 @@ def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] 
     groups: dict[tuple[bool, str], dict[str, set[str]]] = {}
     for a in audited:
         for param, d in decide_roots(a).items():
-            channel = d["root"] and d["onset"] is not None and _channel_turn(calls.get(a.call_id, ()), d["onset"])
+            led = leds.get(a.call_id)
+            channel = (
+                d["root"]
+                and d["onset"] is not None
+                and _channel_turn(calls.get(a.call_id, ()), d["onset"], _slot_for(param, led), led)
+            )
             g = groups.setdefault((channel, param), {"Fatal": set(), "NonFatal": set(), "symptom": set()})
             g[d["status"] if d["root"] else "symptom"].add(a.call_id)
     causes: list[Cause] = []
@@ -154,6 +237,7 @@ def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] 
         fix = FIXABILITY[typ] if typ in FIXABILITY else 1.0
         lo, hi = wilson(affected, n)
         status = "watch" if channel else "ranked" if affected >= MIN_SUPPORT else "watch" if fatal else "isolated"
+        owner, owner_ev, suspect, owner_note = SPEECH_OWNER if channel else OWNER_OF.get(param, OTHER_OWNER)
         causes.append(
             Cause(
                 cause_id=f"cause_channel_{param}" if channel else f"cause_{param}",
@@ -171,6 +255,10 @@ def build_causes(audits: list[AuditRecord], turns: Mapping[str, Sequence[Turn]] 
                 freq_ci_low=lo,
                 freq_ci_high=hi,
                 status=status,
+                owner=owner,
+                owner_evidence=owner_ev,
+                suspect=suspect,
+                owner_note=owner_note,
             )
         )
     causes.sort(key=lambda c: (STATUS_ORDER[c.status], -c.rank_score, -c.priority))
@@ -330,6 +418,20 @@ def _call_turns(runs: Path) -> dict[str, list[Turn]]:
     return out
 
 
+def _call_ledgers(runs: Path) -> dict[str, Ledger]:
+    """call_id -> ledger from `<runs>/ledgers.jsonl` (last row wins). A malformed row is skipped.
+
+    The channel rule (b) reads the buyer's value and the bot's confirmed value from the ledger (#90).
+    """
+    out: dict[str, Ledger] = {}
+    for r in dedupe_by_call_id(read_jsonl(runs / "ledgers.jsonl"), last_wins=True):
+        try:
+            out[r["call_id"]] = Ledger.model_validate(r)
+        except Exception:  # one bad row must not stop ranking
+            continue
+    return out
+
+
 def _root_stats(audits: list[AuditRecord]) -> dict[str, int]:
     """Counts that show whether root ordering works on these audits (the stop rule of issue #71).
 
@@ -353,7 +455,9 @@ def run_issues(audits_path: Path = AUDITS_PATH, out_path: Path = CAUSES_PATH) ->
     audits = load_audits(Path(audits_path))
     runs = Path(out_path).parent
     causes, outliers = classify_causes(
-        build_causes(audits, _call_turns(runs)), _call_categories(runs), read_jsonl(runs / "gates.jsonl")
+        build_causes(audits, _call_turns(runs), _call_ledgers(runs)),
+        _call_categories(runs),
+        read_jsonl(runs / "gates.jsonl"),
     )
     review = sum(a.verdict == "NeedsReview" for a in audits)
     doc = {
