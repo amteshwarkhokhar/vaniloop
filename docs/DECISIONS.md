@@ -13,3 +13,4 @@ One line per decision. Newest last. Change a line only with a new line that repl
 | 2026-10-09 | Baseline prompt = the real Sarvam VANI prompt (gitignored copy, mapped in `ideation/06_vani_prompt_map.md`) | Replaces the inferred prompt. Fix diffs apply to real text. |
 | 2026-10-09 | Loop limits are per slot, from prompt L69 (product 4, quantity 3, spec 2, name 3, city 3) | The prompt sets them. One flat limit of 3 was wrong. |
 | 2026-10-09 | Work runs as GitHub issues in work-order format. Sonnet implements, Codex reviews, `bin/check` gates. | Parallel agents without collisions. |
+| 2026-10-09 | Sarvam may receive the real VANI prompt and real call text (IndiaMART's Sarvam workspace). Replays run on a draft VANI replica agent there. | Owner approved. Production VANI already runs on Sarvam. Replays come with per-turn traces and use Sarvam credits. |

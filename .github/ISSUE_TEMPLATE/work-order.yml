@@ -1,0 +1,56 @@
+name: Work order
+description: One task that one PR can finish (at most 600 changed lines, 20 files)
+body:
+  - type: markdown
+    attributes:
+      value: "No real buyer names, phone numbers or call quotes. Use placeholders such as BuyerA."
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Loop stage
+      options: ["0 Ingest", "1 Audit", "2 Issue", "3 Fix", "4 Test", "5 Demo", "infra"]
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes:
+      label: What and why
+      description: Plain words. Name one concrete call (placeholder names only).
+    validations: {required: true}
+  - type: input
+    id: allowed
+    attributes:
+      label: Allowed paths
+      placeholder: "src/vaniloop/..., tests/"
+    validations: {required: true}
+  - type: input
+    id: forbidden
+    attributes:
+      label: Forbidden paths
+      value: "transcripts/, runs/, data/raw/, .env (never commit call data)"
+    validations: {required: true}
+  - type: input
+    id: verify
+    attributes:
+      label: Verify
+      value: "bin/check"
+    validations: {required: true}
+  - type: input
+    id: stop
+    attributes:
+      label: Stop rule
+      value: "Stop and report if models.py must change and this issue does not say so, or a check still fails after 2 attempts."
+    validations: {required: true}
+  - type: textarea
+    id: depends
+    attributes:
+      label: Depends on
+      description: "One per line: Depends on #n"
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: "Bullets: - <claim> — done when: <a test, command or file that shows it>. One bullet says what must not change."
+      value: |
+        - <claim> — done when: <check>
+        - <what must not change> — done when: <check>
+    validations: {required: true}

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import json
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,8 +25,14 @@ ERRORS_PATH = RUNS / "errors.jsonl"
 LOCK_MSG = "another audit run is active"
 
 
-def run_audit(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AUDITS_PATH,
-              errors_path=ERRORS_PATH, workers: int = 4, limit: int | None = None) -> dict:
+def run_audit(
+    calls_path=CALLS_PATH,
+    ledgers_path=LEDGERS_PATH,
+    audits_path=AUDITS_PATH,
+    errors_path=ERRORS_PATH,
+    workers: int = 4,
+    limit: int | None = None,
+) -> dict:
     """Hold an exclusive lock on <runs>/.audit.lock for the whole run. Exit if another run holds it."""
     lock_path = Path(audits_path).parent / ".audit.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +107,10 @@ def main(argv: list[str] | None = None) -> None:
         causes = run_issues()
         print(f"{len(causes)} causes -> {CAUSES_PATH}")
         for c in causes:
-            print(f"  [{c.status}] {c.parameter}: fatal={len(c.fatal_calls)} nonfatal={len(c.nonfatal_calls)} priority={c.priority:g}")
+            print(
+                f"  [{c.status}] {c.parameter}: fatal={len(c.fatal_calls)} "
+                f"nonfatal={len(c.nonfatal_calls)} priority={c.priority:g}"
+            )
 
 
 if __name__ == "__main__":

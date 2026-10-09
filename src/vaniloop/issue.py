@@ -19,13 +19,37 @@ FIXABILITY = {"prompt": 1.0, "flow_logic": 0.5, "asr": 0.25}
 
 # parameter -> (name, description, type)
 KNOWN = {
-    "category_isq": ("Spec questions from the wrong category", "Bot asks spec questions that belong to another product category.", "prompt"),
-    "looping": ("Bot keeps asking for the same detail", "Bot repeats the same question although the buyer already answered.", "flow_logic"),
+    "category_isq": (
+        "Spec questions from the wrong category",
+        "Bot asks spec questions that belong to another product category.",
+        "prompt",
+    ),
+    "looping": (
+        "Bot keeps asking for the same detail",
+        "Bot repeats the same question although the buyer already answered.",
+        "flow_logic",
+    ),
     "qty_probing": ("Quantity never asked", "Bot never asks the buyer for the quantity.", "prompt"),
-    "qty_missed": ("Quantity given but not captured", "Buyer stated a quantity but the bot did not record it.", "prompt"),
-    "qty_accuracy": ("Quantity captured wrong", "Buyer stated a quantity but the bot confirmed a different number.", "prompt"),
-    "qty_unit": ("Quantity unit captured wrong", "Buyer stated a quantity in one kind of unit but the bot confirmed another kind.", "prompt"),
-    "product_change": ("Product change not followed", "Buyer changed the product but the bot kept the old one.", "prompt"),
+    "qty_missed": (
+        "Quantity given but not captured",
+        "Buyer stated a quantity but the bot did not record it.",
+        "prompt",
+    ),
+    "qty_accuracy": (
+        "Quantity captured wrong",
+        "Buyer stated a quantity but the bot confirmed a different number.",
+        "prompt",
+    ),
+    "qty_unit": (
+        "Quantity unit captured wrong",
+        "Buyer stated a quantity in one kind of unit but the bot confirmed another kind.",
+        "prompt",
+    ),
+    "product_change": (
+        "Product change not followed",
+        "Buyer changed the product but the bot kept the old one.",
+        "prompt",
+    ),
     "dead_air": ("Long silences on the call", "Long silent gaps with no one speaking.", "flow_logic"),
 }
 
@@ -67,13 +91,23 @@ def build_causes(audits: list[AuditRecord]) -> list[Cause]:
         fix = FIXABILITY[typ] if typ in FIXABILITY else 1.0
         lo, hi = wilson(affected, n)
         status = "ranked" if affected >= MIN_SUPPORT else "watch" if fatal else "isolated"
-        causes.append(Cause(
-            cause_id=f"cause_{param}", name=name, description=desc, type=typ, parameter=param,
-            fatal_calls=fatal, nonfatal_calls=nonfatal, fixability=fix,
-            priority=(5 * len(fatal) + len(nonfatal)) * fix,
-            rank_score=lo * ((5 * len(fatal) + len(nonfatal)) / affected) * fix,
-            freq_ci_low=lo, freq_ci_high=hi, status=status,
-        ))
+        causes.append(
+            Cause(
+                cause_id=f"cause_{param}",
+                name=name,
+                description=desc,
+                type=typ,
+                parameter=param,
+                fatal_calls=fatal,
+                nonfatal_calls=nonfatal,
+                fixability=fix,
+                priority=(5 * len(fatal) + len(nonfatal)) * fix,
+                rank_score=lo * ((5 * len(fatal) + len(nonfatal)) / affected) * fix,
+                freq_ci_low=lo,
+                freq_ci_high=hi,
+                status=status,
+            )
+        )
     order = {"ranked": 0, "watch": 1, "isolated": 2}
     causes.sort(key=lambda c: (order[c.status], -c.rank_score, -c.priority))
     return causes
@@ -94,8 +128,12 @@ def run_issues(audits_path: Path = AUDITS_PATH, out_path: Path = CAUSES_PATH) ->
     audits = load_audits(Path(audits_path))
     causes = build_causes(audits)
     review = sum(a.verdict == "NeedsReview" for a in audits)
-    doc = {"denominator": len(audits) - review, "audited_total": len(audits), "needs_review": review,
-           "causes": [c.model_dump() for c in causes]}
+    doc = {
+        "denominator": len(audits) - review,
+        "audited_total": len(audits),
+        "needs_review": review,
+        "causes": [c.model_dump() for c in causes],
+    }
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + f".{os.getpid()}.tmp")
