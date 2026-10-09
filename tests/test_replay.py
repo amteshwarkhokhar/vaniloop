@@ -10,7 +10,7 @@ import pytest
 
 from vaniloop import llm as llm_mod
 from vaniloop.models import BotTurnLabel, CallRecord, Ledger, Turn, UserTurnLabel
-from vaniloop.replay import UNCLEAR_TEXT, BuyerBrief, buyer_brief, replay, replay_id, replay_result
+from vaniloop.replay import BOT_FORMAT, UNCLEAR_TEXT, BuyerBrief, buyer_brief, replay, replay_id, replay_result
 from vaniloop.rules import audit_call
 
 
@@ -452,3 +452,15 @@ def test_unclear_rate_zero_changes_nothing():
     assert replay_id("c1", 4, brief(), 12, "P", 0) != replay_id(
         "c1", 4, brief().model_copy(update={"unclear_rate": 0.5}), 12, "P", 0
     )  # but a noisy replay must not share an id with a clean one
+
+
+def test_bot_format_tells_the_bot_that_a_handoff_or_closing_line_ends_the_call():
+    """Every bot request must end with a format text that says a seller handoff or a closing line ends the call.
+
+    The text replay has no transfer tool. Without this rule the bot keeps talking after it says it connects the seller,
+    repeats itself, and the simulated buyer grows irritated, which the audit then grades as a fault of the prompt.
+    """
+    log: list = []
+    replay(mk_call(), 4, "PROMPT", brief(), max_turns=1, llm=stub([("naam?", False)], log=log))
+    assert log[0][1].endswith(BOT_FORMAT)
+    assert "handoff" in BOT_FORMAT and "closing" in BOT_FORMAT and "end_call true" in BOT_FORMAT

@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from vaniloop import llm, pipeline, prompt, prove, replay
-from vaniloop.models import AuditRecord, CallRecord, Finding, Ledger, Turn
+from vaniloop.models import AuditRecord, BotTurnLabel, CallRecord, Finding, Ledger, Turn
 from vaniloop.replay import ReplayResult
 
 CAUSE, PARAM, BOM = "cause_looping", "looping", chr(0xFEFF)
@@ -410,3 +410,91 @@ def test_real_replay_fn_builds_the_brief_from_the_fork_turn(monkeypatch):
     fn(call, ledger, 0, "P", 0)
     fn(call, ledger, 4, "P", 0)
     assert [(f, b.unclear_rate) for f, b in briefs] == [(0, 0.5), (4, 0.0)]
+
+
+# A template with a live-seller branch and the product name; the rendered text differs per call.
+TEMPLATE_TAIL = "\n{% if ast_seller_pns == 'LIVE' %}LIVE-BRANCH{% else %}NOSELLER-BRANCH{% endif %} {{ product_name }}"
+
+
+def write_template_inputs(tmp_path, **kw):
+    """write_inputs with a templated prompt. Calls t00..t09 had a live seller; every call has its own product."""
+    pf, paths = write_inputs(tmp_path, **kw)
+    pf.write_bytes(pf.read_bytes() + TEMPLATE_TAIL.encode())
+    ledgers = []
+    for line in paths["ledgers_path"].read_text().splitlines():
+        cid = Ledger.model_validate_json(line).call_id
+        live = [BotTurnLabel(idx=0, slot="handoff")] if cid.startswith("t0") else []
+        ledgers.append(
+            Ledger(call_id=cid, scope="oncall_astbuy", variant="main", initial_product=f"prod_{cid}", bot_turns=live)
+        )
+    paths["ledgers_path"].write_text("".join(x.model_dump_json() + "\n" for x in ledgers))
+    return pf, paths
+
+
+def test_real_replay_fn_sends_the_prompt_rendered_for_the_call(monkeypatch):
+    """The real replay function must send the template rendered with the call's own variables, not the raw template.
+
+    The raw template shows the bot every branch. A call with no live seller would then get the live-seller branch
+    and the replay would skip the quantity question, which the audit grades as a fault of the prompt.
+    """
+    template = "{% if ast_seller_pns == 'LIVE' %}LIVE-BRANCH{% else %}NOSELLER-BRANCH{% endif %} {{ product_name }}"
+    live = Ledger(call_id="c1", scope="oncall_astbuy", initial_product="CCTV camera",
+                  bot_turns=[BotTurnLabel(idx=0, slot="handoff")])  # fmt: skip
+    none = Ledger(call_id="c1", scope="bl_collection")
+    sent = []
+    monkeypatch.setattr(replay, "replay_result", lambda c, f, p, brief, max_turns, seed: sent.append((p, f, max_turns)))
+    fn = prove.real_replay_fn(9)
+    fn(make_call("c1"), live, 4, template, 0)
+    fn(make_call("c1"), none, 2, template, 0)
+    assert sent == [("LIVE-BRANCH CCTV camera", 4, 9), ("NOSELLER-BRANCH ", 2, 9)]
+
+
+def test_run_prove_sends_rendered_prompts_labels_old_new_and_attributes_cost_by_their_tags(tmp_path, monkeypatch):
+    """A real run must send each call its rendered prompt, label rows old/new from the unrendered texts and count a
+    cost row only under the tag of the rendered prompt its own call sent. Counting by the unrendered tags would print
+    $0 for a run that paid for every replay, and a tag of another call's prompt would add that call's cost."""
+    pf, paths = write_template_inputs(tmp_path)
+    template = prompt.load(pf)
+    sent = []
+    stubs = Stubs()
+
+    def stub_replay(call, fork, bot_prompt, brief, max_turns, seed):
+        sent.append((call.call_id, bot_prompt))
+        tag, tail = replay.prompt_tag(bot_prompt), f"{seed}:{call.call_id}:{fork}"
+        other = next((replay.prompt_tag(t) for c, t in sent if c != call.call_id), "deadbeef")  # another call's prompt
+        rows = [
+            {"cache_tag": f"replay:bot:{tag}:{tail}", "cost_usd": 0.25},  # the rendered prompt this call sent
+            {"cache_tag": f"replay:user:{tag}:{tail}", "cost_usd": 0.25},
+            {"cache_tag": f"replay:bot:{replay.prompt_tag(template)}:{tail}", "cost_usd": 4.0},  # the raw template
+            {"cache_tag": f"replay:bot:{other}:{tail}", "cost_usd": 2.0},  # the prompt of another call
+        ]
+        llm.COSTS_PATH.open("a").write("".join(json.dumps(r) + "\n" for r in rows))
+        label = "new" if "PATCHED" in bot_prompt else "old"
+        turns = [*call.turns[:fork], Turn(idx=fork, speaker="bot", start_sec=1, end_sec=2, text="reply")]
+        res = CallRecord(call_id=f"{call.call_id}__{label}_{seed}", duration_sec=60, turns=turns)
+        return ReplayResult(call=res, fork_turn=fork, ended_by="end_call")
+
+    monkeypatch.setattr(replay, "replay_result", stub_replay)
+    out = prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, audit_fn=stubs.audit_fn, **paths)
+    assert len(sent) == out.replays == 14
+    for cid, text in sent:
+        live = cid.startswith("t0")
+        assert "{%" not in text and f"prod_{cid}" in text
+        assert ("LIVE-BRANCH" in text, "NOSELLER-BRANCH" in text) == (live, not live)
+    rows = [json.loads(x) for x in paths["replays_path"].read_text().splitlines()]
+    assert len(rows) == 14 and all(f"__{r['prompt']}_" in r["call"]["call_id"] for r in rows)
+    assert {r["prompt"] for r in rows} == {"old", "new"}
+    assert out.cost_usd == pytest.approx(0.5 * 14)
+
+
+def test_a_prompt_that_does_not_render_stops_before_any_replay_even_on_a_dry_run(tmp_path):
+    """A patch whose new prompt has a broken Jinja tag must stop with SystemExit before any replay and write nothing.
+
+    Without the early check the error would surface on the first NEW replay, after the OLD replays before it were paid
+    for, or only at the cost sum after the whole run.
+    """
+    pf, paths = write_inputs(tmp_path, new_text="rule text 10 {% if %}")
+    for kw in ({}, {"dry_run": True}):
+        with pytest.raises(SystemExit, match="does not render"):
+            prove.run_prove(CAUSE, pf, n=3, k=2, replay_fn=raising, audit_fn=raising, **kw, **paths)
+    assert not paths["gates_path"].exists() and not paths["replays_path"].exists()

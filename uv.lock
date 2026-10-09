@@ -1466,6 +1466,7 @@ name = "vaniloop"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jinja2" },
     { name = "openai" },
     { name = "pandas" },
     { name = "pydantic" },
@@ -1481,6 +1482,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "openai", specifier = ">=3.26.1" },
     { name = "pandas", specifier = ">=3.0.6" },
     { name = "pydantic", specifier = ">=2.14.0" },
