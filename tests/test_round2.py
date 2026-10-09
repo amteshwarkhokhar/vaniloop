@@ -147,7 +147,7 @@ def _q(said, kept, bot_unit=None):
 def test_r2_4_range_collapsed_and_outside():
     assert _q("2-3", "2")["qty_accuracy"].status == "NonFatal"
     assert "range collapsed" in _q("10 se 20", "15")["qty_accuracy"].reason
-    assert _q("2 to 3", "3")["qty_accuracy"].status == "NonFatal"
+    assert _q("2 to 3", "3")["qty_accuracy"].status == "Pass"  # range max is the right capture (L1255)
     assert _q("100-110", "105")["qty_accuracy"].status == "NonFatal"
     assert _q("100-110", "120")["qty_accuracy"].status == "NonFatal"  # nearest 110: diff 10, 9%
     assert _q("100-110", "200")["qty_accuracy"].status == "Fatal"

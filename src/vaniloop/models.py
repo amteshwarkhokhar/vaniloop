@@ -11,6 +11,7 @@ Slot = Literal[
     "product", "quantity", "unit", "spec", "name", "city", "confirm", "handoff", "greeting", "other"
 ]
 Scope = Literal["bl_collection", "seller_unavailable_handoff", "oncall_astbuy", "refusal", "unclear"]
+Variant = Literal["main", "enrich", "redial", "redial_ast", "unknown"]
 Verdict = Literal["Pass", "Fatal", "NonFatal", "NeedsReview"]
 Basis = Literal["observed", "spoken_proxy", "unavailable"]
 
@@ -63,6 +64,7 @@ class Ledger(BaseModel):
 
     call_id: str
     scope: Scope
+    variant: Variant = "unknown"
     initial_product: str | None = None
     final_product: str | None = None
     product_changed_at_turn: int | None = None
