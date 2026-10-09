@@ -189,6 +189,62 @@ def test_prove_attempt_must_match_the_current_patch(tmp_path):
     assert {json.loads(ln)["attempt"] for ln in paths["replays_path"].read_text().splitlines()} == {2}
 
 
+def test_prove_refuses_a_third_attempt_before_any_llm_call(tmp_path):
+    """`prove --attempt 3` must stop with SystemExit before any replay or audit, on a real run and on a dry run, and
+    so must a patch row whose attempt is above 2, whatever --attempt says. MAX_ATTEMPTS is 2: each attempt is another
+    look at the same calls, so a third one would inflate false ships past the alpha split. Nothing may be written."""
+    pf, paths = write_inputs(tmp_path)
+    for kw in (dict(attempt=3), dict(attempt=3, dry_run=True)):  # the patch is attempt 1: still the cap message
+        with pytest.raises(SystemExit, match="at most 2 attempts"):
+            prove.run_prove(CAUSE, pf, replay_fn=raising, audit_fn=raising, **kw, **paths)
+    doc = json.loads(paths["patches_path"].read_text())
+    doc["patches"][0]["attempt"] = 3
+    paths["patches_path"].write_text(json.dumps(doc))
+    for attempt in (2, 3):
+        with pytest.raises(SystemExit, match="at most 2 attempts"):
+            prove.run_prove(CAUSE, pf, replay_fn=raising, audit_fn=raising, attempt=attempt, **paths)
+    assert not paths["gates_path"].exists() and not paths["replays_path"].exists()
+
+
+def test_each_gate_runs_at_alpha_split_across_the_allowed_attempts(tmp_path):
+    """Attempt 1 and attempt 2 must both run and each gate row must hold alpha 0.025 (0.05 over 2 attempts), read
+    from the written gates.jsonl. Both patches test the same calls, so a Bonferroni split keeps the family-wise false
+    ship rate at 0.05. If the gate kept alpha 0.05 per attempt, two looks would allow up to 0.10."""
+    pf, paths = write_inputs(tmp_path)
+    for attempt in (1, 2):
+        doc = json.loads(paths["patches_path"].read_text())
+        doc["patches"][0]["attempt"] = attempt
+        paths["patches_path"].write_text(json.dumps(doc))
+        stubs = Stubs()
+        out = prove.run_prove(CAUSE, pf, n=3, k=2, guards=2, replay_fn=stubs.replay_fn, audit_fn=stubs.audit_fn,
+                              attempt=attempt, **paths)  # fmt: skip
+        assert out.result.attempt == attempt and out.result.alpha == 0.025
+    rows = [json.loads(ln) for ln in paths["gates_path"].read_text().splitlines()]
+    assert [(r["attempt"], r["alpha"]) for r in rows] == [(1, 0.025), (2, 0.025)]
+
+
+def test_a_cause_and_attempt_is_gated_only_once(tmp_path):
+    """A second real `prove` of the same (cause, attempt) must stop with SystemExit before target selection, any
+    replay or any audit, and leave gates.jsonl and replays.jsonl as they were. A dry run is still allowed, and
+    attempt 2 is a different look. Each rerun (another --n or --k, VANILOOP_CACHE=refresh) is an extra look at the
+    same calls, so without the guard a rejected patch could be re-gated until it ships by chance."""
+    pf, paths = write_inputs(tmp_path)
+    stubs = Stubs()
+    args = dict(n=3, k=2, guards=2, replay_fn=stubs.replay_fn, audit_fn=stubs.audit_fn, **paths)
+    prove.run_prove(CAUSE, pf, **args)
+    gates, replays = paths["gates_path"].read_bytes(), paths["replays_path"].read_bytes()
+    for kw in (dict(), dict(n=4, k=3)):
+        with pytest.raises(SystemExit, match=f"attempt 1 of {CAUSE} was already gated; a new look needs a new attempt"):
+            prove.run_prove(CAUSE, pf, **{**args, "replay_fn": raising, "audit_fn": raising, **kw})
+    assert (paths["gates_path"].read_bytes(), paths["replays_path"].read_bytes()) == (gates, replays)
+    dry = prove.run_prove(CAUSE, pf, **{**args, "replay_fn": raising, "audit_fn": raising}, dry_run=True)
+    assert dry.result is None
+    doc = json.loads(paths["patches_path"].read_text())
+    doc["patches"][0]["attempt"] = 2
+    paths["patches_path"].write_text(json.dumps(doc))
+    assert prove.run_prove(CAUSE, pf, **args, attempt=2).result.attempt == 2
+
+
 def test_pipeline_refix_subcommand_passes_its_options_and_prints(monkeypatch, capsys):
     """`pipeline refix` must pass the cause and prompt path to run_refix and print the new attempt and the next
     command. A dropped option would refix the wrong cause or read the wrong prompt."""
