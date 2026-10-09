@@ -651,16 +651,24 @@ def test_refix_keeps_a_parallel_write_to_another_cause_and_stops_on_a_changed_pa
     assert doc["patches"][0]["new_text"] == "changed by a parallel run" and "history" not in doc
 
 
-def guard_golden_reads(monkeypatch):
-    """Make every file open, read or write that names a golden path raise, and return the list of tripped paths."""
+def guard_golden_reads(monkeypatch, golden_dir):
+    """Make every open, read or write that resolves into golden_dir raise. Return the list of tripped paths.
+
+    Each path is resolved first (cwd for relative paths, symlinks followed) and compared with the resolved dir.
+    """
     import builtins
     import io
+    import os
     import pathlib
 
     tripped: list[str] = []
+    root = pathlib.Path(golden_dir).resolve()
 
     def check(path):
-        if "golden" in pathlib.PurePath(str(path)).parts:
+        if not isinstance(path, str | bytes | os.PathLike):
+            return  # a file descriptor
+        real = pathlib.Path(os.fsdecode(path)).resolve()
+        if real == root or root in real.parents:
             tripped.append(str(path))
             raise AssertionError(f"fix touched a golden path: {path}")
 
@@ -704,23 +712,34 @@ def test_fix_never_reads_the_golden_set(tmp_path, monkeypatch):
     golden.mkdir(parents=True)
     (golden / "v1.json").write_text("{}")
     cp, pp, ap, op = write_run(tmp_path, PROMPT.encode(), [cause()])
-    tripped = guard_golden_reads(monkeypatch)
+    tripped = guard_golden_reads(monkeypatch, golden)
     old, new = "line 3: rule text 3", "line 3: better"
     r = run_fix(cp, pp, op, llm=stub(old, new), audits_path=ap)
     assert r["patches"] and not tripped
 
 
 def test_golden_guard_trips_on_a_golden_path(tmp_path, monkeypatch):
-    """The isolation guard must raise when any code opens or reads a golden path.
+    """The isolation guard must raise on a direct, a relative-after-chdir and a symlinked golden path.
 
-    Without this control the isolation test could pass because the guard is broken, not because fix is clean.
+    A guard that compares path text would pass fix for a relative or aliased path, so the test would prove nothing.
     """
     golden = tmp_path / "runs" / "golden"
     golden.mkdir(parents=True)
     (golden / "v1.json").write_text("{}")
-    tripped = guard_golden_reads(monkeypatch)
+    alias = tmp_path / "alias"
+    alias.symlink_to(golden, target_is_directory=True)
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "ok.json").write_text("{}")
+    tripped = guard_golden_reads(monkeypatch, golden)
     with pytest.raises(AssertionError, match="golden"):
         open(golden / "v1.json")
     with pytest.raises(AssertionError, match="golden"):
         (golden / "v1.json").read_text()
-    assert len(tripped) == 2
+    with pytest.raises(AssertionError, match="golden"):
+        open(alias / "v1.json")  # symlink alias: no "golden" in the text
+    monkeypatch.chdir(golden)
+    with pytest.raises(AssertionError, match="golden"):
+        open("v1.json")  # relative path after chdir
+    assert len(tripped) == 4
+    open(tmp_path / "other" / "ok.json").close()  # an unrelated path still works
+    assert len(tripped) == 4

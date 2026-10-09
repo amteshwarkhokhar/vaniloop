@@ -159,16 +159,22 @@ def run_golden(cmd: str, n: int = 150, seed: int = 0) -> None:
         )
         doc = load_golden(path)
         print(f"{path.name}: {doc['n']} calls sha256={doc['sha256']} -> {path}")
+        if doc.get("short_of"):
+            print(f"  Pass majority could not be met at full size: {doc['n']} calls instead of {doc['short_of']}")
         return
     path = latest_golden(GOLDEN_DIR)
     if path is None:
         raise SystemExit("no golden set yet: run `golden build` after grading calls")
     doc = load_golden(path)
     rules = golden_agreement(doc, load_audits(Path(GOLDEN_INPUTS["audits.jsonl"])))
-    print(f"{path.name}: {doc['n']} calls (kappa bar 0.6, n bar 10)")
+    print(f"{path.name}: {doc['n']} calls (bar: kappa 0.6, n 10, coverage 0.8)")
     for param, r in rules.items():
         kappa = "n/a" if r["kappa"] is None else f"{r['kappa']:.2f}"
-        print(f"  {r['status']:8} {param}: kappa={kappa} agree={r['agree']}/{r['n']}")
+        sk = r["skipped"]
+        print(
+            f"  {r['status']:8} {param}: kappa={kappa} agree={r['agree']}/{r['n']} coverage={r['coverage']:.2f} "
+            f"skipped(no_audit={sk['no_audit']} no_finding={sk['no_finding']} unknown={sk['unknown']})"
+        )
 
 
 def main(argv: list[str] | None = None) -> None:

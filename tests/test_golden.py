@@ -205,3 +205,106 @@ def test_pipeline_golden_build_cli(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "v1.json" in out and "sha256=" in out
     assert (tmp_path / "golden" / "v1.json").exists()
+
+
+def test_stale_builder_cannot_truncate_a_frozen_version(tmp_path, monkeypatch):
+    """A builder that picked version 1 before another builder linked it must not touch v1's bytes.
+
+    A shared PID-based temp name let the late builder truncate the inode that v1.json already pointed to.
+    """
+    import os
+
+    import vaniloop.golden as g
+
+    paths = write_inputs(tmp_path)
+    real_link, real_next = os.link, g._next_version
+    state = {"frozen": None, "stale": False, "inner": False}
+
+    def link_then_race(src, dst, *a, **k):
+        real_link(src, dst, *a, **k)
+        if not state["inner"]:
+            state["inner"] = True
+            state["frozen"] = (tmp_path / "golden" / "v1.json").read_bytes()
+            state["stale"] = True  # a second builder that read the version before this link
+            build(tmp_path, paths, seed=1)
+
+    def next_version(out_dir):
+        if state["stale"]:
+            state["stale"] = False
+            return 1
+        return real_next(out_dir)
+
+    monkeypatch.setattr(os, "link", link_then_race)
+    monkeypatch.setattr(g, "_next_version", next_version)
+    build(tmp_path, paths, seed=0)
+    assert (tmp_path / "golden" / "v1.json").read_bytes() == state["frozen"]
+    assert (tmp_path / "golden" / "v2.json").exists()
+    assert not list((tmp_path / "golden").glob(".v*.tmp"))
+
+
+def test_concurrent_builds_write_distinct_valid_versions(tmp_path):
+    """Eight builds racing in threads must write eight distinct versions that all load and match their sha.
+
+    A version clash or a shared temp file would lose a build or leave a corrupt frozen set.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    paths = write_inputs(tmp_path)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        outs = list(ex.map(lambda i: build(tmp_path, paths, seed=i), range(8)))
+    assert sorted(p.name for p in outs) == [f"v{i}.json" for i in range(1, 9)]
+    for p in outs:
+        assert load_golden(p)["version"] == int(p.stem[1:])
+
+
+def test_abstaining_on_human_faults_does_not_make_a_rule_gating():
+    """A rule the audit marks Unknown on most calls humans failed must stay advisory despite a perfect kappa.
+
+    Selective abstention would otherwise hide every miss: only the easy calls would be scored.
+    """
+    calls, audits = [], []
+    for i in range(10):  # human faults; the audit decides 4 and abstains on 6
+        calls.append(row(f"f{i}", "Fatal", ["looping"]))
+        status = "Fatal" if i < 4 else "Unknown"
+        audits.append(make_audit(f"f{i}", {"looping": status}))
+    for i in range(30):  # no fault, decided and agreed
+        calls.append(row(f"p{i}", "Pass"))
+        audits.append(make_audit(f"p{i}", {"looping": "Pass"}))
+    out = golden_agreement(golden_doc(calls), audits)["looping"]
+    assert out["kappa"] == 1.0 and out["n"] == 34
+    assert out["coverage"] == pytest.approx(0.85)
+    assert out["fault_coverage"] == pytest.approx(0.4)
+    assert out["skipped"]["unknown"] == 6
+    assert out["status"] == "advisory"
+
+
+def test_low_overall_coverage_and_missing_audits_are_reported_and_advisory():
+    """Calls with no audit row or no finding must be counted per rule, and low coverage must block gating.
+
+    Silently dropping them would let a rule that ran on a few calls look as sure as one that ran on all.
+    """
+    calls = [row(f"c{i}", "Fatal" if i % 2 == 0 else "Pass", ["looping"] if i % 2 == 0 else []) for i in range(20)]
+    audits = [make_audit(f"c{i}", {"looping": "Fatal" if i % 2 == 0 else "Pass"}) for i in range(12)]  # c12.. no audit
+    audits[0] = make_audit("c0", {})  # audit ran, no looping finding
+    out = golden_agreement(golden_doc(calls), audits)["looping"]
+    assert out["skipped"] == {"no_audit": 8, "no_finding": 1, "unknown": 0}
+    assert out["n"] == 11 and out["coverage"] == pytest.approx(0.55)
+    assert out["status"] == "advisory"
+
+
+def test_short_pass_pool_keeps_a_pass_majority_and_says_so(tmp_path, capsys, monkeypatch):
+    """With too few Pass calls the sample must stay Pass-majority and smaller, and the build must say so.
+
+    Filling the quota from failures would give a mostly failing set that does not match real call mix.
+    """
+    rows = [row(f"p{i}", "Pass") for i in range(4)] + [row(f"f{i}", "Fatal", ["x"], cause="c") for i in range(30)]
+    picked = select_golden(rows, n=10, pass_share=0.6, seed=0)
+    verdicts = Counter(r["verdict"] for r in picked)
+    assert verdicts["Pass"] > verdicts["Fatal"] and verdicts["Pass"] == 4
+    assert len(picked) < 10
+    paths = write_inputs(tmp_path, n_pass=4, n_fail=30)
+    monkeypatch.setattr("vaniloop.pipeline.GOLDEN_DIR", tmp_path / "golden")
+    monkeypatch.setattr("vaniloop.pipeline.GOLDEN_INPUTS", dict(paths))
+    main(["golden", "build", "--n", "10"])
+    assert "Pass majority could not be met at full size" in capsys.readouterr().out
+    assert load_golden(tmp_path / "golden" / "v1.json")["short_of"] == 10

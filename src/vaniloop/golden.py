@@ -18,6 +18,7 @@ import json
 import os
 import random
 import re
+import tempfile
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ BAR_KAPPA = 0.6  # a rule needs kappa at or above this to gate a fix
 BAR_N = 10  # and at least this many calls the audit decided
 MAX_CALLS = 150
 PASS_SHARE = 0.6  # share of the set whose human verdict is Pass
+BAR_COVERAGE = 0.8  # share of golden calls (and of human-fault calls) the audit must decide for a rule to gate
 
 
 def sha_of(calls: list[dict]) -> str:
@@ -62,7 +64,8 @@ def _round_robin(rows: list[dict], quota: int, rng: random.Random) -> list[dict]
 def select_golden(rows: list[dict], n: int = MAX_CALLS, pass_share: float = PASS_SHARE, seed: int = 0) -> list[dict]:
     """Pick up to n rows: about pass_share human-Pass, the rest Fatal or NonFatal, each spread over strata.
 
-    A stratum is (scope, variant, cause). When one pool is too small, the other fills the quota.
+    A stratum is (scope, variant, cause). When the Fail pool is too small, Pass fills the quota. When the Pass pool
+    is too small, failures are capped to keep a Pass majority and the sample comes back smaller than n.
     Deterministic for one seed.
     """
     rng = random.Random(seed)
@@ -71,6 +74,8 @@ def select_golden(rows: list[dict], n: int = MAX_CALLS, pass_share: float = PASS
     target = min(n, len(rows))
     fail_q = min(target - min(round(target * pass_share), len(passes)), len(fails))
     pass_q = min(target - fail_q, len(passes))
+    if pass_share > 0:  # a short Pass pool must not turn the set into a mostly failing one: cap the failures
+        fail_q = min(fail_q, int(pass_q * (1 - pass_share) / pass_share + 1e-9), max(pass_q - 1, 0))
     picked = _round_robin(passes, pass_q, rng) + _round_robin(fails, fail_q, rng)
     return sorted(picked, key=lambda r: r["call_id"])
 
@@ -104,8 +109,9 @@ def build_golden(
 ) -> Path:
     """Freeze a stratified sample of hand-graded calls as the next version. Returns the file path.
 
-    Needs an audit per call (for the scope). Never overwrites: the file is linked into place and an existing
-    version makes the link fail, so the build retries on the next number.
+    Needs an audit per call (for the scope). `short_of` is set when the Pass majority forced a smaller sample.
+    Never overwrites: the file is linked into place and an existing version makes the link fail, so the build
+    retries on the next number.
     """
     grades = load_grades(grades_path)
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
@@ -135,14 +141,17 @@ def build_golden(
             "version": version,
             "created": datetime.now(UTC).isoformat(timespec="seconds"),
             "n": len(calls),
+            "short_of": min(n, len(rows)) if len(calls) < min(n, len(rows)) else None,
             "seed": seed,
             "pass_share": pass_share,
             "sha256": sha_of(calls),
             "calls": calls,
         }
         final = out_dir / f"v{version}.json"
-        tmp = out_dir / f".v{version}.{os.getpid()}.tmp"
-        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(prefix=f".v{version}.", suffix=".tmp", dir=out_dir)  # unique per call
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(doc, ensure_ascii=False, indent=1))
         try:
             os.link(tmp, final)  # fails when the version exists: a frozen file is never replaced
         except FileExistsError:
@@ -182,11 +191,17 @@ def cohen_kappa(hand: list[bool], audit: list[bool]) -> float | None:
 def golden_agreement(doc: dict, audits: list[AuditRecord]) -> dict[str, dict]:
     """Per rule: audit vs human fail labels on the golden calls where the audit decided that rule.
 
-    Returns {parameter: {kappa, agree, n, rate, status}}. Status is "gating" when kappa >= BAR_KAPPA and
-    n >= BAR_N, else "advisory" (an undefined kappa is advisory). Unknown or missing findings are skipped.
+    Returns {parameter: {kappa, agree, n, rate, coverage, fault_coverage, skipped, status}}.
+    coverage is decided calls over all golden calls. fault_coverage is the same over the calls the human marked
+    as failing this rule, so an audit that abstains only where humans saw faults cannot look perfect.
+    skipped counts calls left out: no_audit (no audit row), no_finding (the rule did not run) and unknown.
+    Status is "gating" when kappa >= BAR_KAPPA, n >= BAR_N and both coverages >= BAR_COVERAGE, else "advisory"
+    (an undefined kappa is advisory).
     """
     audit_by_id = {a.call_id: a for a in audits}
-    pairs = [(c, audit_by_id[c["call_id"]]) for c in doc["calls"] if c["call_id"] in audit_by_id]
+    calls = doc["calls"]
+    pairs = [(c, audit_by_id[c["call_id"]]) for c in calls if c["call_id"] in audit_by_id]
+    no_audit = len(calls) - len(pairs)
     params = sorted({p for c, a in pairs for p in set(c["parameters"]) | {f.parameter for f in a.findings}})
     out: dict[str, dict] = {}
     for param in params:
@@ -195,12 +210,27 @@ def golden_agreement(doc: dict, audits: list[AuditRecord]) -> dict[str, dict]:
         audit = [param in failing_parameters(a) for _, a in judged]
         agree = sum(h == a for h, a in zip(hand, audit, strict=True))
         kappa = cohen_kappa(hand, audit)
-        gating = kappa is not None and kappa >= BAR_KAPPA and len(judged) >= BAR_N
+        unknown = sum(1 for c, a in pairs if not _decided(a, param) and any(f.parameter == param for f in a.findings))
+        no_finding = len(pairs) - len(judged) - unknown
+        faults = [c for c in calls if param in c["parameters"]]
+        decided_ids = {c["call_id"] for c, _ in judged}
+        coverage = len(judged) / len(calls) if calls else 0.0
+        fault_coverage = (sum(c["call_id"] in decided_ids for c in faults) / len(faults)) if faults else None
+        gating = (
+            kappa is not None
+            and kappa >= BAR_KAPPA
+            and len(judged) >= BAR_N
+            and coverage >= BAR_COVERAGE
+            and (fault_coverage is None or fault_coverage >= BAR_COVERAGE)
+        )
         out[param] = {
             "kappa": kappa,
             "agree": agree,
             "n": len(judged),
             "rate": (agree / len(judged)) if judged else None,
+            "coverage": coverage,
+            "fault_coverage": fault_coverage,
+            "skipped": {"no_audit": no_audit, "no_finding": no_finding, "unknown": unknown},
             "status": "gating" if gating else "advisory",
         }
     return out
