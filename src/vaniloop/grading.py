@@ -107,7 +107,7 @@ def agreement(grades: dict[str, dict], audits: list[AuditRecord]) -> dict:
     (a parameter agrees when both sides list it or neither does) and the mismatches
     whose hand verdict, audit verdict or failing-parameter set differ. A parameter is
     compared only on calls where the audit decided it (no Unknown, no missing finding),
-    so missing evidence never counts as agreement; n is that call count.
+    so missing evidence never counts as agreement; n is that call count, and rate is None when n is 0.
     """
     audit_by_id = {a.call_id: a for a in audits}
     pairs = [(cid, g, audit_by_id[cid]) for cid, g in grades.items() if cid in audit_by_id]
@@ -122,7 +122,7 @@ def agreement(grades: dict[str, dict], audits: list[AuditRecord]) -> dict:
         agreed = sum(
             1 for g, a in judged if (param in (g.get("parameters") or [])) == (param in set(failing_parameters(a)))
         )
-        per_parameter[param] = {"agree": agreed, "n": len(judged), "rate": (agreed / len(judged)) if judged else 0.0}
+        per_parameter[param] = {"agree": agreed, "n": len(judged), "rate": (agreed / len(judged)) if judged else None}
     mismatches = []
     for cid, g, a in pairs:
         if g.get("verdict") != a.verdict or set(g.get("parameters") or []) != set(failing_parameters(a)):

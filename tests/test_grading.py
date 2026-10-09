@@ -130,9 +130,10 @@ def test_missing_evidence_never_counts_as_agreement():
 
     If it counted, an audit that abstains everywhere would look like it agrees with every blank hand grade.
     A parameter that passed everywhere still appears, so calibration sees it.
+    With no comparison the rate is None, not 0%.
     """
     audits = [
-        mk("a1", "NeedsReview", {"qty_probing": "Unknown", "dead_air": "Pass"}),
+        mk("a1", "NeedsReview", {"qty_probing": "Unknown", "dead_air": "Pass", "category_isq": "Unknown"}),
         mk("a2", "Pass", {"qty_probing": "Pass", "dead_air": "Pass"}),
         AuditRecord(call_id="a3", verdict="NeedsReview", scope="unclear", findings=[]),
     ]
@@ -140,6 +141,7 @@ def test_missing_evidence_never_counts_as_agreement():
     per = agreement(grades, audits)["per_parameter"]
     assert per["qty_probing"] == {"agree": 1, "n": 1, "rate": 1.0}
     assert per["dead_air"] == {"agree": 2, "n": 2, "rate": 1.0}
+    assert per["category_isq"] == {"agree": 0, "n": 0, "rate": None}
 
 
 def test_dashboard_grade_helpers_on_fixtures():

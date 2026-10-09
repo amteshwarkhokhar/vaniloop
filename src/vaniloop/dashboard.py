@@ -334,7 +334,12 @@ def grade_tab(audits: list[AuditRecord], calls: dict[str, CallRecord], data_dir:
     if agree["per_parameter"]:
         pdf = pd.DataFrame(
             [
-                {"parameter": p, "agree": v["agree"], "n": v["n"], "rate": f"{v['rate'] * 100:.0f}%"}
+                {
+                    "parameter": p,
+                    "agree": v["agree"],
+                    "n": v["n"],
+                    "rate": "n/a" if v["rate"] is None else f"{v['rate'] * 100:.0f}%",
+                }
                 for p, v in agree["per_parameter"].items()
             ]
         )
