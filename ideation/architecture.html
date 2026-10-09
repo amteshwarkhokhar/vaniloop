@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vaniloop Review Map</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--text:#e6e8ee;--mute:#9aa3b2;--accent:#6ea8fe;--ok:#4cc38a;--wip:#f5b942;--todo:#7b8496;--you:#c792ea}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]){--bg:#f7f8fa;--panel:#fff;--line:#d9dde5;--text:#151821;--mute:#5b6475;--accent:#2563eb;--ok:#16a34a;--wip:#b7791f;--todo:#6b7280;--you:#7c3aed}}
+:root[data-theme="dark"]{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--text:#e6e8ee;--mute:#9aa3b2;--accent:#6ea8fe;--ok:#4cc38a;--wip:#f5b942;--todo:#7b8496;--you:#c792ea}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:24px;margin:0 0 4px}
+h2{font-size:18px;margin:36px 0 12px}
+.sub{color:var(--mute);margin:0 0 8px}
+a{color:var(--accent)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+
+/* loop */
+.loop{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;align-items:stretch}
+.stage{position:relative;background:var(--panel);border:2px solid var(--line);border-radius:10px;padding:12px 10px}
+.stage.ok{border-color:var(--ok)}.stage.wip{border-color:var(--wip)}.stage.todo{border-color:var(--todo);border-style:dashed}
+.stage b{display:block;font-size:14px}
+.stage p{margin:4px 0 0;font-size:13px;color:var(--mute)}
+.stage .you{display:inline-block;margin-top:8px;font-size:11px;font-weight:700;color:var(--you);border:1px solid var(--you);border-radius:4px;padding:1px 6px}
+.stage:not(:last-child)::after{content:"→";position:absolute;right:-9px;top:44%;color:var(--accent);font-weight:700}
+.back{margin-top:8px;text-align:center;color:var(--mute);font-size:13px}
+@media (max-width:760px){.loop{grid-template-columns:1fr 1fr}.stage::after{display:none}}
+.legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--mute);font-size:13px;margin-top:10px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;border:2px solid;vertical-align:-2px;margin-right:5px}
+
+/* review queue */
+.q{display:grid;gap:10px}
+.item{display:grid;grid-template-columns:34px 1fr auto;gap:12px;align-items:start;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--you);border-radius:10px;padding:12px 14px}
+.item.later{border-left-color:var(--todo);opacity:.85}
+.n{font-weight:700;color:var(--you);font-size:18px}
+.item h3{margin:0;font-size:15px}
+.item p{margin:4px 0 0;color:var(--mute);font-size:14px}
+.item .def{color:var(--text)}
+.meta{text-align:right;font-size:12px;color:var(--mute);white-space:nowrap}
+.pill{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:999px;padding:1px 8px;margin-bottom:4px}
+.pill.now{border-color:var(--you);color:var(--you)}
+
+/* example + decisions */
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.steps .card b{display:block;margin-bottom:4px}
+.steps .card p{margin:0;color:var(--mute);font-size:14px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:8px}
+summary{cursor:pointer;font-weight:600}
+details p{margin:6px 0 0;color:var(--mute);font-size:14px}
+.note{font-size:13px;color:var(--mute);margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>vaniloop: what it does and what you review</h1>
+<p class="sub">It audits VANI calls, finds the causes of bad calls, writes a fix to the bot prompt and proves the fix with replays. Status at 9 Oct 2026, 12:00 IST.</p>
+
+<h2>The loop</h2>
+<div class="loop">
+  <div class="stage ok"><b>0 · Ingest</b><p>Call audio → text with turn times and silences</p></div>
+  <div class="stage wip"><b>1 · Audit</b><p>Grade each call against the real VANI prompt</p><span class="you">YOU: grade 20 calls</span></div>
+  <div class="stage ok"><b>2 · Issue</b><p>Group bad calls into causes and rank them</p><span class="you">YOU: sanity-check top 3</span></div>
+  <div class="stage wip"><b>3 · Fix</b><p>Write a small edit to the prompt for each top cause</p><span class="you">YOU: approve each edit</span></div>
+  <div class="stage wip"><b>4 · Test</b><p>Replay bad calls with old and new prompt. Ship only if better than noise.</p><span class="you">YOU: final ship call</span></div>
+  <div class="stage todo"><b>5 · Demo</b><p>Dashboard and voice replay for the judges</p><span class="you">YOU: pitch</span></div>
+</div>
+<p class="back">↺ A shipped edit becomes the next prompt version, and the loop runs again on new calls.</p>
+<div class="legend">
+  <span><span class="sw" style="border-color:var(--ok)"></span>built</span>
+  <span><span class="sw" style="border-color:var(--wip)"></span>being built or in review</span>
+  <span><span class="sw" style="border-color:var(--todo);border-style:dashed"></span>not started</span>
+  <span><span class="sw" style="border-color:var(--you)"></span>needs you</span>
+</div>
+
+<h2>Your review queue</h2>
+<div class="q">
+  <div class="item">
+    <div class="n">1</div>
+    <div><h3>Add the LLM key and choose how many calls to transcribe</h3>
+      <p>Nothing runs on real calls until <code>LLM_API_KEY</code> is in <code>.env</code>. For transcription, my default is 100 calls across all lengths first, and the rest in the background.</p></div>
+    <div class="meta"><span class="pill now">now</span><br>2 min</div>
+  </div>
+  <div class="item">
+    <div class="n">2</div>
+    <div><h3>Merge PR #17: tests run without call data</h3>
+      <p>Small. CI fails on GitHub without it. <a href="https://github.com/amteshwarkhokhar/vaniloop/pull/17">Open PR #17</a></p></div>
+    <div class="meta"><span class="pill now">now</span><br>2 min</div>
+  </div>
+  <div class="item">
+    <div class="n">3</div>
+    <div><h3>Merge PR #18: the replay harness</h3>
+      <p>Read "Why this approach". One choice to agree with: replays sample at temperature 0.7, so seeds differ and the noise floor is real. <a href="https://github.com/amteshwarkhokhar/vaniloop/pull/18">Open PR #18</a></p></div>
+    <div class="meta"><span class="pill now">now</span><br>10 min</div>
+  </div>
+  <div class="item">
+    <div class="n">4</div>
+    <div><h3>Merge PR #19: grading rules from the real prompt</h3>
+      <p>Judgment calls to agree with: a handoff needs a confirmed product. Under Enrichment, the bot must deflect a new product and close the call. Spec questions get 2 asks and the name gets 3. <a href="https://github.com/amteshwarkhokhar/vaniloop/pull/19">Open PR #19</a></p></div>
+    <div class="meta"><span class="pill now">now</span><br>15 min</div>
+  </div>
+  <div class="item">
+    <div class="n">5</div>
+    <div><h3>Approve the Sarvam MCP and ask about real call text</h3>
+      <p>Run <code>/mcp</code> and approve <code>sarvam-voice-agents</code>. Ask the organisers whether Sarvam may see real call text. Until they say yes, we send only synthetic text.</p></div>
+    <div class="meta"><span class="pill">today</span><br>5 min</div>
+  </div>
+  <div class="item later">
+    <div class="n">6</div>
+    <div><h3>Hand-grade 20 calls (#8)</h3>
+      <p>The most important human step. Your grades define what "correct" means. The audit must match you on at least 18 of 20.</p></div>
+    <div class="meta"><span class="pill">after key</span><br>40 min</div>
+  </div>
+  <div class="item later">
+    <div class="n">7</div>
+    <div><h3>Approve each prompt edit, then the ship decision</h3>
+      <p>For each top cause you see the old text, the new text and why. After replays, you see the lift vs the noise floor and the guard results.</p></div>
+    <div class="meta"><span class="pill">10 Oct</span><br>10 min each</div>
+  </div>
+</div>
+
+<h2>One call through the loop</h2>
+<div class="steps">
+  <div class="card"><b>Audit</b><p>Call 282: the buyer switches to a home dome camera at turn 7. The bot then asks drone specs at turns 12, 14 and 18. It asks the name 5 times, and the prompt allows 3. Fatal, first fault at turn 12.</p></div>
+  <div class="card"><b>Issue</b><p>"Specs from the wrong category after a product change" collects all calls like this. Causes seen in fewer than 3 calls do not rank.</p></div>
+  <div class="card"><b>Fix</b><p>The prompt resets ask counts on a product change (L83) but never says to drop the old specs. The edit adds that rule at that line.</p></div>
+  <div class="card"><b>Test</b><p>Replay from turn 12 with both prompts, several seeds each. Ship only if the new prompt fails less by more than the old prompt varies against itself, and no passing call breaks.</p></div>
+</div>
+<p class="note">Fix and Test here describe the method. No live replay has run yet.</p>
+
+<h2>How the main decisions were made</h2>
+<details open><summary>Grade with rules, not with an LLM judge</summary>
+<p>Options: an LLM grades each parameter, or an LLM only labels turns and Python rules grade. Chosen: labels plus rules. Rules give exact counts (5 name asks vs a limit of 3) and every verdict points at turns. Source: ideation 01.</p></details>
+<details><summary>When in doubt, NeedsReview, never Pass</summary>
+<p>A wrong Pass hides a Fatal. Doubtful calls go to a human. Source: ideation 01.</p></details>
+<details><summary>Rank causes by the Wilson low bound, with a 3-call minimum</summary>
+<p>A cause seen in 2 calls must not outrank one seen in 40. The low bound penalises thin evidence. Source: ideation 02.</p></details>
+<details><summary>Ship a fix only if it beats the noise</summary>
+<p>A replay of the same prompt varies run to run. So we measure that variation first (old vs old) and require the fix to beat it, with no passing call broken. The idea comes from AgentCI and is rebuilt here. Source: ideation 04.</p></details>
+<details><summary>Use the real VANI prompt and its own limits</summary>
+<p>You supplied the prompt. Rules now use its limits (L69): product 4, quantity 3, each spec 2, name 3, city 3. Edits apply to real text. Source: 06 prompt map.</p></details>
+<details><summary>Changes made after the Codex reviews</summary>
+<p>Handoffs must confirm the product first (Codex found handoffs passing without one). Enrichment needs proof of the close. Replays use real seeds at temperature 0.7, because at temperature 0 every seed gives the same call and the noise floor reads zero.</p></details>
+<details><summary>Keep call data inside approved models</summary>
+<p>Call data goes to Claude, OpenAI/Codex and Gemini only. GLM and DeepSeek work on code only. Sarvam and TypeSafe get synthetic text until someone approves real text. Hackathon rule: customer data stays on premises.</p></details>
+</main>
+</body>
+</html>
