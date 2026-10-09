@@ -22,11 +22,12 @@
       if (!t) return "";
       return `<button class="notch t-${esc(V.tone(f.status))}" data-turn="${esc(t.idx)}" style="left:${pct(t.start_sec, dur)};--d:${i * 60}ms" aria-label="${esc(V.word(f.status))}: ${esc(V.name(f.parameter))} at ${esc(V.clock(t.start_sec))}. Go to the turn."></button>`;
     }).join("");
-    const step = dur > 240 ? 60 : dur > 90 ? 30 : 10;
+    const base = dur > 240 ? 60 : dur > 90 ? 30 : 10;
+    const step = Math.max(base, Math.ceil(dur / 200 / 60) * 60); // at most about 200 ticks, even for a bad duration
     let ticks = "";
     for (let s = 0; s <= dur; s += step) ticks += `<span style="left:${pct(s, dur)}">${V.clock(s)}</span>`;
     return `<div class="tape-wrap" role="region" aria-label="Call tape" tabindex="0">
-      <div class="tape-in" style="min-width:${Math.ceil(dur * PX_PER_SEC)}px">
+      <div class="tape-in" style="min-width:${Math.min(Math.ceil(dur * PX_PER_SEC), 20000)}px">
         <div class="tape">${gaps}<div class="segs">${segs}</div>${notches}</div>
         <div class="ticks mono" aria-hidden="true">${ticks}</div>
       </div></div>`;

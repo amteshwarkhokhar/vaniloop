@@ -41,7 +41,7 @@
 .turn.bot .spk{ color:var(--ivory); }
 .text{ margin:0; }
 .notes{ display:grid; gap:14px; }
-.note{ padding-left:12px; border-left:1px solid var(--tone); transition:opacity .6s var(--ease), transform .6s var(--ease); }
+.note{ padding-left:12px; border-left:1px solid var(--tone); overflow-wrap:anywhere; transition:opacity .6s var(--ease), transform .6s var(--ease); }
 .note.rest{ opacity:.55; transform:translateY(6px); }
 .note .label{ color:var(--ivory); font-size:10px; }
 .note .st{ color:var(--tone); margin-left:6px; }

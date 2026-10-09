@@ -96,7 +96,10 @@
       await VIEWS[r.view].render(view, r.params, signal);
     } catch (err) {
       if (my !== seq) return;
-      view.innerHTML = `<p class="empty">The server did not answer (${V.esc(err.message)}). Start it with <code>uv run python -m vaniloop.web</code> and reload.</p>`;
+      view.innerHTML =
+        err instanceof TypeError && !err.status
+          ? `<p class="empty">The server did not answer (${V.esc(err.message)}). Start it with <code>uv run python -m vaniloop.web</code> and reload.</p>`
+          : `<p class="empty">This view could not be shown (${V.esc(err.message)}).</p>`;
     }
     if (my !== seq) return;
     // Keep keyboard focus in the new view. The first load keeps the browser default.
