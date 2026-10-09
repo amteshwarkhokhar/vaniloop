@@ -1,5 +1,5 @@
 """Pipeline runner. `python -m vaniloop.pipeline <command>`: audit, regrade, issues, categorize, fix, refix, prove,
-grade-sample, golden."""
+rootcause, grade-sample, golden."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord, Ledger
 from .prove import describe, run_prove
+from .rootcause import DEFAULT_PROMPT, ROOTCAUSE_PATH, describe_rootcause, run_rootcause
 from .rules import audit_call
 
 RUNS = AUDITS_PATH.parent
@@ -215,6 +216,13 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--workers", type=int, default=1)
     pv.add_argument("--dry-run", action="store_true")
     pv.add_argument("--attempt", type=int, default=1)
+    rc = sub.add_parser("rootcause")
+    rc.add_argument("--cause", required=True)
+    rc.add_argument("--prompt", default=str(DEFAULT_PROMPT))
+    rc.add_argument("--k", type=int, default=3)
+    rc.add_argument("--max-turns", type=int, default=12)
+    rc.add_argument("--workers", type=int, default=1)
+    rc.add_argument("--dry-run", action="store_true")
     g = sub.add_parser("grade-sample")
     g.add_argument("--n", type=int, default=20)
     gd = sub.add_parser("golden")
@@ -261,6 +269,18 @@ def main(argv: list[str] | None = None) -> None:
             attempt=args.attempt,
         )
         print("\n".join(describe(out)))
+    elif args.cmd == "rootcause":
+        out = run_rootcause(
+            args.cause,
+            Path(args.prompt),
+            k=args.k,
+            max_turns=args.max_turns,
+            workers=args.workers,
+            dry_run=args.dry_run,
+        )
+        print("\n".join(describe_rootcause(args.cause, out)))
+        if not args.dry_run:
+            print(f"rows -> {ROOTCAUSE_PATH}")
     elif args.cmd == "grade-sample":
         ids = run_grade_sample(n=args.n)
         print(f"{len(ids)} calls -> {GRADE_SAMPLE_PATH}")
