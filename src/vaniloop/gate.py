@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .models import AuditRecord, CallRecord, Finding, Ledger
+from .models import AuditRecord, CallRecord, Ledger
 from .replay import ReplayResult
 
 PERCENTILE = 0.95
@@ -75,7 +76,7 @@ def noise_floor(old_by_call: dict[str, list[bool]], k: int, n_perm: int = 200, r
             shuffled = list(values)
             rng.shuffle(shuffled)
             half_a.extend(shuffled[:k])
-            half_b.extend(shuffled[k:2 * k])
+            half_b.extend(shuffled[k : 2 * k])
         if half_a:
             rate_a = sum(half_a) / len(half_a)
             rate_b = sum(half_b) / len(half_b)
@@ -90,14 +91,23 @@ def _rate(trials: list[Trial]) -> float:
     return sum(t.failed for t in trials) / len(trials) if trials else 0.0
 
 
-def decide(old: list[Trial], new: list[Trial], guards_new: list[Trial], floor: float | None, min_calls: int = MIN_CALLS,
-           cause_id: str = "", k_seeds: int | None = None) -> GateResult:
+def decide(
+    old: list[Trial],
+    new: list[Trial],
+    guards_new: list[Trial],
+    floor: float | None,
+    min_calls: int = MIN_CALLS,
+    cause_id: str = "",
+    k_seeds: int | None = None,
+) -> GateResult:
     """ship: lift > floor and no fatal guard. reject: a fatal guard, or lift <= 0. Else inconclusive.
 
     A fatal guard still rejects first: a break is a break, whatever the evidence. Otherwise, no decision is
-    made when the evidence is incomplete: a new or guard trial is unresolved (Unknown or missing finding, a
-    NeedsReview verdict, or invalid_output), there is no calibration data for the floor, old and new do not
-    cover the same (call_id, seed) pairs for seeds 0..K-1, or fewer than min_calls matched distinct calls.
+    made when the evidence is incomplete: an old (seeds 0..K-1), new or guard trial is unresolved (Unknown or
+    missing finding, a NeedsReview verdict, or invalid_output), there is no calibration data for the floor,
+    old and new do not cover the same (call_id, seed) pairs for seeds 0..K-1, or fewer than min_calls matched
+    distinct calls. An unresolved old trial blocks too: counting it as a failure would inflate the old fail
+    rate and so inflate the lift.
     """
     k = k_seeds if k_seeds is not None else max((t.seed for t in old), default=-1) + 1
     old_matches = {(t.call_id, t.seed) for t in old if t.seed < k}
@@ -106,20 +116,33 @@ def decide(old: list[Trial], new: list[Trial], guards_new: list[Trial], floor: f
     new_rate = _rate(new)
     lift = old_rate - new_rate
     breaks = sorted({t.call_id for t in guards_new if t.fatal})
-    unresolved = [t for t in new + guards_new if t.unresolved]
+
+    def unresolved_count(group: list[Trial]) -> int:
+        return sum(1 for t in group if t.unresolved)
+
+    u_old = unresolved_count([t for t in old if t.seed < k])
+    u_new = unresolved_count(new)
+    u_guards = unresolved_count(guards_new)
+    unresolved = u_old + u_new + u_guards
     matched = {call_id for call_id, _seed in old_matches & new_matches}
     if breaks:
         decision, reason = "reject", f"patch breaks {len(breaks)} guard call(s): {', '.join(breaks)}"
     elif unresolved:
-        decision, reason = ("inconclusive",
-                            f"{len(unresolved)} trial(s) lack conclusive evidence "
-                            f"(Unknown/missing finding, NeedsReview or invalid_output)")
+        decision, reason = (
+            "inconclusive",
+            f"{unresolved} trial(s) lack conclusive evidence "
+            f"(old={u_old}, new={u_new}, guards={u_guards}; "
+            f"Unknown/missing finding, NeedsReview or invalid_output)",
+        )
     elif not old:
         decision, reason = "inconclusive", "no calibration data to estimate the noise floor"
     elif old_matches != new_matches:
-        decision, reason = ("inconclusive",
-                            f"old and new cover different (call, seed) samples for seeds 0..{k - 1}: "
-                            f"{len(old_matches - new_matches)} only in old, {len(new_matches - old_matches)} only in new")
+        decision, reason = (
+            "inconclusive",
+            f"old and new cover different (call, seed) samples for seeds 0..{k - 1}: "
+            f"{len(old_matches - new_matches)} only in old, "
+            f"{len(new_matches - old_matches)} only in new",
+        )
     elif len(matched) < min_calls:
         decision, reason = "inconclusive", f"only {len(matched)} matched call(s), need at least {min_calls}"
     elif lift <= 0:
@@ -128,9 +151,18 @@ def decide(old: list[Trial], new: list[Trial], guards_new: list[Trial], floor: f
         decision, reason = "ship", f"lift {lift:.3f} exceeds noise floor {floor:.3f}, no guard broken"
     else:
         decision, reason = "inconclusive", f"lift {lift:.3f} is within noise floor {floor:.3f}"
-    return GateResult(cause_id=cause_id, decision=decision, old_fail_rate=old_rate, new_fail_rate=new_rate, lift=lift,
-                      noise_floor=floor if floor is not None else 0.0, guard_breaks=breaks, n_calls=len(matched),
-                      k_seeds=k, reason=reason)
+    return GateResult(
+        cause_id=cause_id,
+        decision=decision,
+        old_fail_rate=old_rate,
+        new_fail_rate=new_rate,
+        lift=lift,
+        noise_floor=floor if floor is not None else 0.0,
+        guard_breaks=breaks,
+        n_calls=len(matched),
+        k_seeds=k,
+        reason=reason,
+    )
 
 
 Item = tuple[CallRecord, Ledger, int]  # call, its ledger, the fork turn (first-fault turn)
@@ -138,19 +170,35 @@ ReplayFn = Callable[[CallRecord, Ledger, int, str, int], ReplayResult]  # call, 
 AuditFn = Callable[[CallRecord], AuditRecord]
 
 
-def _trial(call_id: str, which: Literal["old", "new"], seed: int, res: ReplayResult, audit_fn: AuditFn,
-           parameter: str) -> Trial:
+def _trial(
+    call_id: str, which: Literal["old", "new"], seed: int, res: ReplayResult, audit_fn: AuditFn, parameter: str
+) -> Trial:
     audit = audit_fn(res.call)
     invalid = res.ended_by == "invalid_output"
     finding = next((f for f in audit.findings if f.parameter == parameter), None)
-    unresolved = (invalid or audit.verdict == "NeedsReview"
-                  or finding is None or finding.status == "Unknown")
-    return Trial(call_id=call_id, prompt=which, seed=seed, failed=invalid or failed(audit, parameter),
-                 fatal=audit.verdict == "Fatal", unresolved=unresolved, outcome=res.ended_by)
+    unresolved = invalid or audit.verdict == "NeedsReview" or finding is None or finding.status == "Unknown"
+    return Trial(
+        call_id=call_id,
+        prompt=which,
+        seed=seed,
+        failed=invalid or failed(audit, parameter),
+        fatal=audit.verdict == "Fatal",
+        unresolved=unresolved,
+        outcome=res.ended_by,
+    )
 
 
-def run_gate(cause_id: str, parameter: str, calls: list[Item], guards: list[Item], old_prompt: str, new_prompt: str,
-             k_seeds: int, replay_fn: ReplayFn, audit_fn: AuditFn) -> GateResult:
+def run_gate(
+    cause_id: str,
+    parameter: str,
+    calls: list[Item],
+    guards: list[Item],
+    old_prompt: str,
+    new_prompt: str,
+    k_seeds: int,
+    replay_fn: ReplayFn,
+    audit_fn: AuditFn,
+) -> GateResult:
     """Replay each failing call K times per prompt and each guard K times with the new prompt, then decide.
 
     A guard is a call that passed before. It breaks if a replay with the new prompt gets a Fatal verdict.
@@ -165,12 +213,15 @@ def run_gate(cause_id: str, parameter: str, calls: list[Item], guards: list[Item
     guards_new: list[Trial] = []
     for call, ledger, fork in calls:
         for seed in range(2 * k_seeds):
-            old.append(_trial(call.call_id, "old", seed, replay_fn(call, ledger, fork, old_prompt, seed), audit_fn, parameter))
+            res = replay_fn(call, ledger, fork, old_prompt, seed)
+            old.append(_trial(call.call_id, "old", seed, res, audit_fn, parameter))
             if seed < k_seeds:
-                new.append(_trial(call.call_id, "new", seed, replay_fn(call, ledger, fork, new_prompt, seed), audit_fn, parameter))
+                res = replay_fn(call, ledger, fork, new_prompt, seed)
+                new.append(_trial(call.call_id, "new", seed, res, audit_fn, parameter))
     for call, ledger, fork in guards:
         for seed in range(k_seeds):
-            guards_new.append(_trial(call.call_id, "new", seed, replay_fn(call, ledger, fork, new_prompt, seed), audit_fn, parameter))
+            res = replay_fn(call, ledger, fork, new_prompt, seed)
+            guards_new.append(_trial(call.call_id, "new", seed, res, audit_fn, parameter))
     by_call: dict[str, list[bool]] = {}
     for t in old:
         by_call.setdefault(t.call_id, []).append(t.failed)
