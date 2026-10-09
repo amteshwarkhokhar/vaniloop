@@ -94,13 +94,12 @@ def target_fork(call: CallRecord, audit: AuditRecord, parameter: str, ledger: Le
     """Fork at the failing finding's onset turn, else at the audit's first fault turn, else None.
 
     For `product_change` the fork is the first bot turn after the product change, in every scope: the fault is how the
-    bot handles the change, and the audit's onset can be a later turn (the seller handoff). Without a change turn the
-    onset rule applies.
+    bot handles the change, and the audit's onset can be a later turn (the seller handoff). When the change turn is
+    set but no bot turn follows it (the buyer changed on the last turn), the result is None: an earlier fork would
+    drop the change from the replay history. Without a change turn the onset rule applies.
     """
-    if parameter == "product_change" and ledger is not None:
-        pos = _after_product_change(call, ledger)
-        if pos is not None:
-            return pos
+    if parameter == "product_change" and ledger is not None and ledger.product_changed_at_turn is not None:
+        return _after_product_change(call, ledger)
     finding = next((f for f in audit.findings if f.parameter == parameter and f.status in ("Fatal", "NonFatal")), None)
     for turn_idx in (finding.onset_turn if finding else None, audit.first_fault_turn):
         pos = _position(call, turn_idx)
@@ -149,11 +148,16 @@ def select_targets(
     are printed per reason and added to `dropped[reason]` when given.
     """
     forks: dict[str, int] = {}
+    skipped: list[str] = []
     for cid, audit in audits.items():
         if cid in calls and cid in ledgers and ledgers[cid].variant == "main" and gate.failed(audit, parameter):
             fork = target_fork(calls[cid], audit, parameter, ledgers[cid])
             if fork is not None:
                 forks[cid] = fork
+            elif parameter == "product_change" and ledgers[cid].product_changed_at_turn is not None:
+                skipped.append(cid)
+    if skipped:
+        print(f"skipped target(s), no bot turn after the product change: {', '.join(sorted(skipped))}")
     first = pick(list(forks), n)  # the plain pick first, so a run with no drop keeps its picks
     rest = sorted(set(forks) - set(first))
     random.Random(PICK_SEED).shuffle(rest)  # the same seeded order for the replacements
