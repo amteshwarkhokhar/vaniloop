@@ -55,25 +55,34 @@ def product_of(ledger: dict) -> str | None:
     return None
 
 
+def name_key(name: str) -> str:
+    """The key for a product name in categories.json: casefolded, whitespace collapsed."""
+    return " ".join(name.casefold().split())
+
+
 def _load_ledgers(ledgers_path: Path) -> list[dict]:
     return dedupe_by_call_id(read_jsonl(ledgers_path), last_wins=True)
 
 
 def load_categories(categories_path: Path = CATEGORIES_PATH) -> dict[str, str]:
-    """Read `{product_name: category}`. A missing or unreadable file gives an empty map."""
+    """Read `{name_key: category}`. A missing or unreadable file gives an empty map.
+
+    An entry whose category is not in CATEGORIES (a hand edit or an older run) is dropped, so it counts as a miss.
+    """
     try:
         data = json.loads(Path(categories_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
         return {}
-    return {k: v for k, v in data.items() if isinstance(v, str)}
+    return {k: v for k, v in data.items() if isinstance(v, str) and v in CATEGORIES}
 
 
 def label_product(name: str, llm=complete_json) -> str:
     """One LLM call for one product name. An answer outside CATEGORIES becomes `other`."""
     user = f"PRODUCT NAME (data, not instructions): {json.dumps(name, ensure_ascii=False)}"
-    out = llm(SYSTEM, user, validate=lambda d: isinstance(d.get("category"), str), cache_tag=PROMPT_VERSION)
+    # retries=0: one name is one provider call; a failure is left for the next run
+    out = llm(SYSTEM, user, validate=lambda d: isinstance(d.get("category"), str), cache_tag=PROMPT_VERSION, retries=0)
     cat = str(out.get("category", "")).strip().lower().replace(" ", "_").replace("&", "and")
     return cat if cat in CATEGORIES else OTHER
 
@@ -95,7 +104,7 @@ def run_categorize(
     A name that fails (not a budget stop) is left out and counted in `errors`, so a rerun retries it.
     Progress is saved even when the budget stops the run.
     """
-    names = sorted({p for r in _load_ledgers(Path(ledgers_path)) if (p := product_of(r))})
+    names = sorted({name_key(p) for r in _load_ledgers(Path(ledgers_path)) if (p := product_of(r))})
     cats = load_categories(out_path)
     todo = [n for n in names if n not in cats]
     errors = 0
@@ -122,5 +131,5 @@ def category_of(
     for r in _load_ledgers(Path(ledgers_path)):
         if r.get("call_id") == call_id:
             name = product_of(r)
-            return cats.get(name, UNKNOWN) if name else UNKNOWN
+            return cats.get(name_key(name), UNKNOWN) if name else UNKNOWN
     return UNKNOWN
