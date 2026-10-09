@@ -50,7 +50,8 @@ def clean(value):
 
 
 def _valid(rows: list[dict]) -> list[dict]:
-    """Keep rows a route can use: a non-empty string call_id and, where present, list-shaped list fields."""
+    """Keep rows a route can use, and make their fields safe: a non-empty string call_id, list-shaped list
+    fields, and verdict, scope, duration and finding scalars the routes can hash and compare."""
     out = []
     for row in rows:
         if not isinstance(row, dict):
@@ -62,6 +63,20 @@ def _valid(rows: list[dict]) -> list[dict]:
             value = row.get(name)
             if value is not None and not isinstance(value, list):
                 row[name] = []
+        if "verdict" in row and row["verdict"] not in VERDICTS:
+            row["verdict"] = "NeedsReview"
+        if "scope" in row and row["scope"] is not None and not isinstance(row["scope"], str):
+            row["scope"] = "unclear"
+        duration = row.get("duration_sec")
+        if duration is not None and (
+            isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration)
+        ):
+            row["duration_sec"] = None
+        for finding in row.get("findings") or []:
+            if isinstance(finding, dict):
+                for name in ("parameter", "status", "reason"):
+                    if name in finding and not isinstance(finding[name], str):
+                        finding[name] = ""
         out.append(row)
     return out
 
@@ -71,7 +86,7 @@ def _audits(d: Path) -> list[dict]:
 
 
 def _calls(d: Path) -> dict[str, dict]:
-    return {r["call_id"]: r for r in _valid(dedupe_by_call_id(read_jsonl(d / "calls.jsonl")))}
+    return {r["call_id"]: r for r in dedupe_by_call_id(_valid(read_jsonl(d / "calls.jsonl")))}
 
 
 def _first_fault(audit: dict) -> dict | None:
@@ -163,6 +178,9 @@ def host_name(host: str | None) -> str | None:
         end = host.find("]")
         if end == -1:
             return None
+        rest = host[end + 1 :]
+        if rest and not (rest.startswith(":") and rest[1:].isdigit()):
+            return None
         return host[1:end]
     name, sep, port = host.rpartition(":")
     if not sep or not port.isdigit() or not name:
@@ -238,7 +256,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, target.read_bytes(), ctype)
 
     def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
-        if not host_allowed(self.headers.get("Host")):
+        hosts = self.headers.get_all("Host") or []
+        if len(hosts) != 1 or not host_allowed(hosts[0]):
             self._json({"error": "forbidden host"}, 403)
             return
         path = unquote(urlsplit(self.path).path)

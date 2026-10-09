@@ -58,6 +58,22 @@ def test_static_nul_byte_returns_400(server):
     assert json.loads(body) == {"error": "bad request"}
 
 
+def _server_with(tmp_path: Path, calls_lines: list[str], audits_lines: list[str]):
+    """A server on an ephemeral port over tmp_path with the given synthetic rows, shut down by the caller."""
+    (tmp_path / "calls.jsonl").write_text("\n".join(calls_lines) + "\n", encoding="utf-8")
+    (tmp_path / "audits.jsonl").write_text("\n".join(audits_lines) + "\n", encoding="utf-8")
+    srv = web.make_server(0, tmp_path)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    return srv, thread
+
+
+def _stop(srv, thread):
+    srv.shutdown()
+    srv.server_close()
+    thread.join(timeout=5)
+
+
 def test_calls_survive_malformed_rows(tmp_path):
     """A bad audit row must not drop the /api/calls or /api/call connection; the valid rows stay there."""
     lines = [
@@ -104,6 +120,68 @@ def test_calls_survive_malformed_rows(tmp_path):
         srv.shutdown()
         srv.server_close()
         thread.join(timeout=5)
+
+
+def test_calls_survive_bad_call_id_row_next_to_good_rows(tmp_path):
+    """A calls.jsonl row whose call_id is a list must not drop /api/calls or /api/call; dedupe used to run
+    before validation and dict-keyed the unhashable list, killing the connection for good neighbours too."""
+    calls_lines = [
+        json.dumps({"call_id": "good_1", "duration_sec": 12}),
+        json.dumps({"call_id": []}),
+        json.dumps({"call_id": "good_2", "duration_sec": 5}),
+    ]
+    audits_lines = [
+        json.dumps({"call_id": "good_1", "verdict": "Pass"}),
+        json.dumps({"call_id": "good_2", "verdict": "Fatal"}),
+    ]
+    srv, thread = _server_with(tmp_path, calls_lines, audits_lines)
+    try:
+        status, rows = get_json(srv, "/api/calls")
+        assert status == 200
+        assert {r["call_id"] for r in rows} == {"good_1", "good_2"}
+        status, body = get_json(srv, "/api/call/good_1")
+        assert status == 200 and body["call"]["duration_sec"] == 12
+    finally:
+        _stop(srv, thread)
+
+
+def test_malformed_scalars_become_safe_defaults(tmp_path):
+    """Bad verdict, scope, duration and finding scalars must not drop /api/summary, /api/calls or /api/call
+    and must fall back to NeedsReview, unclear, None and empty strings; unhashable lists crashed the routes."""
+    audits_lines = [
+        json.dumps({"call_id": "bad_verdict", "verdict": []}),
+        json.dumps({"call_id": "bad_scope", "verdict": "Pass", "scope": ["x"]}),
+        json.dumps({"call_id": "bad_dur", "verdict": "Fatal"}),
+        json.dumps(
+            {
+                "call_id": "bad_findings",
+                "verdict": "Pass",
+                "findings": [{"parameter": 1, "status": [2], "reason": {}}],
+            }
+        ),
+        json.dumps({"call_id": "good_1", "verdict": "Pass", "scope": "bl_collection"}),
+    ]
+    calls_lines = [
+        json.dumps({"call_id": "bad_dur", "duration_sec": [30]}),
+        json.dumps({"call_id": "good_1", "duration_sec": 30}),
+    ]
+    srv, thread = _server_with(tmp_path, calls_lines, audits_lines)
+    try:
+        status, body = get_json(srv, "/api/summary")
+        assert status == 200
+        assert body["verdicts"]["NeedsReview"] == 1 and body["verdicts"]["Pass"] == 3
+        assert body["scopes"] == {"unclear": 4, "bl_collection": 1}
+        status, rows = get_json(srv, "/api/calls")
+        assert status == 200
+        by_id = {r["call_id"]: r for r in rows}
+        assert by_id["bad_verdict"]["verdict"] == "NeedsReview"
+        assert by_id["bad_scope"]["scope"] == "unclear"
+        assert by_id["bad_dur"]["duration_sec"] is None
+        status, body = get_json(srv, "/api/call/bad_findings")
+        assert status == 200
+        assert body["audit"]["findings"][0] == {"parameter": "", "status": "", "reason": ""}
+    finally:
+        _stop(srv, thread)
 
 
 def test_first_fault_picks_earliest_onset_then_fatal():
@@ -174,6 +252,33 @@ def test_host_allowlist_blocks_rebound_dns(server):
         assert "application/json" in ctype
         assert json.loads(body) == {"error": "forbidden host"}
     assert get(server, "/", host="attacker.example:8765")[0] == 403
+
+
+def test_host_junk_after_ipv6_literal_is_refused(server):
+    """Host values with anything after ] but a port must get 403; the old parser read up to ] and let
+    [::1].attacker.example in as loopback."""
+    for host in ("[::1].attacker.example", "[::1]:8765junk", "[::1]junk", "[::1]:"):
+        status, ctype, body = get(server, "/api/calls", host=host)
+        assert status == 403
+        assert "application/json" in ctype
+        assert json.loads(body) == {"error": "forbidden host"}
+
+
+def test_duplicate_host_headers_are_refused(server):
+    """Two Host headers must get 403; with the old single-value check, a duplicate could slip a spoofed
+    header past a proxy that forwards both."""
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    try:
+        conn.putrequest("GET", "/api/calls", skip_host=True)
+        conn.putheader("Host", "127.0.0.1")
+        conn.putheader("Host", "attacker.example")
+        conn.endheaders()
+        resp = conn.getresponse()
+        assert resp.status == 403
+        assert "application/json" in resp.getheader("Content-Type")
+        assert json.loads(resp.read()) == {"error": "forbidden host"}
+    finally:
+        conn.close()
 
 
 def test_missing_host_header_gets_403(server):
