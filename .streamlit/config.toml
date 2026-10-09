@@ -1,0 +1,24 @@
+# vaniloop dashboard theme. Paper, ink and line colours; verdict colours carry meaning.
+[theme]
+base = "light"
+primaryColor = "#2F5D62"
+backgroundColor = "#F5F6F3"
+secondaryBackgroundColor = "#ECEEEA"
+textColor = "#1E2B2F"
+linkColor = "#2F5D62"
+borderColor = "#D5D9D3"
+showWidgetBorder = true
+baseRadius = "small"
+baseFontSize = 16
+font = "Atkinson Hyperlegible Next:https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Next:wght@400;500;700;800&display=swap, sans-serif"
+headingFont = "Atkinson Hyperlegible Next, sans-serif"
+headingFontWeights = 700
+redColor = "#B3261E"
+orangeColor = "#B86E00"
+greenColor = "#2E7D4F"
+violetColor = "#5B4BB7"
+blueColor = "#2F5D62"
+dataframeHeaderBackgroundColor = "#ECEEEA"
+
+[client]
+toolbarMode = "minimal"

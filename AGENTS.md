@@ -17,7 +17,7 @@ fixes and proves the fixes with replays.
 | Issue: group faults into ranked causes | `issue.py` | built |
 | Fix: prompt diffs against the real VANI prompt | — | not started |
 | Test: fork-the-call replay, noise floor, guards | — | not started |
-| Dashboard | `dashboard.py` (Streamlit) | Audit + Issues views |
+| Dashboard | `dashboard.py` (Streamlit), drawings in `viz.py`, theme in `.streamlit/config.toml` | Audit, Grade, Issues views |
 
 Data contracts for every stage: `src/vaniloop/models.py`. Change them only in an issue that says so.
 
