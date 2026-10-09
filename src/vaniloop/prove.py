@@ -351,6 +351,7 @@ def run_prove(
     the gate and the rows stay the same, only the wall time shrinks. With VANILOOP_CACHE=refresh the gate cannot read
     the cache, so the warm-up is skipped. Attempts above MAX_ATTEMPTS stop here, and each attempt's gate runs at
     alpha / MAX_ATTEMPTS.
+    A (cause, attempt) pair already in gates_path is not gated again (a dry run is still allowed).
     """
     if not cause_id.startswith("cause_"):
         raise SystemExit(f"cause id '{cause_id}' does not look like cause_<parameter>")
@@ -362,6 +363,10 @@ def run_prove(
     if workers < 1:
         raise SystemExit(f"--workers must be at least 1, got {workers}")
     old, new = build_prompts(cause_id, prompt_path, patches_path, attempt)
+    if not dry_run and any(
+        r.get("cause_id") == cause_id and r.get("attempt", 1) == attempt for r in read_jsonl(gates_path)
+    ):  # one look per (cause, attempt): a rerun is an extra look at the same calls and breaks the alpha split
+        raise SystemExit(f"attempt {attempt} of {cause_id} was already gated; a new look needs a new attempt")
     calls = {
         r["call_id"]: CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)
     }

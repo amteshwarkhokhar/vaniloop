@@ -223,6 +223,28 @@ def test_each_gate_runs_at_alpha_split_across_the_allowed_attempts(tmp_path):
     assert [(r["attempt"], r["alpha"]) for r in rows] == [(1, 0.025), (2, 0.025)]
 
 
+def test_a_cause_and_attempt_is_gated_only_once(tmp_path):
+    """A second real `prove` of the same (cause, attempt) must stop with SystemExit before target selection, any
+    replay or any audit, and leave gates.jsonl and replays.jsonl as they were. A dry run is still allowed, and
+    attempt 2 is a different look. Each rerun (another --n or --k, VANILOOP_CACHE=refresh) is an extra look at the
+    same calls, so without the guard a rejected patch could be re-gated until it ships by chance."""
+    pf, paths = write_inputs(tmp_path)
+    stubs = Stubs()
+    args = dict(n=3, k=2, guards=2, replay_fn=stubs.replay_fn, audit_fn=stubs.audit_fn, **paths)
+    prove.run_prove(CAUSE, pf, **args)
+    gates, replays = paths["gates_path"].read_bytes(), paths["replays_path"].read_bytes()
+    for kw in (dict(), dict(n=4, k=3)):
+        with pytest.raises(SystemExit, match=f"attempt 1 of {CAUSE} was already gated; a new look needs a new attempt"):
+            prove.run_prove(CAUSE, pf, **{**args, "replay_fn": raising, "audit_fn": raising, **kw})
+    assert (paths["gates_path"].read_bytes(), paths["replays_path"].read_bytes()) == (gates, replays)
+    dry = prove.run_prove(CAUSE, pf, **{**args, "replay_fn": raising, "audit_fn": raising}, dry_run=True)
+    assert dry.result is None
+    doc = json.loads(paths["patches_path"].read_text())
+    doc["patches"][0]["attempt"] = 2
+    paths["patches_path"].write_text(json.dumps(doc))
+    assert prove.run_prove(CAUSE, pf, **args, attempt=2).result.attempt == 2
+
+
 def test_pipeline_refix_subcommand_passes_its_options_and_prints(monkeypatch, capsys):
     """`pipeline refix` must pass the cause and prompt path to run_refix and print the new attempt and the next
     command. A dropped option would refix the wrong cause or read the wrong prompt."""

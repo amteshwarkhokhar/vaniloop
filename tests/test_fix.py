@@ -611,6 +611,32 @@ def test_refix_refuses_a_third_attempt_before_any_llm_call(tmp_path):
     assert MAX_ATTEMPTS == 2
 
 
+def test_fix_rerun_keeps_a_cause_that_already_has_a_patch_and_writes_the_others(tmp_path, capsys):
+    """`fix` run again must leave a cause with a patch or history alone: no LLM call for it, its attempt, its history
+    and the file's other keys kept, and a printed reason. A cause without a patch is still written. If a rerun
+    replaced the patch, attempt 2 would reset to 1 and the history would vanish, so the attempt cap could be dodged."""
+    kw = refix_files(tmp_path)
+    run_refix("cause_qty_probing", llm=stub("line 3: rule text 3", "line 3: better rule"), **kw)
+    before = json.loads(kw["patches_path"].read_text())
+    assert before["patches"][0]["attempt"] == 2 and len(before["history"]) == 1
+    kw["causes_path"].write_text(json.dumps({"causes": [cause().model_dump(), cause("cause_other").model_dump()]}))
+    seen: list[str] = []
+
+    def llm(system, user, **_kw):
+        seen.append(user)
+        assert cause().name not in user  # the cause with a patch must not reach the LLM
+        return {"old_text": "line 5: rule text 5", "new_text": "line 5: fresh", "rationale": "r", "risk": "low"}
+
+    r = run_fix(kw["causes_path"], kw["prompt_path"], kw["patches_path"], top_n=3, llm=llm)
+    after = json.loads(kw["patches_path"].read_text())
+    assert after["history"] == before["history"]
+    assert after["patches"][0] == before["patches"][0] and after["patches"][0]["attempt"] == 2
+    assert [p["cause_id"] for p in after["patches"]] == ["cause_qty_probing", "cause_other"]
+    assert after["patches"][1]["attempt"] == 1 and r["patches"] == after["patches"]
+    assert len(seen) == 1  # only the cause without a patch reached the LLM
+    assert "cause cause_qty_probing already has attempt 2; use refix" in capsys.readouterr().out
+
+
 def test_patch_attempt_defaults_to_one():
     """A patch row without an attempt field must load as attempt 1. Old patches.json files carry no attempt, and
     they would fail to load or fail `prove --attempt 1` if the default changed."""

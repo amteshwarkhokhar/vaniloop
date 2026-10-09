@@ -245,16 +245,38 @@ def run_fix(
     ranked = [Cause.model_validate(c) for c in doc.get("causes", []) if c.get("status") == "ranked"]
     prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
+    out = Path(out_path)
+    existing = _read_doc(out)
+    held: dict[str, int] = {}
+    for x in [*existing.get("patches", []), *existing.get("history", [])]:
+        held[x.get("cause_id")] = max(held.get(x.get("cause_id"), 0), x.get("attempt", 1))
     rejected: list[dict] = []
     patches = []
     for cause in ranked[:top_n]:
+        if cause.cause_id in held:  # a rerun must not reset attempts or drop history: only refix moves a patch on
+            print(f"cause {cause.cause_id} already has attempt {held[cause.cause_id]}; use refix")
+            continue
         p = propose_patch(cause, evidence_examples(cause, audits), prompt_text, llm=llm, rejected=rejected)
         if p is not None:
             patches.append(p)
-    result = {"patches": [p.model_dump() for p in patches], "rejected": rejected}
-    out = Path(out_path)
-    _write_doc(out, result)
-    return result
+    lock_path = out.with_name(out.name + ".lock")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lf:  # the LLM calls are slow: merge into the file as it is now, as refix does
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            fresh = _read_doc(out)
+            have = {x.get("cause_id") for x in fresh.get("patches", [])}
+            have |= {x.get("cause_id") for x in fresh.get("history", [])}
+            merged = [*fresh.get("patches", []), *(p.model_dump() for p in patches if p.cause_id not in have)]
+            result = {**fresh, "patches": merged, "rejected": rejected}
+            _write_doc(out, result)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+    return {"patches": result["patches"], "rejected": rejected}
+
+
+def _read_doc(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 def _write_doc(out: Path, doc: dict) -> None:
