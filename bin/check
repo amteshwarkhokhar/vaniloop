@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Everything CI checks: tests plus a scan that keeps call data out of git.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+fail=0
+
+echo "== tests"
+uv run pytest -q || fail=1
+
+echo "== no call data tracked"
+bad=$(git ls-files -- transcripts runs data/raw .cache .env 'data/reference/vani_prompt_sarvam.md' '*.mp3' '*.wav')
+if [ -n "$bad" ]; then echo "tracked call data or secrets:"; echo "$bad"; fail=1; fi
+
+echo "== no phone numbers"
+# Indian mobile numbers. uv.lock holds hashes, skip it.
+hits=$(git grep -nIE '(^|[^0-9a-f])(\+91[- ]?)?[6-9][0-9]{9}([^0-9a-f]|$)' -- ':!uv.lock' || true)
+if [ -n "$hits" ]; then echo "$hits"; fail=1; fi
+
+echo "== no denylisted names"
+# Optional local list of real buyer names, one per line, gitignored.
+if [ -f data/pii_denylist.txt ]; then
+  hits=$(git grep -nIiF -f data/pii_denylist.txt || true)
+  if [ -n "$hits" ]; then echo "$hits" | cut -c1-120; fail=1; fi
+fi
+
+[ "$fail" = 0 ] && echo "ALL PASS" || { echo "FAILED"; exit 1; }

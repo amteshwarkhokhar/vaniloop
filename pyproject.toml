@@ -1,7 +1,7 @@
 [project]
 name = "vaniloop"
 version = "0.1.0"
-description = "Add your description here"
+description = "Audit, fix and test loop for the VANI buyer voice bot"
 readme = "README.md"
 authors = [
     { name = "Amteshwar singh", email = "amteshwarsingh289@gmail.com" }

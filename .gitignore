@@ -7,3 +7,5 @@ runs/
 __pycache__/
 .venv/
 *.pyc
+data/reference/vani_prompt_sarvam.md
+data/pii_denylist.txt

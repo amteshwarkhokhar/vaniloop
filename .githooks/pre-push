@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Block a push that fails the tests or the data-leak scan.
+exec "$(git rev-parse --show-toplevel)/bin/check"
