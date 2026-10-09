@@ -70,13 +70,23 @@ def _data_block(transcript: str, brief: BuyerBrief | None) -> str:
 
 
 def replay_id(call_id: str, fork_turn: int, brief: BuyerBrief, max_turns: int, bot_prompt: str, seed: int) -> str:
-    raw = json.dumps([call_id, fork_turn, brief.model_dump(), max_turns, hashlib.sha256(bot_prompt.encode()).hexdigest(),
-                      seed], sort_keys=True, ensure_ascii=False)
+    raw = json.dumps(
+        [call_id, fork_turn, brief.model_dump(), max_turns, hashlib.sha256(bot_prompt.encode()).hexdigest(), seed],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
     return f"{call_id}__replay_{prompt_tag(bot_prompt)}_{seed}_{hashlib.sha256(raw.encode()).hexdigest()[:8]}"
 
 
-def replay_result(call: CallRecord, fork_turn: int, bot_prompt: str, brief: BuyerBrief, max_turns: int = 12,
-                  seed: int = 0, llm=complete_json) -> ReplayResult:
+def replay_result(
+    call: CallRecord,
+    fork_turn: int,
+    bot_prompt: str,
+    brief: BuyerBrief,
+    max_turns: int = 12,
+    seed: int = 0,
+    llm=complete_json,
+) -> ReplayResult:
     if fork_turn < 0 or fork_turn > len(call.turns):
         raise ValueError(f"fork_turn {fork_turn} outside 0..{len(call.turns)}")
     tag = prompt_tag(bot_prompt)
@@ -109,11 +119,22 @@ def replay_result(call: CallRecord, fork_turn: int, bot_prompt: str, brief: Buye
             ended_by = "hang_up"
             break
         speaker = "user" if speaker == "bot" else "bot"
-    record = CallRecord(call_id=replay_id(call.call_id, fork_turn, brief, max_turns, bot_prompt, seed),
-                        duration_sec=turns[-1].end_sec if turns else 0.0, language=call.language, turns=turns)
+    record = CallRecord(
+        call_id=replay_id(call.call_id, fork_turn, brief, max_turns, bot_prompt, seed),
+        duration_sec=turns[-1].end_sec if turns else 0.0,
+        language=call.language,
+        turns=turns,
+    )
     return ReplayResult(call=record, fork_turn=fork_turn, ended_by=ended_by)
 
 
-def replay(call: CallRecord, fork_turn: int, bot_prompt: str, brief: BuyerBrief, max_turns: int = 12,
-           seed: int = 0, llm=complete_json) -> CallRecord:
+def replay(
+    call: CallRecord,
+    fork_turn: int,
+    bot_prompt: str,
+    brief: BuyerBrief,
+    max_turns: int = 12,
+    seed: int = 0,
+    llm=complete_json,
+) -> CallRecord:
     return replay_result(call, fork_turn, bot_prompt, brief, max_turns, seed, llm).call

@@ -5,6 +5,21 @@ import pytest
 
 from vaniloop.ingest import AUDIO_DIR, TRANSCRIPTS_DIR, build_call_records, detect_silences, load_transcript
 
+HAS_DATA = (TRANSCRIPTS_DIR / "10_90797297_EMBDVXFH5.json").exists()
+needs_data = pytest.mark.skipif(not HAS_DATA, reason="local call data not present")
+
+
+def synthetic_transcripts(d: Path, n: int = 3) -> Path:
+    """Write n tiny transcripts so ingest tests do not depend on real call data."""
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        (d / f"syn{i}.json").write_text(
+            f'{{"call_id":"syn{i}","duration_sec":4,"turns":[{{"speaker":"bot","start_sec":0,"end_sec":2,"text":"hello"}},'
+            f'{{"speaker":"user","start_sec":2,"end_sec":4,"text":"haan"}}]}}'
+        )
+    return d
+
+
 COUNTS = {
     "10_90797297_EMBDVXFH5": 9,
     "133_90852837_DSXGKXVH5": 3,
@@ -12,8 +27,13 @@ COUNTS = {
 }
 
 
+@needs_data
 @pytest.mark.parametrize("call_id,n", COUNTS.items())
 def test_load_transcript_turn_counts(call_id, n):
+    """A real transcript must load one Turn per line, give consecutive idx values and attach the sibling mp3 path.
+
+    Wrong counts or indices would make silence and loop rules read the wrong turns at grading time.
+    """
     rec = load_transcript(TRANSCRIPTS_DIR / f"{call_id}.json")
     assert len(rec.turns) == n
     assert [t.idx for t in rec.turns] == list(range(n))
@@ -22,6 +42,10 @@ def test_load_transcript_turn_counts(call_id, n):
 
 
 def test_seller_maps_to_user(tmp_path):
+    """A speaker named seller must become user, and a transcript with no audio must leave audio_path None.
+
+    A miss here would mislabel who spoke and invent an audio file, breaking every turn-based rule.
+    """
     p = tmp_path / "x.json"
     p.write_text(
         '{"call_id":"x","duration_sec":1,"turns":[{"speaker":"seller","start_sec":0,"end_sec":1,"text":"hi"}]}'
@@ -31,7 +55,12 @@ def test_seller_maps_to_user(tmp_path):
     assert rec.audio_path is None
 
 
+@needs_data
 def test_detect_silences_real_call():
+    """Silence detection on a real call audio may only return intervals whose end is after their start.
+
+    A bad interval would trigger dead-air faults on the wrong span of a real call.
+    """
     sil = detect_silences(AUDIO_DIR / "10_90797297_EMBDVXFH5.mp3")
     print(sil)
     assert all(s.end_sec > s.start_sec for s in sil)
@@ -47,6 +76,10 @@ def _make(tmp_path: Path, graph: str) -> Path:
 
 
 def test_detect_silences_synthetic(tmp_path):
+    """A synthetic tone-silence-tone clip must yield exactly one silence near two to five seconds.
+
+    A wrong span would move or miss the dead-air fault that the audit grades against the real prompt.
+    """
     f = _make(
         tmp_path,
         "sine=frequency=440:duration=2[a];anullsrc=r=44100:cl=mono,atrim=duration=3[s];"
@@ -59,6 +92,10 @@ def test_detect_silences_synthetic(tmp_path):
 
 
 def test_trailing_silence(tmp_path):
+    """Silence that runs to the very end of a synthetic clip must still be reported with its end time.
+
+    A missed trailing gap would let a call that fades out go unflagged for dead air.
+    """
     f = _make(
         tmp_path,
         "sine=frequency=440:duration=2[a];anullsrc=r=44100:cl=mono,atrim=duration=3[s];[a][s]concat=n=2:v=0:a=1",
@@ -69,9 +106,14 @@ def test_trailing_silence(tmp_path):
 
 
 def test_build_resumable(tmp_path):
+    """Re-running ingest must skip already-written calls and never duplicate rows in calls.jsonl.
+
+    A resumed audit would otherwise double-count the same call and inflate every frequency.
+    """
     out = tmp_path / "calls.jsonl"
-    r1 = build_call_records(TRANSCRIPTS_DIR, AUDIO_DIR, out)
+    src = synthetic_transcripts(tmp_path / "t")
+    r1 = build_call_records(src, tmp_path, out)
     assert len(r1) == 3
-    r2 = build_call_records(TRANSCRIPTS_DIR, AUDIO_DIR, out)
+    r2 = build_call_records(src, tmp_path, out)
     assert len(r2) == 3
     assert len(out.read_text().splitlines()) == 3

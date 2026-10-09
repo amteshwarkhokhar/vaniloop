@@ -38,8 +38,14 @@ def model_name() -> str:
     return os.environ.get("LLM_MODEL", "google/gemini-3-flash-preview")
 
 
-def _key(model: str, messages: list[dict], base_url: str = "", cache_tag: str = "",
-         temperature: float = 0, seed: int | None = None) -> str:
+def _key(
+    model: str,
+    messages: list[dict],
+    base_url: str = "",
+    cache_tag: str = "",
+    temperature: float = 0,
+    seed: int | None = None,
+) -> str:
     body = {"m": model, "u": base_url, "t": cache_tag, "msgs": messages}
     if temperature != 0:  # added only when non-default, so keys of older calls stay identical
         body["temp"] = temperature
@@ -80,9 +86,17 @@ def _write_cache(key: str, data: dict) -> None:
     os.replace(tmp, final)
 
 
-def complete_json(system: str, user: str, model: str | None = None, retries: int = 2,
-                  validate=None, cache_tag: str = "", temperature: float = 0, seed: int | None = None,
-                  max_retries: int | None = None) -> dict:
+def complete_json(
+    system: str,
+    user: str,
+    model: str | None = None,
+    retries: int = 2,
+    validate=None,
+    cache_tag: str = "",
+    temperature: float = 0,
+    seed: int | None = None,
+    max_retries: int | None = None,
+) -> dict:
     """Return a parsed JSON object. Retries on unparseable or invalid output; only valid output is cached."""
     model = model or model_name()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
