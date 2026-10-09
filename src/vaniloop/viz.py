@@ -1,4 +1,4 @@
-"""HTML and SVG for the dashboard: call strips, the wall of calls, the transcript as a script, the cause list.
+"""HTML for the dashboard: call strips, the wall of calls, the transcript as a script, the cause list, the fix cards.
 
 Pure functions, no streamlit import: the dashboard renders the strings and the tests read them.
 Every piece of call text goes through html.escape. Pass audit=None to draw a call blind (Grade view).
@@ -6,10 +6,15 @@ Every piece of call text goes through html.escape. Pass audit=None to draw a cal
 
 from __future__ import annotations
 
+import difflib
 import html
 import math
+from typing import TYPE_CHECKING
 
 from .models import AuditRecord, CallRecord, Cause
+
+if TYPE_CHECKING:  # type names only: drawing must not import the LLM client
+    from .fix import PromptPatch
 
 VERDICT_ORDER = ("Fatal", "NonFatal", "Pass", "NeedsReview")
 VERDICT_LABEL = {"Fatal": "Fatal", "NonFatal": "Non-Fatal", "Pass": "Pass", "NeedsReview": "Needs review"}
@@ -83,6 +88,27 @@ ol.vl-causes, ol.vl-script { padding-left: 0; margin-left: 0; }
 .vl-causes .ci { display: block; position: relative; height: 14px; margin-bottom: .2rem;
   background: linear-gradient(#E1E4DF, #E1E4DF) 0 6px / 100% 2px no-repeat; }
 .vl-causes .ci span { position: absolute; top: 2px; height: 10px; border-radius: 2px; }
+.vl-cards { list-style: none; padding: 0; margin: 0 0 1rem; max-width: 60rem; }
+.vl-card { display: grid; grid-template-columns: 2rem minmax(0, 1fr); column-gap: .75rem;
+  padding: 1rem 0 1.1rem; border-top: 1px solid #E1E4DF; }
+.vl-card .n { font-size: 1.5rem; font-weight: 700; color: #5E6B6E; }
+.vl-card h4 { font-size: 1.1rem; font-weight: 700; margin: 0 0 .35rem; padding: 0; }
+.vl-card h4 small { font-weight: 400; font-size: .9rem; color: #5E6B6E; margin-left: .5rem; }
+.vl-card p { margin: .35rem 0; max-width: 72ch; line-height: 1.5; }
+.vl-card p b { font-weight: 700; margin-right: .35rem; }
+.vl-card .vl-note { border-left: 3px solid var(--c); padding-left: .75rem; }
+.vl-diff { margin: .5rem 0; max-width: 60rem; font: .85rem/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.vl-diff .row { display: grid; grid-template-columns: 3.25rem 1.1rem minmax(0, 1fr); padding: 0 .5rem 0 0;
+  border-left: 3px solid transparent; }
+.vl-diff .ln { color: #5E6B6E; text-align: right; padding-right: .5rem; }
+.vl-diff .sg { color: #5E6B6E; text-align: center; }
+.vl-diff .tx { display: block; min-height: 1.5em; white-space: pre-wrap; overflow-wrap: anywhere;
+  text-decoration: none; }
+.vl-diff .row.del { border-left-color: #B3261E; background: color-mix(in srgb, #B3261E 7%, transparent); }
+.vl-diff .row.del .tx { text-decoration: line-through; color: #8C2F2A; }
+.vl-diff .row.add { border-left-color: #2E7D4F; background: color-mix(in srgb, #2E7D4F 9%, transparent); }
+.vl-diff .row.add .tx { color: #1F5C38; }
+.vl-diff .row.ctx .tx { color: #5E6B6E; }
 @media (max-width: 720px) {
   .vl-wall { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .vl-script li { grid-template-columns: 3rem minmax(0, 1fr); }
@@ -341,3 +367,92 @@ def cause_list(causes: list[Cause]) -> str:
         f'<ol class="vl vl-causes" aria-label="Causes, most urgent first">{"".join(rows)}</ol>'
         f'<p class="vl vl-axis">Bars share one axis from 0 to {axis:.0%} of graded calls (95% interval).</p>'
     )
+
+
+def _counts(c: Cause) -> str:
+    return ", ".join(
+        x
+        for x in (
+            f"{len(c.fatal_calls)} Fatal" if c.fatal_calls else "",
+            f"{len(c.nonfatal_calls)} Non-Fatal" if c.nonfatal_calls else "",
+        )
+        if x
+    )
+
+
+def diff_rows(patch: PromptPatch) -> list[tuple[str, str, str]]:
+    """The patch as (kind, L ref, text) rows. kind is ctx (kept), del (old line) or add (new line).
+
+    Only lines that exist in the old prompt carry an L ref, counted from target_start_line. An added line has none.
+    """
+    old, new = patch.old_text.splitlines(), patch.new_text.splitlines()
+    rows: list[tuple[str, str, str]] = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if op == "equal":
+            rows += [("ctx", f"L{patch.target_start_line + i}", old[i]) for i in range(i1, i2)]
+            continue
+        rows += [("del", f"L{patch.target_start_line + i}", old[i]) for i in range(i1, i2)]
+        rows += [("add", "", new[j]) for j in range(j1, j2)]
+    return rows
+
+
+def patch_diff(patch: PromptPatch) -> str:
+    """A line diff of one prompt patch: old lines struck, new lines added, kept lines plain, L refs in the gutter.
+
+    The gutter also carries a minus or plus sign, so the change reads without colour.
+    """
+    rows = []
+    for kind, ref, text in diff_rows(patch):
+        sign, tag = {"del": ("\u2212", "del"), "add": ("+", "ins"), "ctx": ("", "span")}[kind]
+        rows.append(
+            f'<div class="row {kind}"><span class="ln">{esc(ref)}</span><span class="sg">{sign}</span>'
+            f'<{tag} class="tx">{esc(text)}</{tag}></div>'
+        )
+    span = patch.target_start_line
+    where = f"line L{span}" if patch.target_end_line <= span else f"lines L{span} to L{patch.target_end_line}"
+    return (
+        f'<p class="vl-pass">Edits prompt {where}.</p>'
+        f'<div class="vl vl-diff" role="group" aria-label="Prompt change, {esc(where)}">{"".join(rows)}</div>'
+    )
+
+
+def fix_cards(causes: list[Cause], patches: list[PromptPatch], rejected: list[dict]) -> str:
+    """One card per ranked cause in rank order: counts, the patch as a line diff, why and the risk.
+
+    A cause whose patch was rejected shows the reason. A cause with neither says there is no patch.
+    A patch or rejection for a cause missing from `causes` still gets a card, named by its id, after the ranked ones.
+    """
+    ranked = [c for c in causes if c.status == "ranked"]
+    known = {c.cause_id for c in causes}
+    stray = dict.fromkeys([p.cause_id for p in patches] + [r.get("cause_id") for r in rejected])
+    ranked += [
+        Cause(cause_id=i, name=i, description="", type="prompt", parameter="")
+        for i in stray
+        if isinstance(i, str) and i not in known
+    ]
+    patch_of = {p.cause_id: p for p in patches}  # a later patch for the same cause replaces an earlier one
+    reason_of = {r.get("cause_id"): r.get("reason") for r in rejected}
+    cards = []
+    for n, c in enumerate(ranked, 1):
+        patch, reason = patch_of.get(c.cause_id), reason_of.get(c.cause_id)
+        if patch is not None:
+            body = f"{patch_diff(patch)}<p><b>Why</b>{esc(patch.rationale)}</p><p><b>Risk</b>{esc(patch.risk)}</p>"
+        elif reason:
+            body = f'<p class="vl-note" style="--c:{VERDICT_COLOR["Fatal"]}"><b>Patch rejected</b>{esc(reason)}</p>'
+        else:
+            body = (
+                f'<p class="vl-note" style="--c:{VERDICT_COLOR["NeedsReview"]}"><b>No patch</b>'
+                "There is no patch for this cause yet.</p>"
+            )
+        counts = _counts(c)
+        small = f"<small>{esc(counts)} calls</small>" if counts else ""
+        cards.append(
+            f'<li class="vl-card"><span class="n">{n}</span><div><h4>{esc(c.name)}{small}</h4>{body}</div></li>'
+        )
+    with_patch = sum(c.cause_id in patch_of for c in ranked)
+    n_rejected = sum(c.cause_id in reason_of and c.cause_id not in patch_of for c in ranked)
+    lede = (
+        f'<p class="vl vl-lede"><b>{with_patch} of {len(ranked)}</b> ranked causes have a patch ready to test. '
+        f"{n_rejected} had a patch rejected.</p>"
+    )
+    return f'{lede}<ol class="vl vl-cards" aria-label="Prompt fixes, most urgent cause first">{"".join(cards)}</ol>'
