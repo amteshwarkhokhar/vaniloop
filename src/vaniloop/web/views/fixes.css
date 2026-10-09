@@ -1,0 +1,29 @@
+/* Fixes view */
+.gates{ list-style:none; margin:56px 0 0; padding:0; border-top:1px solid var(--seam); }
+.gate{ display:grid; grid-template-columns:minmax(0,1fr) 130px 320px 96px; gap:10px 32px; align-items:center;
+  padding:22px 12px; border-bottom:1px solid var(--seam); transition:background .2s var(--ease); }
+.gate:hover{ background:var(--slate); }
+.gcause{ display:grid; gap:6px; min-width:0; }
+.gcause b{ font-weight:500; font-size:16px; line-height:1.35; }
+.gcause .label{ font-size:10px; }
+.rates{ display:grid; gap:8px; }
+.rate{ display:grid; grid-template-columns:32px minmax(0,1fr) 40px; gap:12px; align-items:center; }
+.rate .label{ font-size:10px; }
+.track{ height:3px; background:var(--seam); border-radius:1px; overflow:hidden; }
+.track i{ display:block; height:100%; border-radius:1px; transform-origin:left; animation:fill .5s var(--ease) both; }
+.old .track i{ background:var(--ash); }
+.new .track i{ background:var(--ivory); }
+@keyframes fill{ from{ transform:scaleX(0); } }
+.pc{ font-size:12px; text-align:right; color:var(--ash); }
+.new .pc{ color:var(--ivory); }
+.gp{ font-size:13px; text-align:right; color:var(--ivory); }
+.gp.none{ color:var(--ash); }
+.greason{ grid-column:1 / -1; font-size:14px; color:var(--ash); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+@media (max-width:900px){
+  .gate{ grid-template-columns:minmax(0,1fr) 104px; gap:14px 16px; padding:20px 4px; }
+  .gdec{ grid-column:2; grid-row:1; justify-self:end; }
+  .rates{ grid-column:1; }
+  .gp{ grid-column:2; align-self:end; }
+  .greason{ white-space:normal; }
+}

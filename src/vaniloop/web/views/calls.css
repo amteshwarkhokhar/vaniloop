@@ -3,7 +3,6 @@
 .hero-line{ margin:0 0 20px; font:400 56px/1.1 var(--display); letter-spacing:-.01em; }
 .hero-line span{ display:block; }
 .hero-line em{ font-style:normal; font-weight:500; font-variant-numeric:lining-nums tabular-nums; }
-.hero .sep{ margin:0 12px; color:var(--seam); }
 
 /* the spectrum: one hairline per call */
 .spectrum{ position:relative; height:180px; margin:0; border-bottom:1px solid var(--seam); }

@@ -37,13 +37,6 @@
   });
 
   const VIEWS = (window.VIEWS = window.VIEWS || {});
-  const soon = (title) => ({
-    render(el) {
-      el.innerHTML = `<h1 class="view-title">${title}</h1><p class="lede">Coming next.</p>`;
-    },
-  });
-  VIEWS.causes = VIEWS.causes || soon("Causes");
-  VIEWS.fixes = VIEWS.fixes || soon("Fixes");
 
   VIEWS.invalid = {
     render(el) {
