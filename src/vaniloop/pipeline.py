@@ -1,5 +1,5 @@
 """Pipeline runner. `python -m vaniloop.pipeline <command>`: audit, regrade, issues, categorize, fix, refix, prove,
-rootcause, grade-sample, golden (build, agreement, check)."""
+loop, rootcause, grade-sample, golden (build, agreement, check)."""
 
 from __future__ import annotations
 
@@ -534,6 +534,12 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--attempt", type=int, default=1)
     pv.add_argument("--holdout", action="store_true", help="targets from hold-out calls only")
     pv.add_argument("--screen", action="store_true", help="keep calls OLD fails on 2 of 3 seeds; gate on seeds 3..")
+    lp = sub.add_parser("loop", help="the whole fix loop in one command: audit to report; ships nothing")
+    lp.add_argument("--plan", action="store_true", help="print what the loop would do and its cost estimate as JSON")
+    lp.add_argument("--prompt", default=None, help="the VANI prompt file; not needed with --plan")
+    lp.add_argument("--top", type=int, default=3)
+    lp.add_argument("--n", type=int, default=8)
+    lp.add_argument("--k", type=int, default=3)
     sh = sub.add_parser("ship", help="make the next prompt version from a cause's patch that the gate shipped")
     sh.add_argument("--cause", required=True)
     sh.add_argument("--prompt", default=None, help="the clean base VANI prompt file (default: the reference copy)")
@@ -693,6 +699,16 @@ def main(argv: list[str] | None = None) -> None:
             **({"screen": True} if args.screen else {}),
         )
         print("\n".join(describe(out)))
+    elif args.cmd == "loop":
+        from . import loop  # lazy: loop imports this module
+
+        runs = Path(args.runs) if args.runs else RUNS
+        if args.plan:
+            print(json.dumps(loop.plan(runs, args.top), ensure_ascii=False))
+        elif args.prompt is None:
+            ap.error("loop needs --prompt unless --plan")
+        else:
+            loop.run_loop(runs, Path(args.prompt), top=args.top, n=args.n, k=args.k)
     elif args.cmd == "ship":
         kw = {"prompt_path": Path(args.prompt)} if args.prompt else {}
         version = ship(args.cause, P["patches"].parent, patches_path=P["patches"], **kw)

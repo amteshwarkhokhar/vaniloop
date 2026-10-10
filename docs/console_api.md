@@ -27,6 +27,7 @@ The server builds argv from validated args only. It never passes client strings 
 | prove | cause: str (must be a cause_id in causes.json), n?: int 2..20 = 8, k?: int 1..5 = 3, attempt?: int 1..2 = 1, holdout?: bool = true, screen?: bool = true | yes |
 | ship | cause: str (must be a cause_id in causes.json and in state ready_to_ship). Needs `"confirm": true`. Runs `pipeline ship --cause`, which makes a new prompt version. | no (changes the live prompt) |
 | submit | submission_id: str (from POST /api/submit) | yes |
+| loop | top?: int 1..8 = 3, n?: int 2..20 = 8, k?: int 1..5 = 3. Runs `pipeline loop --prompt <prompt> --top N --n N --k K` (see Loop). | yes (Gemini, and replays) |
 
 Stage `ship` needs `"confirm": true` too: 400 `{"error": "confirm"}` without it, and 409 `{"error": "<cause> is <state>, not ready_to_ship"}` when the tracker state is not ready_to_ship. A paid stage needs `"confirm": true` in the body. Otherwise the server returns 400 `{"error": "confirm", "estimate_usd": number|null}`.
 
@@ -71,13 +72,22 @@ Stage `ship` needs `"confirm": true` too: 400 `{"error": "confirm"}` without it,
 - Check order for every POST and PUT: Host, Origin, read-only folder, content type, body size, JSON object.
 - `build_argv` in `console.py` is the only place that makes argv. It gets validated values only.
 - Stage `agreement` runs the pipeline command `judge-agreement`.
-- `estimate_usd` is always null for now: there is no estimator.
+- `estimate_usd` is null for every paid stage except `loop`. For `loop` it is `loop.plan(data, top)["estimate_usd"]`, and null when the plan has no cost history or cannot be made.
 - A job row also keeps `pid`, `started_utc` and `ended_utc` in jobs.jsonl. The API hides them.
 - `--calls` takes one comma-separated value. Stage `submit` runs with `--runs <data>/console/submissions/<sid>` and `--inbox <sid>/inbox --from <data>`. Its `--calls` come from `meta.json` in the submission folder.
-- `fix`, `prove` and `ship` pass `--prompt data/reference/vani_prompt_sarvam.md`. When it is missing the job is refused: 400 `{error: "VANI prompt file missing", field: "prompt"}`.
+- `fix`, `prove`, `ship` and `loop` pass `--prompt data/reference/vani_prompt_sarvam.md`. When it is missing the job is refused: 400 `{error: "VANI prompt file missing", field: "prompt"}`.
 
 ### Tracker (#130)
 - `GET /api/tracker` returns `{causes: [...], prompt_versions: [...], current_prompt_version}`. Each cause has `state`, `route`, `counts` and `events`. An event that skipped its prerequisite state has `ignored: true`. `prompt_versions_error` is set when `prompts/versions.json` is malformed.
 - `POST /api/tracker/<cause_id>/ticket {action: "sent", ref: str 1..200} | {action: "resolved", note: str}` returns 200 `{cause}`, 400 for a bad body, 409 `{error}` for a wrong state and 404 for an unknown cause.
 - `POST /api/tracker/<cause_id>/ship {confirm: true}` starts the `ship` job and returns 202 `{job}`. The UI polls the job. 409 `{error}` when the state is not ready_to_ship, 409 `{error: "busy", job_id}` when another job runs, 400 `{error: "confirm"}` without confirm.
 - Both POSTs use the same security checks as every POST (see Security).
+
+### Loop (#145)
+- `pipeline [--runs DIR] loop [--plan] [--prompt FILE] [--top N=3] [--n 8] [--k 3]` runs the whole fix loop (`src/vaniloop/loop.py`): audit (calls with no audit row), judge (Jev), regrade, issues, fix, test, report. `--prompt` is needed unless `--plan`. Each step prints `LOOP_STEP <i>/7 <name>`, then its own lines.
+  - fix and test work on patch-routed causes in state open (first patch), in_fix (prove it), rejected or gated_inconclusive (refix, then prove the next attempt, 2 attempts at most). `--top` counts these causes only. Exhausted, shipped, ready_to_ship, ticket and watching causes are skipped with a reason. New ticket and watch causes are routed by fix (ticket file, routed event). A cause that fails is recorded and the loop goes on. SIGTERM (cancel) prints `LOOP_FAILED <step> cancelled` and exits non-zero. Replays are graded with Jev labels (`VANILOOP_JUDGE=jev`).
+  - **The loop never ships.** The report step lists the causes that wait for the owner's approval in the tracker (ready_to_ship), the tickets and the watch causes.
+- It ends with `LOOP_SUMMARY <one JSON line>` and `LOOP_DONE`: `{steps: [{name, status, detail}], causes: [{cause_id, state, skipped: str|null, attempts: [{attempt, decision}], failed: {step, attempt, reason}|null}], decisions: {cause_id: decision}, cost_usd, ready_to_ship: [id], tickets: [id], watch: [id]}`. `cost_usd` sums the llm.COSTS_PATH rows during the loop, without reserve rows. A failed step 1 to 5 prints `LOOP_FAILED <step> <reason>`, exits non-zero and prints no summary.
+- `GET /api/loop/plan[?top=N]` (also `pipeline loop --plan`) returns `loop.plan(data, top)`: no LLM call, no file written, so it works on a read-only folder. 400 `{error, field: "top"}` for a bad top, 500 `{error}` when the plan fails.
+  - `{steps: [{name, will_run: bool, why, count: int}], causes: [{cause_id, route: "patch"|"ticket"|"watch", state, next_attempt: int|null, why}], new_calls: int, estimate_usd: number|null, estimate_basis: str}`. `next_attempt` is null for a skipped cause, with the reason in `why`. The causes are those of the last `issues` run.
+  - `estimate_usd` = new_calls x the mean audit cost + per cause to test its remaining attempts x (the median gate `cost_usd` + the mean patch-writing cost), from `costs.jsonl` and `gates.jsonl` in the data folder. It counts every remaining attempt, but gate rows count replay turns only (no warm-ups), so the real cost may be higher. Jev is $0. Without the history it needs it is null and `estimate_basis` starts with "no history". With nothing to run it is 0.

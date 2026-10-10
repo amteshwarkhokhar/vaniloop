@@ -113,13 +113,38 @@ def test_read_only_folder_refuses_writes(tmp_path, monkeypatch):
 
 
 def test_console_lists_stages(srv):
-    """Protects the UI's stage form: GET /api/console must list the nine contract stages with paid flags and
+    """Protects the UI's stage form: GET /api/console must list the ten contract stages with paid flags and
     no busy job, or the UI cannot build its forms."""
     status, out = call(srv, "GET", "/api/console")
     assert status == 200 and out["busy_job_id"] is None and out["read_only"] is False
     paid = {s["id"]: s["paid"] for s in out["stages"]}
     assert paid == {"audit": True, "judge": False, "regrade": False, "issues": False, "agreement": False,
-                    "fix": True, "prove": True, "ship": False, "submit": True}  # fmt: skip
+                    "fix": True, "prove": True, "ship": False, "submit": True, "loop": True}  # fmt: skip
+
+
+def test_loop_stage_needs_confirm_and_answers_with_the_estimate(srv, data, monkeypatch):
+    """Protects the one-button loop: without confirm the answer must be 400 'confirm' with the estimate from the cost
+    history (null when the plan cannot be made), bad sizes must give 400, and with confirm the job must start with the
+    argv the pipeline loop command needs. If not, the button could start a paid run blind."""
+    from vaniloop import ledger
+
+    (data / "causes.json").write_text(json.dumps({"causes": []}))
+    audit_rows = [{"model": "g", "cache_tag": ledger.PROMPT_VERSION, "cost_usd": c} for c in (0.01, 0.03)]
+    (data / "costs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in audit_rows))
+    argv = console.build_argv(data, "loop", {"top": 2, "n": 5, "k": 2})
+    assert argv[:8] == ["uv", "run", "python", "-m", "vaniloop.pipeline", "--runs", str(data), "loop"]
+    assert argv[8:] == ["--prompt", str(console.PROMPT_PATH), "--top", "2", "--n", "5", "--k", "2"]
+    seen: list = []
+    use_argv(monkeypatch, "pass", seen)
+    status, out = call(srv, "POST", "/api/jobs", {"stage": "loop"})
+    assert (status, out["error"]) == (400, "confirm") and out["estimate_usd"] == pytest.approx(0.04)
+    assert seen == []
+    for args in ({"top": 9}, {"n": 1}, {"k": 6}, {"cause": "C-01"}, {"top": True}):
+        assert call(srv, "POST", "/api/jobs", {"stage": "loop", "args": args, "confirm": True})[0] == 400
+    status, out = call(srv, "POST", "/api/jobs", {"stage": "loop", "confirm": True})
+    assert status == 202 and seen == [("loop", {"top": 3, "n": 8, "k": 3})]
+    (data / "causes.json").write_text(json.dumps({"causes": [{"cause_id": "C-01"}]}))  # not a valid cause
+    assert call(srv, "POST", "/api/jobs", {"stage": "loop"})[1] == {"error": "confirm", "estimate_usd": None}
 
 
 def test_job_runs_logs_and_finishes(srv, data, monkeypatch):
@@ -265,10 +290,10 @@ def test_restart_marks_lost_running_job_failed(data):
 
 
 def test_fix_and_prove_refuse_without_prompt_file(srv, monkeypatch, tmp_path):
-    """Protects fix and prove from starting a paid run with no VANI prompt: a missing prompt file must give
+    """Protects fix, prove and loop from starting a paid run with no VANI prompt: a missing prompt file must give
     400 'VANI prompt file missing' with field prompt, and start no job."""
     monkeypatch.setattr(console, "PROMPT_PATH", tmp_path / "absent.md")
-    for body in ({"stage": "fix"}, {"stage": "prove", "args": {"cause": "C-01"}}):
+    for body in ({"stage": "fix"}, {"stage": "prove", "args": {"cause": "C-01"}}, {"stage": "loop"}):
         status, out = call(srv, "POST", "/api/jobs", {**body, "confirm": True})
         assert (status, out) == (400, {"error": "VANI prompt file missing", "field": "prompt"})
 
