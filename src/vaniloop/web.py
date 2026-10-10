@@ -63,8 +63,9 @@ def data_dir() -> Path:
 
 
 def read_only(d: Path) -> bool:
-    """True when the data folder is inside <repo>/.cache/ (the demo freeze): writes are refused."""
-    return Path(d).resolve().is_relative_to((ROOT / ".cache").resolve())
+    """True when the data folder is inside any .cache/ folder (the demo freeze), also another checkout's: writes are
+    refused."""
+    return ".cache" in Path(d).resolve().parts
 
 
 def console_info(d: Path, runner) -> dict:

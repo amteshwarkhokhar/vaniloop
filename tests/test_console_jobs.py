@@ -112,6 +112,14 @@ def test_read_only_folder_refuses_writes(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_a_cache_folder_of_another_checkout_is_read_only(tmp_path, monkeypatch):
+    """Protects the frozen demo data when the server runs from a worktree: a data folder under any .cache/ must be
+    read-only, not only the server checkout's own .cache/. On 10 Oct a worktree server wrote into the main freeze."""
+    monkeypatch.setattr(web, "ROOT", tmp_path / "worktree")
+    assert web.read_only(tmp_path / "main" / ".cache" / "demo_freeze") is True
+    assert web.read_only(tmp_path / "main" / "runs") is False
+
+
 def test_console_lists_stages(srv):
     """Protects the UI's stage form: GET /api/console must list the ten contract stages with paid flags and
     no busy job, or the UI cannot build its forms."""
