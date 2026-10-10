@@ -343,7 +343,7 @@ def test_pipeline_main_applies_the_rubric(tmp_path, monkeypatch):
     """
     seen = {}
     monkeypatch.setattr(
-        pipeline, "run_regrade", lambda **k: seen.update(p=rules.FRUSTRATED_P) or {"regraded": 0, "verdicts": {}}
+        pipeline, "run_regrade", lambda *a, **k: seen.update(p=rules.FRUSTRATED_P) or {"regraded": 0, "verdicts": {}}
     )
     monkeypatch.setenv("VANILOOP_RUBRIC", str(_write(tmp_path, {"params": {"rules.FRUSTRATED_P": 0.9}})))
     pipeline.main(["regrade"])
@@ -413,3 +413,21 @@ def test_concurrent_saves_do_not_lose_or_mix_writes(tmp_path):
     last = rubric.load(p)["params"]
     assert set(last) == set(ids)
     assert sorted(x.name for x in tmp_path.iterdir() if not x.name.endswith(".lock")) == ["rubric.json"]
+
+
+def test_rubric_path_follows_the_runs_folder(tmp_path, monkeypatch):
+    """Protects --runs: without VANILOOP_RUBRIC the rubric is read from the --runs folder, and the env var still wins.
+
+    If it failed, a run on a workspace folder would grade with the repo's runs/rubric.json, not the workspace's.
+    """
+    monkeypatch.delenv("VANILOOP_RUBRIC", raising=False)
+    assert rubric.path(tmp_path) == tmp_path / "rubric.json"
+    (tmp_path / "rubric.json").write_text(json.dumps({"params": {"rules.FRUSTRATED_P": 0.9}}))
+    seen = {}
+    monkeypatch.setattr(
+        pipeline, "run_regrade", lambda *a, **k: seen.update(p=rules.FRUSTRATED_P) or {"regraded": 0, "verdicts": {}}
+    )
+    pipeline.main(["--runs", str(tmp_path), "regrade"])
+    assert seen["p"] == 0.9
+    monkeypatch.setenv("VANILOOP_RUBRIC", str(tmp_path / "other.json"))
+    assert rubric.path(tmp_path) == tmp_path / "other.json"
