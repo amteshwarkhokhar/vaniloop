@@ -103,6 +103,18 @@ def test_rubric_hostile_check_name_renders_as_text():
     assert "&#60;img src=x onerror=alert(1)&#62;" in d["panel"] and "<img" not in d["panel"]
 
 
+def test_rubric_is_rows_with_closed_disclosures_and_no_cards():
+    """The Rubric page is one grouped list: a closed disclosure per check and per Jev question, no card per check.
+
+    Each row names the check, says who judges it and how many numbers it holds. If a disclosure rendered open, or the
+    cards came back, the page would again be a wall of fields that the owner rejected as cluttered."""
+    d = run("con-rubric")
+    rows = re.findall(r'<details class="rrow"( open)?>', d["panel"])
+    assert len(rows) >= 2 and not any(rows), "every row starts closed"
+    assert "op-card" not in d["panel"] and 'class="rlist' in d["panel"]
+    assert "No looping" in d["panel"] and "numbers</span>" in d["panel"]
+
+
 def test_rubric_saves_only_changed_fields_and_shows_a_400_next_to_its_field():
     """Two edits send a PUT with just those two ids, never the untouched Dead air param.
 
