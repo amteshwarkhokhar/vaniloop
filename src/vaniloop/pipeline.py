@@ -707,10 +707,11 @@ def main(argv: list[str] | None = None) -> None:
         )  # fmt: skip
         print(f"release check of {r['version']}: {r['guards']} guards, targets {r['targets']}, {r['replays']} replays")
         if not args.dry_run:
-            print(
-                f"new Fatals: {r['new_fatals'] or 'none'}; "
-                + ("OK" if r["ok"] else "FAILED: causes moved to regressed")
-            )
+            print(f"result: {r['status']}; new Fatals: {r['new_fatals'] or 'none'}")
+            for u in r["unresolved"]["trials"]:
+                print(f"  rerun: {u['call_id']} ({u['arm']}, {u['role']}, ended by {u['ended_by']})")
+            if r["status"] == "fail":
+                print("FAILED: causes moved to regressed")
     elif args.cmd == "rootcause":
         out = run_rootcause(
             args.cause,

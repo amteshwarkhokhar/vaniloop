@@ -10,7 +10,7 @@ from test_prove import CAUSE, make_audit, make_call, run, synthetic
 
 from vaniloop import prove, tracker
 from vaniloop.fix import run_fix
-from vaniloop.models import Ledger, Turn
+from vaniloop.models import AuditRecord, Finding, Ledger, Turn
 from vaniloop.replay import ReplayResult
 from vaniloop.split import split_half
 
@@ -339,10 +339,15 @@ def test_ship_rechecks_the_state_under_the_lock(tmp_path):
 
 # ---- release-check ----
 
+HOLDOUT = [f"h{i}" for i in range(200) if split_half(f"h{i}") == "holdout"][:14]  # 4 looping, 4 qty_probing, 6 guards
 
-def release_world(tmp_path):
-    """Two shipped causes (looping v1, qty_probing v2), their hold-out target calls, Pass guards and a base prompt."""
-    holdout = [f"h{i}" for i in range(200) if split_half(f"h{i}") == "holdout"][:14]
+
+def release_world(tmp_path, invalid=()):
+    """Two shipped causes (looping v1, qty_probing v2), their hold-out target calls, Pass guards and a base prompt.
+
+    `invalid` names calls whose bundle replay ends invalid_output.
+    """
+    holdout = HOLDOUT
     calls, ledgers, audits = {}, {}, {}
     for i, cid in enumerate(holdout):
         param = "looping" if i < 4 else "qty_probing" if i < 8 else None
@@ -357,6 +362,7 @@ def release_world(tmp_path):
     base = tmp_path / "base.md"
     base.write_text(PROMPT)
     (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "v1.md").write_text(PROMPT + "\nPATCH_A")
     (tmp_path / "prompts" / "v2.md").write_text(PROMPT + "\nPATCH_A\nPATCH_B")
     versions = [{"version": "v1", "causes": ["cause_looping"], "base": None},
                 {"version": "v2", "causes": ["cause_qty_probing"], "base": "v1"}]  # fmt: skip
@@ -375,10 +381,30 @@ def release_world(tmp_path):
     def replay_fn(call, ledger, fork, bot_prompt, seed):
         tag = "bundle" if "PATCH_A" in bot_prompt else "base"
         turns = [*call.turns[:fork], Turn(idx=fork, speaker="bot", start_sec=1, end_sec=2, text="reply")]
-        return ReplayResult(call=call.model_copy(update={"call_id": f"{call.call_id}__{tag}", "turns": turns}),
-                            fork_turn=fork, ended_by="end_call")  # fmt: skip
+        ended = "invalid_output" if tag == "bundle" and call.call_id in invalid else "end_call"
+        record = call.model_copy(update={"call_id": f"{call.call_id}__{tag}", "turns": turns})
+        return ReplayResult(call=record, fork_turn=fork, ended_by=ended)
 
     return kw, base, replay_fn, holdout
+
+
+def audit_of(call, *, fail=(), fatal=(), verdict=None):
+    """A replay audit with a Pass finding for every parameter, then `fail` ones NonFatal and `fatal` ones Fatal."""
+    at = call.turns[-1].idx  # the generated turn, at the fork
+
+    def status(p):
+        return "Fatal" if p in fatal else "NonFatal" if p in fail else "Pass"
+
+    fs = [
+        Finding(parameter=p, status=status(p), reason="r", basis="observed", onset_turn=at)
+        for p in ("looping", "qty_probing", "other")
+    ]
+    worst = "Fatal" if fatal else "NonFatal" if fail else "Pass"
+    return AuditRecord(call_id=call.call_id, verdict=verdict or worst, scope="bl_collection", findings=fs)
+
+
+def bundle(call):
+    return call.call_id.endswith("__bundle"), call.call_id.split("__")[0]
 
 
 def test_release_check_flags_a_bundle_only_regression_and_regresses_the_causes(tmp_path):
@@ -387,15 +413,15 @@ def test_release_check_flags_a_bundle_only_regression_and_regresses_the_causes(t
     Each patch passed its own gate; only the bundle shows the clash, and release-check is the only place it is tested.
     """
     kw, base, replay_fn, ids = release_world(tmp_path)
-
     guards = set(ids[8:])
 
     def audit_fn(call):
-        fatal = call.call_id.endswith("__bundle") and call.call_id.split("__")[0] in guards
-        return make_audit(call.call_id, "Fatal" if fatal else "Pass", onset=call.turns[-1].idx, parameter="other")
+        is_bundle, cid = bundle(call)
+        return audit_of(call, fatal=("other",) if is_bundle and cid in guards else ())
 
     out = prove.run_release_check(base, replay_fn=replay_fn, audit_fn=audit_fn, **kw)
-    assert out["ok"] is False and out["new_fatals"] and out["targets"] == {"cause_looping": 4, "cause_qty_probing": 4}
+    assert out["status"] == "fail" and out["ok"] is False and out["new_fatals"]
+    assert out["targets"] == {"cause_looping": 4, "cause_qty_probing": 4}
     assert tracker.state("cause_looping", tmp_path) == tracker.state("cause_qty_probing", tmp_path) == "regressed"
     assert out["replays"] == 2 * (4 + 4 + out["guards"])
 
@@ -406,11 +432,11 @@ def test_release_check_passes_when_nothing_new_fails_and_never_ships(tmp_path):
     A false alarm would block a good release, and a check that shipped would bypass the owner's approval.
     """
     kw, base, replay_fn, ids = release_world(tmp_path)
-    out = prove.run_release_check(base, replay_fn=replay_fn, audit_fn=lambda c: make_audit(c.call_id, onset=3), **kw)
-    assert out["ok"] is True
+    out = prove.run_release_check(base, replay_fn=replay_fn, audit_fn=audit_of, **kw)
+    assert out["ok"] is True and out["status"] == "ok" and out["unresolved"]["trials"] == []
     assert [e["kind"] for e in tracker.events(tmp_path, "cause_looping")][-1] == "release_check"
     assert tracker.state("cause_looping", tmp_path) == "shipped"
-    assert sorted(p.name for p in (tmp_path / "prompts").iterdir()) == ["v2.md", "versions.json"]
+    assert sorted(p.name for p in (tmp_path / "prompts").iterdir()) == ["v1.md", "v2.md", "versions.json"]
 
 
 def test_release_check_flags_a_shipped_cause_whose_targets_fail_again(tmp_path):
@@ -419,13 +445,60 @@ def test_release_check_flags_a_shipped_cause_whose_targets_fail_again(tmp_path):
     The other cause stays as it was: a target failure is the cause's own, not a bundle-wide clash.
     """
     kw, base, replay_fn, ids = release_world(tmp_path)
-    looping_ids = ids[:4]
 
     def audit_fn(call):
-        fail = call.call_id.endswith("__bundle") and call.call_id.split("__")[0] in looping_ids
-        return make_audit(call.call_id, "NonFatal" if fail else "Pass", onset=call.turns[-1].idx, parameter="looping")
+        is_bundle, cid = bundle(call)
+        return audit_of(call, fail=("looping",) if is_bundle and cid in ids[:4] else ())
 
     out = prove.run_release_check(base, replay_fn=replay_fn, audit_fn=audit_fn, **kw)
     assert out["causes"]["cause_looping"]["targets_fail_again"] is True
     assert tracker.state("cause_looping", tmp_path) == "regressed"
     assert out["causes"]["cause_qty_probing"]["ok"] is True
+
+
+def test_release_check_with_unresolved_trials_is_inconclusive_and_marks_nothing(tmp_path):
+    """A guard whose bundle replay is invalid_output and a target audited NeedsReview make the result inconclusive.
+
+    Before, the probe returned ok and recorded a successful release_check although nothing was proven. The result
+    lists the trials to rerun, per arm and per call, and no cause is moved to regressed.
+    """
+    guard = HOLDOUT[8]
+    kw, base, replay_fn, ids = release_world(tmp_path, invalid={guard})
+
+    def audit_fn(call):
+        is_bundle, cid = bundle(call)
+        return audit_of(call, verdict="NeedsReview" if is_bundle and cid == ids[0] else None)
+
+    out = prove.run_release_check(base, replay_fn=replay_fn, audit_fn=audit_fn, **kw)
+    assert out["status"] == "inconclusive" and out["ok"] is False
+    rerun = {(u["call_id"], u["arm"], u["role"]) for u in out["unresolved"]["trials"]}
+    assert rerun == {(guard, "bundle", "guard"), (ids[0], "bundle", "target")}
+    assert out["unresolved"]["bundle"] == 2 and out["unresolved"]["base"] == 0
+    assert {r["status"] for r in out["causes"].values()} == {"inconclusive"}  # the guard counts for every cause
+    ev = [e for e in tracker.events(tmp_path, "cause_looping") if e["kind"] == "release_check"][-1]
+    assert ev["detail"]["status"] == "inconclusive" and len(ev["detail"]["unresolved"]) == 2
+    assert "regressed" not in [e["kind"] for e in tracker.events(tmp_path)]
+
+
+def test_release_check_a_target_trial_only_makes_its_own_cause_inconclusive(tmp_path):
+    """An unresolved target of one cause leaves the other cause ok: only a guard's trial counts for every cause."""
+    kw, base, replay_fn, ids = release_world(tmp_path, invalid={HOLDOUT[0]})
+    out = prove.run_release_check(base, replay_fn=replay_fn, audit_fn=audit_of, **kw)
+    assert out["causes"]["cause_looping"]["status"] == "inconclusive"
+    assert out["causes"]["cause_qty_probing"]["status"] == "ok" and out["status"] == "inconclusive"
+
+
+def test_release_check_a_proven_fail_wins_over_unresolved_trials(tmp_path):
+    """A resolved new Fatal still fails the check and marks regressed, even when another trial is unresolved.
+
+    Missing evidence elsewhere must not hide a failure that was seen.
+    """
+    kw, base, replay_fn, ids = release_world(tmp_path, invalid={HOLDOUT[9]})
+
+    def audit_fn(call):
+        is_bundle, cid = bundle(call)
+        return audit_of(call, fatal=("other",) if is_bundle and cid == HOLDOUT[8] else ())
+
+    out = prove.run_release_check(base, replay_fn=replay_fn, audit_fn=audit_fn, **kw)
+    assert out["status"] == "fail" and out["unresolved"]["bundle"] == 1
+    assert tracker.state("cause_looping", tmp_path) == "regressed"
