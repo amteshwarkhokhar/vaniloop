@@ -17,7 +17,7 @@
 .flow-pick .inp{ max-width:280px; }
 
 /* the lane: panes side by side on a signal line, scrolled sideways */
-.lane{ overflow-x:auto; overscroll-behavior-x:contain; scroll-snap-type:x proximity; padding:4px 2px 16px; margin:0 calc(-1 * var(--gutter)); padding-left:var(--gutter); padding-right:var(--gutter); }
+.lane{ overflow-x:auto; overscroll-behavior-x:contain; scroll-snap-type:x proximity; padding:4px 2px 16px; }
 .lane-in{ position:relative; display:flex; gap:18px; width:max-content; }
 .lane-in::before{ content:""; position:absolute; left:0; right:0; top:27px; height:2px; background:linear-gradient(90deg, var(--accent), var(--line) 85%); }
 .pn{ position:relative; flex:0 0 340px; display:flex; flex-direction:column; max-height:calc(100vh - 330px); min-height:360px; scroll-snap-align:start;
