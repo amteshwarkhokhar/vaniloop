@@ -34,7 +34,7 @@
     { id: "gate", group: "stage", name: "Test", side: "step", step: 5, tab: "Results" }, { id: "fixloop", group: "config", name: "Test settings", side: "tab", step: 5, tab: "Test settings" },
   ];
   const TABS = { 1: ["ingest", "submit", "data"], 2: ["audit", "rubric", "tune", "judge", "thresholds", "review"], 5: ["gate", "fixloop"] };
-  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "ingest", filt: { kind: "all", verdict: "all", fatal: false } };
+  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "home", filt: { kind: "all", verdict: "all", fatal: false } };
 
   async function get(path) {
     const res = await fetch(path, { headers: { Accept: "application/json" } });
@@ -63,10 +63,11 @@
     const h = heads(), cur = ITEMS.find((i) => i.id === S.now) || {};
     const row = (it) => {
       const step = it.side === "step", on = it.id === S.now ? "page" : step && it.step === cur.step ? "step" : "";
-      return `<button class="item" type="button" data-go="${it.id}"${on ? ` aria-current="${on}"` : ""}>${step ? `<span class="num">${it.step}</span>` : ""}<span class="nm">${esc(it.name)}</span><span class="val">${esc(step && !h[it.id] ? "no data yet" : h[it.id])}</span></button>`;
+      const vid = it.id === "home" ? ' id="nav-val-home"' : "";
+      return `<button class="item" type="button" data-go="${it.id}"${on ? ` aria-current="${on}"` : ""}>${step ? `<span class="num">${it.step}</span>` : ""}<span class="nm">${esc(it.name)}</span><span class="val"${vid}>${esc(step && !h[it.id] ? "no data yet" : h[it.id])}</span></button>`;
     };
     const of = (side) => ITEMS.filter((i) => i.side === side).map(row).join("");
-    $("nav").innerHTML = `<p class="grp">Steps</p>${of("step")}<p class="grp">Needs you</p>${of("needs")}<p class="grp">Tools</p>${of("tools")}<a class="item" href="/#/"><span class="nm">All calls</span><span aria-hidden="true">→</span></a>`;
+    $("nav").innerHTML = `${of("loop")}<p class="grp">Steps</p>${of("step")}<p class="grp">Needs you</p>${of("needs")}<p class="grp">Tools</p>${of("tools")}<a class="item" href="/#/"><span class="nm">All calls</span><span aria-hidden="true">→</span></a>`;
   }
 
   function flat(o, path = []) {
@@ -210,7 +211,7 @@
   };
 
   function show() {
-    const it = ITEMS.find((i) => i.id === S.now) || ITEMS.find((i) => i.id === "ingest");
+    const it = ITEMS.find((i) => i.id === S.now) || ITEMS[0];
     S.now = it.id;
     const main = $("panel"), stub = (body) => head(it.name, "") + body; // a loading or failed page keeps its title and tabs
     let html;
@@ -319,6 +320,6 @@
     if (it && it.group === "operate") nav(); else show();
   }
   // The small surface console.js builds on.
-  window.VL = { S, P, ITEMS, esc, str, num, fmt, own, tone, chip, badge, head, sec, get, show, go, nav, refresh, NAMES };
+  window.VL = { S, P, ITEMS, esc, str, num, fmt, own, tone, chip, badge, head, sec, get, show, go, nav, refresh, NAMES, heads };
   boot();
 })();

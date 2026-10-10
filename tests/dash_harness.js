@@ -6,23 +6,25 @@ const src = web("dash.js"), consoleSrc = web("console.js");
 function el(id) {
   const cls = new Set();
   const e = {
-    id, innerHTML: "", textContent: "", hidden: false, inert: false, attrs: {}, dataset: {}, style: { setProperty() {} }, kids: [],
+    id, textContent: "", hidden: false, inert: false, attrs: {}, dataset: {}, style: { setProperty() {} }, kids: [],
     classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c), toggle(c, on) { const v = on === undefined ? !cls.has(c) : on; v ? cls.add(c) : cls.delete(c); return v; } },
     setAttribute(k, v) { e.attrs[k] = v; }, focus() { doc.activeElement = e; }, closest: () => null, querySelectorAll: () => e.kids,
   };
+  Object.defineProperty(e, "innerHTML", { get: () => e._html || "", set: (v) => { e._html = v; e.sets = (e.sets || 0) + 1; } });
   return e;
 }
 const ids = {}, doc = { activeElement: null, listeners: {} };
-for (const id of ["panel", "side", "nav", "side-foot", "menu-now", "dock", "dock-info", "dock-actions", "dock-log", "tune-res", "rb-save"]) ids[id] = el(id);
+for (const id of ["panel", "side", "nav", "side-foot", "menu-now", "dock", "dock-info", "dock-actions", "dock-log", "tune-res", "rb-save", "loop-live", "loop-last", "loop-time", "loop-say", "loop-h", "loop-res-h", "nav-val-home", "loop-run", "loop-go"]) ids[id] = el(id);
 const menu = el("menu"), mark = el("mark"), a1 = el("a1"), a2 = el("a2");
 ids.side.kids = [a1, a2];
 doc.getElementById = (id) => ids[id];
 doc.querySelector = (q) => (q === ".menu" ? menu : q === ".bar .mark" ? mark : null);
+doc.querySelectorAll = () => [];
 doc.addEventListener = (t, f) => (doc.listeners[t] = (doc.listeners[t] || []).concat(f));
 
 const cfg = {
   judge: { available: { value: ["jev", "gemini"] }, active: { value: "jev", source: "t" }, structure_model: { value: "m" }, jev_model: { value: "j" }, jev_version: { value: "1" }, thresholds: { question_fits: { true_at: { value: 0.55 }, false_at: { value: 0.2 } }, product_match: { true_at: { value: 0.65 }, false_at: { value: 0.35 } }, name_check_drop_at: { value: 0.35 } } },
-  audit: {}, fix_loop: { alpha_per_attempt: { value: 0.05 }, last_run: {} }, data: { files: [], folder: { value: "d" } },
+  audit: {}, fix_loop: { alpha_per_attempt: { value: 0.05 }, max_attempts: { value: 2 }, last_run: {} }, data: { files: [], folder: { value: "d" } },
 };
 const audit = (judge, total) => ({ judge, total, verdicts: {}, scopes: {}, by_parameter: {}, flags: {} });
 const stages = {
@@ -77,6 +79,7 @@ const SC = {
     out.confirm = ids.panel.innerHTML;
     await click({ op: "confirm", stage: "audit" });
     out.posts = posts();
+    out.after202 = ids.panel.innerHTML;
     out.info1 = ids["dock-info"].innerHTML; out.hidden = ids.dock.hidden;
     await click({ op: "dock-toggle" });
     out.log1 = ids["dock-log"].innerHTML;
@@ -232,6 +235,61 @@ const SC = {
     out.posts = posts();
     return out;
   },
+  async "con-loop"() {
+    const out = {};
+    out.plan = ids.panel.innerHTML;
+    routes["POST /api/jobs"] = [[400, { error: "confirm", estimate_usd: 1.8 }], [202, { job: loopJob("L1", "running") }]];
+    await click({ op: "run", stage: "loop" });
+    out.confirm = ids.panel.innerHTML;
+    out.focus = doc.activeElement && doc.activeElement.id;
+    out.posts1 = posts();
+    loopLog("L1", 0, "running", ["LOOP_STEP 1/7 audit", "LOOP_STEP 2/7 judge", "LOOP_STEP 3/7 regrade"], 3);
+    await click({ op: "confirm", stage: "loop" });
+    out.posts2 = posts();
+    out.live = ids["loop-live"].innerHTML;
+    const sets = ids.panel.sets;
+    loopLog("L1", 3, "running", ["LOOP_STEP 4/7 issues"], 4);
+    await fire();
+    out.setsDelta = ids.panel.sets - sets;
+    out.live2 = ids["loop-live"].innerHTML;
+    routes["GET /api/jobs"] = [200, { jobs: [loopJob("L1", "done")] }];
+    const sum = JSON.stringify({ steps: [], causes: [{ cause_id: "c3", state: "ready_to_ship" }], decisions: {}, cost_usd: 1.42, ready_to_ship: ["c3"], tickets: [], watch: [] });
+    loopLog("L1", 4, "done", [`LOOP_SUMMARY ${sum}`, "LOOP_DONE"], 6);
+    await fire();
+    out.result = ids.panel.innerHTML;
+    out.shipPosts = calls.filter((c) => c.p && c.p.includes("/ship")).length;
+    await click({ go: "submit" });
+    out.submit = ids.panel.innerHTML;
+    return out;
+  },
+  async "con-loop-fail"() {
+    const out = {};
+    routes["POST /api/jobs"] = [[400, { error: "confirm", estimate_usd: null }], [202, { job: loopJob("L2", "running") }]];
+    await click({ op: "run", stage: "loop" });
+    loopLog("L2", 0, "running", ["LOOP_STEP 1/7 audit", "LOOP_STEP 2/7 judge"], 2);
+    await click({ op: "confirm", stage: "loop" });
+    loopLog("L2", 2, "failed", ["LOOP_FAILED judge bad <img src=x onerror=alert(1)>"], 3, { exit_code: 1 });
+    await fire();
+    out.fail = ids.panel.innerHTML;
+    return out;
+  },
+  async "con-loop-cancel"() {
+    const out = {};
+    routes["POST /api/jobs"] = [[400, { error: "confirm", estimate_usd: 1 }], [202, { job: loopJob("L3", "running") }]];
+    await click({ op: "run", stage: "loop" });
+    loopLog("L3", 0, "running", ["LOOP_STEP 1/7 audit", "LOOP_STEP 2/7 judge"], 2);
+    await click({ op: "confirm", stage: "loop" });
+    loopLog("L3", 2, "cancelled", ["LOOP_FAILED judge cancelled"], 3);
+    await fire();
+    out.cancel = ids.panel.innerHTML;
+    return out;
+  },
+  async "con-loop-missing"() {
+    return { home: ids.panel.innerHTML };
+  },
+  async "con-loop-ro"() {
+    return { home: ids.panel.innerHTML };
+  },
 };
 const prm = (id, label, value, extra = {}) => ({ id, group: "g", label, help: "Plain help.", type: "float", min: 0, max: 1, step: 0.05, default: value, value, overridden: false, ...extra });
 const Q = { instructions: "Ask it.", true: { description: "yes", examples: ["a"] }, false: { description: "no", examples: [] } };
@@ -246,13 +304,23 @@ const cz = (id, state, extra = {}) => ({ cause_id: id, name: `Cause ${id}`, para
 const TRK = { current_prompt_version: "v2", prompt_versions: [{ version: "v2", created_ist: "11:00 10 Oct", causes: ["c3"], base: "v1" }], causes: [
   cz("c1", "open"), cz("c2", "in_fix"), cz("c3", "ready_to_ship", { events: [{ ts_ist: "10:00 10 Oct", kind: "gated", run_id: "r1", rubric_version: "4", detail: { p_value: 0.01, lift: 0.25, guard: "pass", note: "<img src=x onerror=alert(1)>" } }] }),
   cz("c4", "ticket_open", { type: "tool", route: "ticket" }), cz("c5", "ticket_sent", { type: "tool" }), cz("c6", "regressed", { name: "Back <img src=x onerror=alert(1)>" }), cz("c7", "shipped"), cz("c8", "watching"), cz("c9", "closed")] };
+const loopJob = (id, status, extra = {}) => job(id, "loop", status, extra);
+const loopLog = (id, from, status, lines, next, extra = {}) => (routes[`GET /api/jobs/${id}/log?from=${from}`] = [200, { job: loopJob(id, status, extra), lines, next }]);
+const PLAN = { steps: [
+  { name: "audit", will_run: true, why: "calls with no audit row", count: 14 }, { name: "judge", will_run: true, why: "Jev labels", count: 14 },
+  { name: "regrade", will_run: true, why: "re-applies the rules", count: 14 }, { name: "issues", will_run: true, why: "rebuilds causes", count: 3 },
+  { name: "fix", will_run: true, why: "first patch", count: 2 }, { name: "test", will_run: false, why: "gate <script>alert(1)</script>", count: 2 },
+  { name: "report", will_run: true, why: "lists the outcome", count: 3 }],
+  causes: [{ cause_id: "c3", route: "patch", state: "open", next_attempt: 1, why: "one more try <img src=x onerror=alert(1)>" }],
+  new_calls: 14, estimate_usd: null, estimate_basis: "no history yet" };
 const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages: [
   { id: "audit", label: "Audit", paid: true, args: [{ name: "calls", type: "call_ids", required: false, default: null }, { name: "limit", type: "int", required: false, default: null }] },
   { id: "judge", label: "Judge", paid: false, args: [{ name: "calls", type: "call_ids", required: false, default: null }] },
   { id: "regrade", label: "Regrade", paid: false, args: [] }, { id: "issues", label: "Issues", paid: false, args: [] },
   { id: "fix", label: "Fix", paid: true, args: [{ name: "top", type: "int", required: false, default: 3 }, { name: "holdout", type: "bool", required: false, default: true }] },
   { id: "prove", label: "Prove", paid: true, args: [{ name: "cause", type: "str", required: true, default: null }] },
-  { id: "submit", label: "Submit", paid: true, args: [{ name: "submission_id", type: "str", required: true, default: null }] }] };
+  { id: "submit", label: "Submit", paid: true, args: [{ name: "submission_id", type: "str", required: true, default: null }] },
+  { id: "loop", label: "Run the whole loop", paid: true, args: [{ name: "top", type: "int", required: false, default: 3 }, { name: "n", type: "int", required: false, default: 8 }, { name: "k", type: "int", required: false, default: 3 }] }] };
 
 (async () => {
   const scenario = process.argv[2];
@@ -260,9 +328,12 @@ const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages
   const vctx = vm.createContext(sandbox);
   vm.runInContext(src, vctx);
   if (consoleOn) {
-    routes["GET /api/console"] = [200, { ...CON, read_only: scenario === "con-readonly" }];
+    const ro = scenario === "con-readonly" || scenario === "con-loop-ro";
+    const stages = scenario === "con-loop-missing" ? CON.stages.filter((s) => s.id !== "loop") : CON.stages;
+    routes["GET /api/console"] = [200, { ...CON, stages, read_only: ro }];
     routes["GET /api/jobs"] = [200, { jobs: [] }];
     routes["GET /api/tracker"] = [200, TRK]; // the sidebar reads it at boot
+    routes["GET /api/loop/plan?top=3"] = [200, PLAN];
     vm.runInContext(consoleSrc, vctx);
     await tick();
     return console.log(JSON.stringify(await SC[scenario]()));

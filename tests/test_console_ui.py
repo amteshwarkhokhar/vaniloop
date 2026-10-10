@@ -17,7 +17,7 @@ def test_paid_stage_asks_for_confirm_then_posts_with_confirm_and_the_dock_follow
     assert "Estimate $1.50." in d["confirm"]
     assert d["posts"] == [{"stage": "audit", "args": {}}, {"stage": "audit", "args": {}, "confirm": True}]
     assert d["hidden"] is False
-    assert "Running" in d["info1"] and "audit" in d["info1"]
+    assert "Running" in d["info1"] and "Grade calls" in d["info1"]
     assert "&#60;img src=x onerror=alert(1)&#62;" in d["log1"] and "<img" not in d["log1"] + d["info1"]
     assert "Done" in d["info2"] and "Cancel" not in d["actions"]
     assert d["refetched"], "a finished job must refresh the stage data"
@@ -172,7 +172,7 @@ def test_tracker_actions_post_the_contract_bodies_and_show_errors():
     for part in ("p value <b>0.01</b>", "lift <b>0.25</b>", "guard <b>pass</b>"):
         assert part in d["confirm"]
     assert "gate no longer ships" in d["conflict"]
-    assert "ship" in d["dock"] and "Done" in d["dock"], "the 202 job must reach the dock"
+    assert "Ship a passed patch" in d["dock"] and "Done" in d["dock"], "the 202 job must reach the dock"
     assert d["rereads"] >= 1 and "from v2" in d["after"], "a finished ship must reload the board and prompt versions"
     assert d["posts"] == [
         ["/api/tracker/c4/ticket", {"action": "sent", "ref": "T-1"}],
@@ -207,3 +207,97 @@ def test_tab_marks_its_page_and_its_step_row():
     assert '<a href="#/audit">Results</a>' in d["panel"] and 'aria-current="page">Results' not in d["panel"]
     assert re.search(r'data-go="audit" aria-current="step"', d["nav"])
     assert 'data-go="rubric"' not in d["nav"]
+
+
+def test_home_plan_escapes_hostile_why_and_shows_a_basis_for_a_null_estimate():
+    """The plan sentence, a null estimate with its basis and hostile why text all reach the home panel as text.
+
+    If a null estimate showed $0 the cost line would lie, and unescaped why text in the closed details would run
+    as markup the moment the owner opened it."""
+    d = run("con-loop")
+    assert "This run will grade 14 new calls" in d["plan"]
+    assert "Cost not known yet. no history yet" in d["plan"] and "$0" not in d["plan"]
+    assert "&#60;script&#62;" in d["plan"] and "<script>" not in d["plan"]
+    assert "one more try &#60;img src=x onerror=alert(1)&#62;" in d["plan"] and "<img" not in d["plan"]
+
+
+def test_loop_asks_confirm_with_the_fresh_estimate_then_posts_the_default_args_and_focuses():
+    """The first POST carries no confirm, the 400 estimate shows in the box, the second POST confirms the defaults,
+    and focus lands on the confirm button.
+
+    Without the confirm gate a paid loop could spend on one click, and a wrong args body would run the wrong scope."""
+    d = run("con-loop")
+    assert d["posts1"] == [{"stage": "loop", "args": {"top": 3, "n": 8, "k": 3}}]
+    assert "confirm" not in d["posts1"][0]
+    assert "About $1.80." in d["confirm"] and ">Run loop<" in d["confirm"]
+    assert d["posts2"][1] == {"stage": "loop", "args": {"top": 3, "n": 8, "k": 3}, "confirm": True}
+    assert d["focus"] == "loop-go"
+
+
+def test_loop_progress_marks_done_and_running_and_a_tick_never_replaces_the_panel():
+    """After LOOP_STEP 1/7..3/7 parts one and two read Done and part three Running, and the next tick rewrites only
+    the live parts, never #panel.
+
+    A tick that replaced #panel would drop keyboard focus and the typed scroll position mid-run."""
+    d = run("con-loop")
+    assert d["live"].count("Done") == 2 and d["live"].count("Running") == 1
+    assert "Grade new calls" in d["live"] and "Label with Jev" in d["live"]
+    assert d["live2"].count("Done") == 3 and d["live2"].count("Running") == 1
+    assert d["setsDelta"] == 0
+
+
+def test_loop_waits_for_approval_links_to_the_tracker_and_never_posts_ship():
+    """After LOOP_DONE and a tracker re-read the result shows one ready cause under Waiting for your approval and
+    links to the tracker, and no POST ever goes to a ship route.
+
+    The loop must never ship: the owner approves every fix, so a ship from this page would skip the review."""
+    d = run("con-loop")
+    assert "Waiting for your approval (1)" in d["result"]
+    assert 'href="#/tracker"' in d["result"]
+    assert d["shipPosts"] == 0
+
+
+def test_loop_failure_stop_and_missing_stage_texts_show_escaped():
+    """LOOP_FAILED shows the part number, the name and the escaped reason, a cancel says the part stopped, and a
+    missing loop stage says to run the steps by hand.
+
+    These three states tell the owner where the run stopped and what to do next; a raw reason would run as markup."""
+    f = run("con-loop-fail")["fail"]
+    assert "part 2 of 7" in f and "Label with Jev" in f
+    assert "bad &#60;img src=x onerror=alert(1)&#62;" in f and "<img" not in f
+    assert "Run this part alone" in f
+    c = run("con-loop-cancel")["cancel"]
+    assert "You stopped the loop during part 2 of 7." in c and "Finished parts keep their results." in c
+    m = run("con-loop-missing")["home"]
+    assert "not on this server yet" in m and "Run each step from Run one step." in m
+
+
+def test_loop_read_only_shows_the_plan_and_leaves_only_data_view_controls_on():
+    """On a read-only folder the plan still loads, the run button and options are off, and only data-view controls
+    stay enabled.
+
+    The planner GET writes nothing so it must show, but a live control on the frozen demo folder could write."""
+    d = run("con-loop-ro")["home"]
+    assert "This run will grade 14 new calls" in d and "read-only" in d
+    tags = re.findall(r"<(?:button|input|select|textarea)\b[^>]*>", d)
+    assert tags
+    writers = [t for t in tags if "data-view" not in t]
+    assert all(" disabled" in t for t in writers), [t for t in writers if " disabled" not in t]
+
+
+def test_run_one_step_confirm_box_goes_away_after_a_202():
+    """After a 202 from Run one step the confirm box is gone and the card shows its Run button again.
+
+    On main startJob never redrew, so the confirm box and its Confirm button stayed live next to the running job."""
+    d = run("con-run")
+    assert "Confirm and run" not in d["after202"]
+    assert 'data-op="run" data-stage="audit"' in d["after202"]
+
+
+def test_grade_some_calls_button_opens_submit():
+    """The home page has a secondary Grade some calls button that opens the Submit calls page.
+
+    Without it the only way from home to grade a few calls would be the sidebar."""
+    d = run("con-loop")
+    assert 'data-go="submit"' in d["plan"]
+    assert "Submit calls" in d["submit"]

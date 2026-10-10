@@ -1,12 +1,12 @@
 /* One light theme. Role-named tokens first, then the old names as aliases so views/*.css keep working. */
 :root{
-  --bg:#F7F7F5; --surface:#FFFFFF; --surface-2:#F0F1F3; --line:#D9DCE1; --line-strong:#7A8390;
-  --text:#1B1F24; --text-2:#4D5562; --accent:#1F5FBF; --accent-hover:#174A96; --accent-soft:#E8F0FC; --on-accent:#FFFFFF;
+  --bg:#F5F5F7; --surface:#FFFFFF; --surface-2:#F0F1F3; --line:#D2D2D7; --line-strong:#86868B;
+  --text:#1D1D1F; --text-2:#515154; --accent:#0066CC; --accent-hover:#0052A3; --accent-soft:#E8F0FC; --on-accent:#FFFFFF;
   --fatal:#B42318; --fatal-soft:#FDECEA; --nonfatal:#8A5100; --nonfatal-soft:#FBF1E0;
   --review:#4A55A2; --review-soft:#EEF0FA; --pass:#17663A; --pass-soft:#E5F3EA; --disabled-bg:#E6E8EB;
   --night:var(--bg); --slate:var(--surface); --seam:var(--line); --ivory:var(--text); --ash:var(--text-2); --champagne:var(--accent);
-  --body:Inter, system-ui, -apple-system, "Segoe UI", sans-serif; --display:var(--body);
-  --mono:"IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --body:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --display:var(--body);
+  --mono:ui-monospace, Menlo, Consolas, monospace;
   --ease:cubic-bezier(.2,.7,.1,1);
   --gutter:40px;
 }
