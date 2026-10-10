@@ -7,6 +7,7 @@ because the captured Buy Lead is not available), or unavailable.
 
 from __future__ import annotations
 
+import math
 import re
 from math import isclose
 
@@ -339,6 +340,8 @@ def _timing_trusted(call: CallRecord) -> tuple[bool, str]:
     so a Pass would claim a check that was never made.
     """
     turns = sorted(call.turns, key=lambda t: (t.start_sec, t.end_sec))
+    if any(not (math.isfinite(t.start_sec) and math.isfinite(t.end_sec)) for t in turns):
+        return False, "a turn has no finite time"
     if any(t.start_sec < 0 for t in turns):
         return False, "a turn starts before the audio does"
     if any(t.end_sec < t.start_sec for t in turns):

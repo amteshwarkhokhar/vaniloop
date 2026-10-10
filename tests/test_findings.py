@@ -618,6 +618,19 @@ def test_turn_starting_before_the_audio_gives_unknown_and_review_flag():
     assert "dead_air_review" in a.flags
 
 
+def test_turn_with_a_nan_time_gives_unknown_and_review_flag():
+    """A NaN timestamp fails every comparison, so it slips past the other timing checks: it must give Unknown.
+
+    If this failed, a turn with no real time would be trusted and dead_air would be graded on it.
+    """
+    call = _timed([("user", float("nan"), 4.0), ("bot", 6.0, 19.0)], duration=20.0)
+    a = audit_call(call, mk_led(call))
+    f = by(a)["dead_air"]
+    assert f.status == "Unknown" and f.basis == "unavailable"
+    assert "a turn has no finite time" in f.reason
+    assert "dead_air_review" in a.flags
+
+
 # ---- F9
 class FakeClient:
     calls = 0
