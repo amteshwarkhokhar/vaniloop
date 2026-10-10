@@ -47,7 +47,7 @@
     $("dock").hidden = !j;
     if (!j) return;
     const last = D.err ? D.err : D.lines.length ? D.lines[D.lines.length - 1] : "waiting for output";
-    $("dock-info").innerHTML = `${jchip(j.status)} <b class="mono">${esc(j.stage)}</b> <span class="mono">${esc(elapsed(j))}</span>${j.status !== "running" && num(j.cost_usd) != null ? ` <span class="mono">${esc(usd(j.cost_usd))}</span>` : ""} <span class="dock-last mono">${esc(last)}</span>`;
+    $("dock-info").innerHTML = `${jchip(j.status)} <b>${esc(V.own(NAME, j.stage) || j.stage)}</b> <span class="mono">${esc(elapsed(j))}</span>${j.status !== "running" && num(j.cost_usd) != null ? ` <span class="mono">${esc(usd(j.cost_usd))}</span>` : ""} <span class="dock-last">${esc(last)}</span>`;
     if (actions) {
       $("dock-actions").innerHTML = `${j.status === "running" ? `<button type="button" class="btn sm" data-op="cancel"${dis()}>Cancel</button>` : ""}<button type="button" class="btn sm" data-op="dock-toggle" aria-expanded="${D.open}" aria-controls="dock-log">${D.open ? "Hide log" : "Log"}</button>`;
     }
@@ -145,7 +145,7 @@
       if (C.con.busy_job_id && !D.job) await adopt(C.con.busy_job_id);
       await loadTracker(); // the sidebar counts what waits for you
     } else C.err = errText(r);
-    $("side-foot").innerHTML = C.con ? `Data folder: <span class="mono">${esc(C.con.data_dir_name)}</span>${ro() ? " " + V.badge("nonfatal", "Read-only", "–") : ""}` : "";
+    $("side-foot").innerHTML = C.con ? `Data folder: <span class="mono">${esc(C.con.data_dir_name)}</span>${ro() ? " " + V.badge("nonfatal", "Read-only", "●") : ""}` : "";
     V.nav();
     redraw();
     return !!C.con;
@@ -428,8 +428,9 @@
     redraw();
   };
 
-  V.ITEMS.push({ id: "run", group: "operate", name: "Run one step", side: "tools" }, { id: "submit", group: "operate", name: "Submit calls", side: "tab", step: 1, tab: "Submit calls" }, { id: "rubric", group: "operate", name: "Rubric", side: "tab", step: 2, tab: "Rubric" },
-    { id: "tune", group: "operate", name: "Tune", side: "tab", step: 2, tab: "Tune" }, { id: "tracker", group: "operate", name: "Tracker", side: "needs" });
+  V.ITEMS.push({ id: "run", group: "operate", name: "Run one step", side: "tools", fam: "run" }, { id: "submit", group: "operate", name: "Add calls", side: "tab", fam: "ingest", step: 1, tab: "Add calls" },
+    { id: "rubric", group: "operate", name: "Rubric", side: "config", fam: "rubric" }, { id: "tune", group: "operate", name: "Scoring criteria", side: "config", fam: "tune", tab: "Tune" },
+    { id: "tracker", group: "operate", name: "Tracker", side: "top", fam: "tracker" });
   V.vals = () => { const n = TR.data && TR.data.causes.filter((c) => c.state === "ready_to_ship" || c.state === "ticket_open").length; return { tracker: n == null ? "" : n ? `${n} waiting` : "None waiting" }; };
   const enter = async () => { if (!C.con) await loadConsole(); await loadJobs(); redraw(); };
   V.enter = {
@@ -449,7 +450,7 @@
     const b = V.own(BARS, id);
     if (!b || !C.con) return "";
     const st = C.con.stages.find((s) => s.id === b[0]);
-    return st ? `<div class="stagebar"><button type="button" class="btn" data-op="prefill" data-stage="${esc(b[0])}" data-chain="${esc(b[1].join(","))}"${dis()}>Run ${esc((st.label || st.id).toLowerCase())}${b[1].length ? `, ${esc(b[1].join(" and "))}` : ""}</button></div>` : "";
+    return st ? `<div class="stagebar"><button type="button" class="btn pri" data-op="prefill" data-stage="${esc(b[0])}" data-chain="${esc(b[1].join(","))}"${dis()}>Run ${esc((st.label || st.id).toLowerCase())}${b[1].length ? `, ${esc(b[1].join(" and "))}` : ""}…</button></div>` : "";
   };
 
   // ---- events: one delegated handler per type, no inline handlers ----

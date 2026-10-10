@@ -1,5 +1,7 @@
 # vaniloop web UI: design and build spec
 
+> The look and tokens below are replaced by `docs/ui_design.md` (10 Oct 2026). The routes and data rules still hold.
+
 ## Subject
 
 - **Who uses it:** a QA lead at IndiaMART, and the hackathon judges.

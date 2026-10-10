@@ -1,4 +1,5 @@
-// vaniloop dashboard: a step sidebar, tabs on each step and one panel per page. Every data string goes through esc().
+// vaniloop dashboard: a sidebar (Run, Results, Configuration, Tools), a page head with one action, and one panel per page.
+// Every data string goes through esc().
 (() => {
   "use strict";
   const str = (s) => (s == null || typeof s === "object" || typeof s === "function" ? "" : String(s));
@@ -25,16 +26,40 @@
   const dchip = (d) => { const [w, t] = own(DECISION, d) || [str(d), "review"]; return badge(t, w); };
   const cap = (s) => str(s).replace(/^./, (c) => c.toUpperCase());
 
-  // side: where the sidebar lists the page (step, needs, tools) or "tab" for a tab on its step. group keeps show() and redraw() as they were.
+  // side: the sidebar group (top, results, config, tools) or "tab" for a tab of its family. fam groups a page with its tabs.
+  // group keeps show() and redraw() as they were. An icon is a fixed SVG path, never data.
   const ITEMS = [
-    { id: "ingest", group: "stage", name: "Ingest", side: "step", step: 1, tab: "Overview" }, { id: "data", group: "config", name: "Data files", side: "tab", step: 1, tab: "Data files" },
-    { id: "audit", group: "stage", name: "Audit", side: "step", step: 2, tab: "Results" }, { id: "judge", group: "config", name: "Judges", side: "tab", step: 2, tab: "Judges" },
-    { id: "thresholds", group: "config", name: "All constants", side: "tab", step: 2, tab: "All constants" }, { id: "review", group: "stage", name: "Judge accuracy", side: "tab", step: 2, tab: "Judge accuracy" },
-    { id: "issues", group: "stage", name: "Issues", side: "step", step: 3 }, { id: "fix", group: "stage", name: "Fix", side: "step", step: 4 },
-    { id: "gate", group: "stage", name: "Test", side: "step", step: 5, tab: "Results" }, { id: "fixloop", group: "config", name: "Test settings", side: "tab", step: 5, tab: "Test settings" },
+    { id: "ingest", group: "stage", name: "Ingest", side: "results", fam: "ingest", step: 1, tab: "Overview" },
+    { id: "audit", group: "stage", name: "Audit", side: "results", fam: "audit", step: 2, tab: "Results" },
+    { id: "review", group: "stage", name: "Judge accuracy", side: "tab", fam: "audit", step: 2, tab: "Judge accuracy" },
+    { id: "issues", group: "stage", name: "Issues", side: "results", fam: "issues", step: 3 }, { id: "fix", group: "stage", name: "Fix", side: "results", fam: "fix", step: 4 },
+    { id: "gate", group: "stage", name: "Test", side: "results", fam: "gate", step: 5 },
+    { id: "judge", group: "config", name: "Judges", side: "config", fam: "judge" },
+    { id: "thresholds", group: "config", name: "All constants", side: "tab", fam: "tune", tab: "All constants" },
+    { id: "fixloop", group: "config", name: "Test settings", side: "config", fam: "fixloop" }, { id: "data", group: "config", name: "Data files", side: "config", fam: "data" },
   ];
-  const TABS = { 1: ["ingest", "submit", "data"], 2: ["audit", "rubric", "tune", "judge", "thresholds", "review"], 5: ["gate", "fixloop"] };
+  const SIDE = [["top", ""], ["results", "Results"], ["config", "Configuration"], ["tools", "Tools"]];
+  const ORDER = ["home", "tracker", "ingest", "audit", "issues", "fix", "gate", "rubric", "tune", "judge", "fixloop", "data", "run"];
+  const tabsOf = (fam) => ITEMS.filter((i) => i.fam === fam && i.tab).sort((a, b) => (a.side === "tab") - (b.side === "tab")); // the family's own page first
+  const ICON = {
+    home: '<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4.5V8h-3.5"/>',
+    ingest: '<path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+    audit: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/><path d="m8.5 11 1.8 1.8 3.4-3.6"/>',
+    issues: '<path d="M12 4 3 19h18z"/><path d="M12 10v4"/><path d="M12 16.8v.2"/>',
+    fix: '<path d="M14.5 6.5a4 4 0 0 0-5.3 5.3L4 17l3 3 5.2-5.2a4 4 0 0 0 5.3-5.3l-2.4 2.4-2.6-.4-.4-2.6z"/>',
+    gate: '<path d="M9 3h6"/><path d="M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.6 15h8.8"/>',
+    rubric: '<path d="M7 4h10a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><path d="M9 9h6"/><path d="M9 13h6"/>',
+    tune: '<path d="M5 6h9"/><path d="M18 6h1"/><circle cx="16" cy="6" r="2"/><path d="M5 12h3"/><path d="M12 12h7"/><circle cx="10" cy="12" r="2"/><path d="M5 18h9"/><path d="M18 18h1"/><circle cx="16" cy="18" r="2"/>',
+    judge: '<path d="M12 4v16"/><path d="M5 8h14"/><path d="m5 8-2.5 6a3 3 0 0 0 5 0z"/><path d="m19 8-2.5 6a3 3 0 0 0 5 0z"/>',
+    fixloop: '<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
+    data: '<ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6"/><path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/>',
+    tracker: '<path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><path d="m3.5 6 1 1 2-2"/><path d="m3.5 12 1 1 2-2"/><path d="m3.5 18 1 1 2-2"/>',
+    run: '<circle cx="12" cy="12" r="8.5"/><path d="m10.3 8.8 5 3.2-5 3.2z"/>',
+    calls: '<path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 8v8"/><path d="M20 11v2"/>',
+  };
+  const icon = (id) => `<span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24">${own(ICON, id) || ""}</svg></span>`;
   const S = { cfg: null, stage: {}, judge: null, avail: [], now: "ingest", filt: { kind: "all", verdict: "all", fatal: false } };
+  const famHead = (fam) => ITEMS.find((i) => i.fam === fam && i.side !== "tab");
 
   async function get(path) {
     const res = await fetch(path, { headers: { Accept: "application/json" } });
@@ -62,11 +87,13 @@
   function nav() {
     const h = heads(), cur = ITEMS.find((i) => i.id === S.now) || {};
     const row = (it) => {
-      const step = it.side === "step", on = it.id === S.now ? "page" : step && it.step === cur.step ? "step" : "";
-      return `<button class="item" type="button" data-go="${it.id}"${on ? ` aria-current="${on}"` : ""}>${step ? `<span class="num">${it.step}</span>` : ""}<span class="nm">${esc(it.name)}</span><span class="val">${esc(step && !h[it.id] ? "no data yet" : h[it.id])}</span></button>`;
+      const on = it.id === S.now ? "page" : it.fam && it.fam === cur.fam ? "step" : "";
+      return `<button class="item" type="button" data-go="${it.id}"${on ? ` aria-current="${on}"` : ""}>${icon(it.id)}<span class="nm">${esc(it.name)}</span><span class="val">${esc(h[it.id] || "")}</span></button>`;
     };
-    const of = (side) => ITEMS.filter((i) => i.side === side).map(row).join("");
-    $("nav").innerHTML = `<p class="grp">Steps</p>${of("step")}<p class="grp">Needs you</p>${of("needs")}<p class="grp">Tools</p>${of("tools")}<a class="item" href="/#/"><span class="nm">All calls</span><span aria-hidden="true">→</span></a>`;
+    const rank = (i) => (ORDER.indexOf(i.id) < 0 ? 99 : ORDER.indexOf(i.id));
+    const of = (side) => ITEMS.filter((i) => i.side === side).sort((a, b) => rank(a) - rank(b)).map(row).join("");
+    $("nav").innerHTML = SIDE.map(([side, label]) => { const rows = of(side); return rows ? (label ? `<p class="grp">${esc(label)}</p>` : "") + rows : ""; }).join("") +
+      `<a class="item" href="/#/">${icon("calls")}<span class="nm">All calls</span><span class="val" aria-hidden="true">↗</span></a>`;
   }
 
   function flat(o, path = []) {
@@ -76,13 +103,14 @@
   }
   const bn = (n, label, t = "", dec = 0, unit = "") =>
     `<div class="bn ${t ? `t-${t}` : ""}"><span class="n">${fmt(n, dec)}${unit ? `<small>${esc(unit)}</small>` : ""}</span><p class="label">${esc(label)}</p></div>`;
-  // The page head: "Step n of 5", the title, one sentence, the tabs of its step, then the stage bar. The title is plain text.
+  // The page head: a kicker, the title, one sentence and the page's one action, then the family's pages as a segmented control.
   const head = (title, lede) => {
-    const it = ITEMS.find((i) => i.id === S.now) || {}, tabs = (TABS[it.step] || []).map((id) => ITEMS.find((i) => i.id === id)).filter(Boolean);
-    const step = ITEMS.find((i) => i.side === "step" && i.step === it.step) || it;
-    return (it.step ? `<p class="kicker">Step ${esc(it.step)} of 5</p>` : "") + `<h1 class="ptitle" tabindex="-1">${esc(title)}</h1>${lede ? `<p class="lede">${esc(lede)}</p>` : ""}` +
-      (tabs.length > 1 ? `<nav class="tabs" aria-label="${esc(step.name)} pages">${tabs.map((t) => `<a href="#/${t.id}"${t.id === it.id ? ' aria-current="page"' : ""}>${esc(t.tab)}</a>`).join("")}</nav>` : "") +
-      (window.VL && window.VL.stageBar ? window.VL.stageBar(it.id) : "");
+    const it = ITEMS.find((i) => i.id === S.now) || {}, tabs = tabsOf(it.fam), top = famHead(it.fam) || it;
+    const kicker = it.step ? `Step ${it.step} of 5` : top.side === "config" ? "Configuration" : "";
+    const act = window.VL && window.VL.stageBar ? window.VL.stageBar(it.id) : "";
+    return `<header class="phead"><div class="phead-t">${kicker ? `<p class="kicker">${esc(kicker)}</p>` : ""}<h1 class="ptitle" tabindex="-1">${esc(title)}</h1>${lede ? `<p class="lede">${esc(lede)}</p>` : ""}</div>` +
+      (act ? `<div class="phead-a">${act}</div>` : "") + `</header>` +
+      (tabs.length > 1 ? `<nav class="tabs" aria-label="${esc(top.name)} pages">${tabs.map((t) => `<a href="#/${t.id}"${t.id === it.id ? ' aria-current="page"' : ""}>${esc(t.tab)}</a>`).join("")}</nav>` : "");
   };
   const sec = (t) => `<h2 class="sec">${esc(t)}</h2>`;
   const failed = (e) => `<p class="empty">This panel could not load (${esc(e.message)}).</p>`;
@@ -227,6 +255,7 @@
     main.innerHTML = html;
     nav();
     $("menu-now").textContent = `Menu: ${it.name}`;
+    if ($("tb-title")) $("tb-title").textContent = it.name;
   }
 
   function go(id, push = true) {
@@ -239,7 +268,7 @@
     window.scrollTo(0, 0);
   }
   const menuBtn = () => document.querySelector(".menu");
-  const inertTargets = () => [$("panel"), document.querySelector(".bar .mark")].filter(Boolean);
+  const inertTargets = () => [$("panel"), document.querySelector(".bar .mark"), document.querySelector(".toolbar")].filter(Boolean);
   const isOpen = () => $("side").classList.contains("open");
   const focusables = () =>
     [menuBtn(), ...$("side").querySelectorAll("a[href], button:not([disabled])")].filter((el) => el && !el.hidden && !(el.closest && el.closest("[hidden]")));
@@ -290,6 +319,8 @@
     else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
   });
   matchMedia("(min-width: 861px)").addEventListener("change", (e) => { if (e.matches) closeMenu(); });
+  // The toolbar shows the page name once the large title scrolls away, as on Apple platforms.
+  window.addEventListener("scroll", () => { const tb = document.querySelector(".toolbar"); if (tb) tb.classList.toggle("scrolled", window.scrollY > 48); }, { passive: true });
   window.addEventListener("hashchange", () => {
     const id = location.hash.replace(/^#\/?/, "");
     if (id === "panel") history.replaceState(null, "", `#/${S.now}`); // the skip link only moves focus
