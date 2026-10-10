@@ -10,7 +10,9 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;1,6..96,400&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/dash.css">
+<link rel="stylesheet" href="/static/console.css">
 <script defer src="/static/dash.js"></script>
+<script defer src="/static/console.js"></script>
 </head>
 <body>
 <div class="shell">
@@ -29,6 +31,10 @@
     <a class="back" href="/#/">All calls <span aria-hidden="true">→</span></a>
   </aside>
   <main id="panel" tabindex="-1"></main>
+</div>
+<div id="dock" class="dock" role="region" aria-label="Job dock" hidden>
+  <div class="dock-bar"><span id="dock-info" class="dock-info" role="status"></span><span id="dock-actions" class="dock-actions"></span></div>
+  <pre id="dock-log" class="dock-log" tabindex="0" aria-label="Job log" hidden></pre>
 </div>
 </body>
 </html>

@@ -69,13 +69,14 @@
     const one = (it) => {
       const cur = it.id === S.now ? ' aria-current="page"' : "";
       const hd = h[it.id];
-      if (it.group === "config")
+      if (it.group !== "stage")
         return `<button class="item" type="button" data-go="${it.id}"${cur}><span>${esc(it.name)}</span><span class="val">${esc(hd)}</span></button>`;
       return `<button class="node" type="button" data-go="${it.id}"${cur}><span class="nm">${esc(it.name)}</span><span class="hd${hd ? "" : " none"}">${esc(hd || "no data yet")}</span></button>`;
     };
     $("nav").innerHTML =
       `<p class="label grp">Configure</p>${ITEMS.filter((i) => i.group === "config").map(one).join("")}` +
-      `<p class="label grp">Pipeline</p><div class="rail">${ITEMS.filter((i) => i.group === "stage").map(one).join("")}</div>`;
+      `<p class="label grp">Pipeline</p><div class="rail">${ITEMS.filter((i) => i.group === "stage").map(one).join("")}</div>` +
+      (ITEMS.some((i) => i.group === "operate") ? `<p class="label grp">Operate</p>${ITEMS.filter((i) => i.group === "operate").map(one).join("")}` : "");
   }
 
   function judgeToggle() {
@@ -243,9 +244,11 @@
     let html;
     try {
       if (it.group === "config") html = S.cfg ? P[it.id]() : failed(S.cfgErr || new Error("no config"));
+      else if (it.group === "operate") html = P[it.id]();
       else {
         const r = S.stage[it.id];
         html = !r ? '<p class="empty">Loading.</p>' : r.e ? failed(r.e) : P[it.id](r.v);
+        if (window.VL && window.VL.stageBar) html = window.VL.stageBar(it.id) + html;
       }
     } catch (err) {
       html = failed(err);
@@ -262,6 +265,7 @@
     if (push && location.hash !== `#/${id}`) history.replaceState(null, "", `#/${id}`);
     closeMenu();
     show();
+    if (window.VL && window.VL.enter && window.VL.enter[id]) window.VL.enter[id]();
     $("panel").focus({ preventScroll: true });
     window.scrollTo(0, 0);
   }
@@ -336,6 +340,17 @@
     if (ITEMS.some((i) => i.id === id)) S.now = id;
     judgeToggle();
     show();
+    if (window.VL && window.VL.enter && window.VL.enter[S.now]) window.VL.enter[S.now]();
   }
+  // Reload the stage data after a job ends. An Operate panel keeps its own state, so only the sidebar is redrawn there.
+  async function refresh() {
+    const rs = await Promise.all(["ingest", "issues", "fix", "gate", "review"].map((n) => settle(get(`/api/stage/${n}`))));
+    ["ingest", "issues", "fix", "gate", "review"].forEach((n, i) => (S.stage[n] = rs[i]));
+    await loadAudit();
+    const it = ITEMS.find((i) => i.id === S.now);
+    if (it && it.group === "operate") nav(); else show();
+  }
+  // The small surface console.js builds on.
+  window.VL = { S, P, ITEMS, esc, str, num, fmt, own, tone, chip, head, sec, get, show, go, nav, refresh, NAMES };
   boot();
 })();
