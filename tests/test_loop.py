@@ -5,14 +5,18 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import signal
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from vaniloop import fix as fixmod
 from vaniloop import ledger, llm, loop, pipeline, tracker, web
 from vaniloop.fix import MAX_ATTEMPTS
+from vaniloop.models import AuditRecord, CallRecord, Cause, Evidence, Finding, Turn
+from vaniloop.split import split_half
 
 EVENTS = {  # tracker state -> the events that lead to it
     "open": [], "watching": [("routed", {"action": "watch"})], "in_fix": [("patch_written", {})],
@@ -26,12 +30,35 @@ def jl(rows) -> str:
     return "".join(json.dumps(r) + "\n" for r in rows)
 
 
+def leftovers(w):
+    return list(w.dir.glob(f"{loop.FILTERED_PREFIX}*"))
+
+
+def real_world(w, *kinds):
+    """Real cause rows for the real run_fix: a patch cause (with fix-half evidence), a ticket cause, a watch cause."""
+    mid = next(f"m{i}" for i in range(99) if split_half(f"m{i}") == "fix")
+    turn = Turn(idx=0, speaker="bot", start_sec=0, end_sec=2, text="t")
+    calls = [CallRecord(call_id=c, duration_sec=4.0, turns=[turn]).model_dump(mode="json") for c in (mid, *w.new)]
+    finding = Finding(parameter="p_patch", status="Fatal", reason="r", basis="observed",
+                      evidence=[Evidence(turn_idx=0, quote="q")])  # fmt: skip
+    audit = AuditRecord(call_id=mid, verdict="Fatal", scope="bl_collection", findings=[finding])
+    kw = {"patch": {"owner": "prompt", "status": "ranked", "fatal_calls": [mid]},
+          "ticket": {"owner": "unresolved", "suspect": "tool", "status": "ranked"},
+          "watch": {"owner": "prompt", "status": "watch"}}  # fmt: skip
+    causes = [Cause(cause_id=f"cause_{k}", name=k, description="d", type="prompt", parameter=f"p_{k}", **kw[k])
+              for k in kinds]  # fmt: skip
+    (w.dir / "calls.jsonl").write_text(jl(calls))
+    (w.dir / "audits.jsonl").write_text(jl([audit.model_dump(mode="json")]))
+    (w.dir / "causes.json").write_text(json.dumps({"causes": [c.model_dump() for c in causes]}))
+    (w.dir / "prompt.md").write_text("line 1\n")
+
+
 class World:
     """A synthetic runs folder. Fix, refix, prove and the cheap stages are mocked; `calls` records their order."""
 
     def __init__(self, tmp_path, mp, name="runs"):
         self.dir, self.calls, self.causes, self.new = tmp_path / name, [], [], []
-        self.decisions, self.raises, self.no_patch, self.envs = {}, {}, set(), []
+        self.decisions, self.raises, self.no_patch, self.envs, self.cancel = {}, {}, set(), [], set()
         self.dir.mkdir()
         mp.setenv("VANILOOP_JUDGE", "gemini")  # the loop sets jev for its replays; monkeypatch restores this
         for stage in ("audit", "judge", "regrade", "issues"):
@@ -74,7 +101,9 @@ class World:
         self.calls.append(("fix", [c["cause_id"] for c in rows]))
         if "fix" in self.raises:
             raise self.raises["fix"]
-        for c in (c["cause_id"] for c in rows if c["cause_id"] not in self.no_patch):
+        if "fix" in self.cancel:
+            os.kill(os.getpid(), signal.SIGTERM)  # the console cancel
+        for c in (c["cause_id"] for c in rows if c["route"] == "patch" and c["cause_id"] not in self.no_patch):
             self.patch(c, 1)
         return {"rejected": [{"cause_id": c, "reason": "old_text not found"} for c in self.no_patch]}
 
@@ -92,6 +121,8 @@ class World:
         assert kw["holdout"] is True and kw["screen"] is True
         if (cid, a) in self.raises:
             raise self.raises[(cid, a)]
+        if (cid, a) in self.cancel:
+            os.kill(os.getpid(), signal.SIGTERM)
         d = self.decisions.get((cid, a), "inconclusive")
         tracker.record("gated", cid, {"decision": d, "attempt": a, "last_attempt": a >= MAX_ATTEMPTS}, runs=self.dir)
         return SimpleNamespace(result=SimpleNamespace(decision=d, reason="synthetic"), cost_usd=0.5)
@@ -120,7 +151,7 @@ def test_loop_runs_the_steps_in_order_and_never_ships(tmp_path, monkeypatch, cap
     assert summary["ready_to_ship"] == ["cause_b"] and summary["tickets"] == ["cause_c"]
     assert summary["decisions"] == {"cause_a": "inconclusive", "cause_b": "ship"}
     assert tracker.state("cause_a", w.dir) == "exhausted" and not (w.dir / "prompts" / "versions.json").exists()
-    assert w.envs == ["jev"] * 3 and not (w.dir / loop.FILTERED_CAUSES).exists()
+    assert w.envs == ["jev"] * 3 and not leftovers(w)
 
 
 def test_exhausted_ticket_and_watch_causes_are_skipped_with_a_reason(tmp_path, monkeypatch, capsys):
@@ -193,7 +224,60 @@ def test_a_failed_step_stops_the_loop_with_loop_failed(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert e.value.code == 1 and f"LOOP_FAILED {step} another audit run is active" in out
     assert [c[0] for c in w.calls] == list(loop.STEPS[: loop.STEPS.index(step) + 1])
-    assert "LOOP_SUMMARY" not in out and not (w.dir / loop.FILTERED_CAUSES).exists()
+    assert "LOOP_SUMMARY" not in out and not leftovers(w)
+
+
+def test_new_ticket_and_watch_causes_are_routed_by_the_loop(tmp_path, monkeypatch, capsys):
+    """A new ticket-routed cause (no tracker events) must end the loop as ticket_open with its ticket file written and
+    be listed in tickets, and a new watch cause as watching, all with no LLM call. Otherwise the one-button flow never
+    writes a ticket and the report misses it."""
+    w = World(tmp_path, monkeypatch)
+    real_world(w, "ticket", "watch")
+    monkeypatch.setattr(loop, "run_fix", lambda **kw: fixmod.run_fix(**{**kw, "llm": pytest.fail}))  # no patch pass
+    summary, _ = w.run(capsys)
+    assert (w.dir / "tickets" / "cause_ticket.md").exists()
+    assert tracker.state("cause_ticket", w.dir) == "ticket_open" and tracker.state("cause_watch", w.dir) == "watching"
+    assert summary["tickets"] == ["cause_ticket"] and summary["watch"] == ["cause_watch"]
+    assert [c for c in w.calls if c[0] in ("prove", "refix")] == []
+
+
+def test_two_loops_never_share_the_filtered_causes_file(tmp_path, monkeypatch):
+    """A second fix step that starts while the first is inside fix must get its own causes file, and ending it must not
+    delete or change the first one's file. A shared name made one loop fix another's causes, then lose the file."""
+    w = World(tmp_path, monkeypatch)
+    p, seen = loop.workspace_paths(w.dir), []
+    row = lambda cid: [{"cause_id": cid, "todo": "fix", "route": "patch", "state": "open"}]  # noqa: E731
+    w.add("cause_a")
+    w.add("cause_b")
+    w.write()
+
+    def nested(**kw):
+        seen.append(kw["causes_path"])
+        if len(seen) == 1:  # another loop reaches its fix step while this one is inside fix
+            loop._fix_step(p, w.dir / "prompt.md", row("cause_b"))
+            assert [c["cause_id"] for c in json.loads(seen[0].read_text())["causes"]] == ["cause_a"]
+        return {"rejected": []}
+
+    monkeypatch.setattr(loop, "run_fix", nested)
+    loop._fix_step(p, w.dir / "prompt.md", row("cause_a"))
+    assert len(set(seen)) == 2 and not leftovers(w)
+
+
+@pytest.mark.parametrize("where", ["fix", ("cause_a", 1)])
+def test_a_cancel_stops_the_loop_and_cleans_up(tmp_path, monkeypatch, capsys, where):
+    """SIGTERM (the console cancel) during fix or during the test of cause A must print LOOP_FAILED <step> cancelled,
+    exit non-zero, never prove cause B, leave no temp file and restore the signal handler. If a per-cause handler
+    swallowed it, the loop would go on to the next paid cause after the owner pressed cancel."""
+    w, old = World(tmp_path, monkeypatch), signal.getsignal(signal.SIGTERM)
+    w.add("cause_a")
+    w.add("cause_b")
+    w.cancel = {where}
+    with pytest.raises(SystemExit) as e:
+        w.write().run(capsys)
+    step = "fix" if where == "fix" else "test"
+    assert e.value.code == 1 and f"LOOP_FAILED {step} cancelled" in capsys.readouterr().out
+    assert [c for c in w.calls if c[0] == "prove" and c[1] == "cause_b"] == [] and not leftovers(w)
+    assert signal.getsignal(signal.SIGTERM) is old
 
 
 def snapshot(d):
@@ -201,13 +285,12 @@ def snapshot(d):
 
 
 def test_plan_spends_nothing_and_writes_nothing(tmp_path, monkeypatch, capsys):
-    """The plan must make no LLM request and change no file: every LLM entry point and spending stage raises, and every
-    file's mtime and size is compared. If the plan spent or wrote, the confirm dialog itself would cost something."""
+    """The plan, with the real fix dry run, must make no LLM request, change no file and create none (no tracker, lock
+    or patch file): every LLM entry point raises and every file is compared. Otherwise the confirm itself costs."""
     w = World(tmp_path, monkeypatch)
-    w.add("cause_a")
-    w.add("cause_b", "rejected", attempt=1)
     w.new = ["new_1", "new_2"]
-    w.write()
+    real_world(w, "patch", "ticket")
+    monkeypatch.setattr(loop, "run_fix", fixmod.run_fix)  # the real fix dry run, not the mock
 
     def boom(*a, **k):
         pytest.fail("the plan must not reach this")
@@ -220,7 +303,12 @@ def test_plan_spends_nothing_and_writes_nothing(tmp_path, monkeypatch, capsys):
     plan = loop.plan(w.dir)
     pipeline.main(["--runs", str(w.dir), "loop", "--plan"])
     assert json.loads(capsys.readouterr().out) == plan and snapshot(w.dir) == before
-    assert plan["new_calls"] == 2 and [c["next_attempt"] for c in plan["causes"]] == [1, 2]
+    for name in ("tracker.jsonl", "tracker.jsonl.lock", "patches.json", ".audit.lock", "tickets"):
+        assert not (w.dir / name).exists()
+    assert plan["new_calls"] == 2 and [(c["route"], c["next_attempt"]) for c in plan["causes"]] == [
+        ("patch", 1),
+        ("ticket", None),
+    ]
     assert [s["name"] for s in plan["steps"]] == list(loop.STEPS) and plan["steps"][0]["will_run"] is True
 
 
@@ -249,6 +337,7 @@ def test_estimate_comes_from_the_history_and_is_null_without_it(tmp_path, monkey
     assert (
         p["estimate_usd"] == pytest.approx(2 * 0.02 + 2 * (1.0 + 0.005)) and "2 audit x $0.0200" in p["estimate_basis"]
     )
+    assert "Upper bound" not in p["estimate_basis"] and "replay turns only" in p["estimate_basis"]
     w2 = World(tmp_path, monkeypatch, "r2")
     w2.add("cause_a", "in_fix", attempt=1)  # 2 gate runs, 1 patch write
     w2.add("cause_b", "rejected", attempt=1)  # 1 gate run, 1 patch write

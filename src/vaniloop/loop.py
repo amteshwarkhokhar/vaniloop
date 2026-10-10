@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
 import statistics
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,13 +26,21 @@ from .prove import run_prove
 
 STEPS = ("audit", "judge", "regrade", "issues", "fix", "test", "report")
 DEFAULT_TOP = 3
-FILTERED_CAUSES = ".loop_causes.json"  # the causes fix works on this run, beside causes.json; removed after fix
+FILTERED_PREFIX = ".loop_causes."  # per-run copy of causes.json that fix works on, beside it; removed after fix
 SKIPPED = {  # tracker state -> why the loop leaves the cause alone
     "ready_to_ship": "ready_to_ship: the gate said ship; the owner approves it in the tracker",
     "exhausted": f"exhausted: all {MAX_ATTEMPTS} attempts are used",
     **{s: f"{s}: already in a prompt version, no new patch" for s in ("shipped", "closed", "regressed")},
     **{s: f"{s}: a ticket, not a prompt patch" for s in tracker.TICKET_STATES},
 }
+
+
+class Cancelled(BaseException):
+    """SIGTERM from the console cancel. Not an Exception: no per-cause or per-step handler may swallow it."""
+
+
+def _cancel(signum, frame):
+    raise Cancelled
 
 
 def _cost(row: dict) -> float | None:
@@ -105,9 +115,15 @@ def _work(runs: Path, p: dict, top: int) -> list[dict]:
     return rows
 
 
+def _needs_routing(rows: list[dict]) -> list[dict]:
+    """Ticket and watch causes that no fix run has routed yet (state open): fix writes their ticket and routed event."""
+    return [r for r in rows if r["route"] != "patch" and r["state"] == "open"]
+
+
 def _estimate(runs: Path, p: dict, n_new: int, todo: list[dict]) -> tuple[float | None, str]:
     """(estimate_usd, basis) from costs.jsonl and gates.jsonl: new calls x mean audit cost (rows with the ledger tag)
-    + per cause its remaining attempts x (median gate cost + mean fix cost: rows with no tag). None without history."""
+    + per cause its remaining attempts x (median gate cost + mean fix cost: rows with no tag). None without history.
+    Gate rows count replay turns only (not warm-ups), so the real cost may be higher."""
     paid = [
         r for r in read_jsonl(runs / "costs.jsonl")
         if r.get("kind") != "reserve" and "jev" not in str(r.get("model")) and _cost(r) is not None
@@ -128,7 +144,7 @@ def _estimate(runs: Path, p: dict, n_new: int, todo: list[dict]) -> tuple[float 
     if not price:
         return 0.0, "nothing to run that spends money"
     basis = " + ".join(f"{count[k]} {k} x ${price[k]:.4f}" for k in price)
-    basis += " (mean audit and fix cost, median gate cost). Upper bound: every remaining attempt runs. Jev is $0."
+    basis += " (mean audit/fix cost, median gate cost). Gate rows count replay turns only: the real cost may be higher."
     return round(sum(count[k] * price[k] for k in price), 4), basis
 
 
@@ -142,7 +158,7 @@ def plan(runs: Path, top: int = DEFAULT_TOP) -> dict:
     new = [c for c in calls if c not in audited]  # what the audit step does: calls with no audit row (its resume)
     rows = _work(runs, p, top)
     todo = [r for r in rows if r["todo"]]
-    fixing = [r for r in todo if r["todo"] == "fix"]
+    fixing, routing = [r for r in todo if r["todo"] == "fix"], _needs_routing(rows)
     estimate, basis = _estimate(runs, p, len(new), todo)
 
     steps = [
@@ -152,7 +168,7 @@ def plan(runs: Path, top: int = DEFAULT_TOP) -> dict:
             ("judge", True, len(new), "Jev labels new and changed calls; free"),
             ("regrade", True, len(calls), "re-applies the Python rules to the Jev ledgers; free"),
             ("issues", True, len(rows), "rebuilds causes.json and syncs the tracker; free; causes below may change"),
-            ("fix", bool(fixing), len(fixing), "first patch for causes with no patch (Gemini, paid)"),
+            ("fix", bool(fixing or routing), len(fixing), f"first patch (paid); routes {len(routing)} ticket/watch"),
             ("test", bool(todo), len(todo), f"gate run and refix per cause, {MAX_ATTEMPTS} attempts at most (paid)"),
             ("report", True, len(rows), "lists ready_to_ship, ticket and watch causes; never ships"),
         )
@@ -199,33 +215,40 @@ def _test_cause(row: dict, start: int, p: dict, prompt: Path, n: int, k: int) ->
     return out
 
 
-def _fix_step(p: dict, prompt: Path, fixing: list[dict]) -> tuple[dict, dict[str, dict]]:
-    """Step 5. Write a first patch for the `fix` rows, on a copy of causes.json that holds only those causes (so --top
-    counts workable causes). Returns (detail, failures): a cause with no patch afterwards fails."""
-    if not fixing:
+def _fix_step(p: dict, prompt: Path, rows: list[dict]) -> tuple[dict, dict[str, dict]]:
+    """Step 5. Write a first patch for the `fix` rows and route the ticket and watch causes no fix run has seen, on a
+    copy of causes.json that holds only those causes (so --top counts workable causes). Returns (detail, failures):
+    a cause with no patch afterwards fails."""
+    fixing = {r["cause_id"] for r in rows if r["todo"] == "fix"}
+    keep = fixing | {r["cause_id"] for r in _needs_routing(rows)}
+    if not keep:
         return {"patches": 0}, {}
-    keep = {r["cause_id"] for r in fixing}
     doc = json.loads(p["causes"].read_text(encoding="utf-8"))
-    filtered = p["causes"].with_name(FILTERED_CAUSES)
-    filtered.write_text(json.dumps({**doc, "causes": [c for c in doc["causes"] if c.get("cause_id") in keep]}))
-    try:
+    with tempfile.NamedTemporaryFile("w", dir=p["causes"].parent, prefix=FILTERED_PREFIX, suffix=".json") as f:
+        json.dump({**doc, "causes": [c for c in doc["causes"] if c.get("cause_id") in keep]}, f)
+        f.flush()  # deleted on exit, also when a cancel raises
         r = run_fix(
-            causes_path=filtered, prompt_path=prompt, out_path=p["patches"], top_n=len(keep), holdout=True,
+            causes_path=Path(f.name), prompt_path=prompt, out_path=p["patches"], top_n=len(fixing), holdout=True,
             calls_path=p["calls"], audits_path=p["audits"], gates_path=p["gates"], tickets_dir=p["tickets"],
         )  # fmt: skip
-    finally:
-        filtered.unlink(missing_ok=True)
     failed = {}
-    for c in keep - set(_attempts(p["patches"])):
+    for c in fixing - set(_attempts(p["patches"])):
         why = "; ".join(_one_line(y["reason"]) for y in r["rejected"] if y["cause_id"] == c)
         failed[c] = {"attempts": [], "failed": {"step": "fix", "attempt": 1, "reason": why or "fix wrote no patch"}}
-    return {"patches": len(keep) - len(failed), "rejected": len(r["rejected"])}, failed
+    return {"patches": len(fixing) - len(failed), "rejected": len(r["rejected"])}, failed
 
 
 def run_loop(runs: Path, prompt_path: Path, top: int = DEFAULT_TOP, n: int = 8, k: int = 3) -> dict:
     """Run the seven steps in order; print LOOP_STEP lines, LOOP_SUMMARY and LOOP_DONE. Ships nothing. A failed step 1
-    to 5 prints LOOP_FAILED <step> <reason> and exits non-zero."""
-    runs, prompt_path = Path(runs), Path(prompt_path)
+    to 5 prints LOOP_FAILED <step> <reason> and exits non-zero. SIGTERM (the console cancel) stops it the same way."""
+    old = signal.signal(signal.SIGTERM, _cancel)
+    try:
+        return _run_loop(Path(runs), Path(prompt_path), top, n, k)
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+
+def _run_loop(runs: Path, prompt_path: Path, top: int, n: int, k: int) -> dict:
     p = workspace_paths(runs)
     started, steps, rows, tested, rep = datetime.now(UTC), [], [], {}, {}
 
@@ -234,15 +257,15 @@ def run_loop(runs: Path, prompt_path: Path, top: int = DEFAULT_TOP, n: int = 8, 
         print(f"LOOP_STEP {i}/{len(STEPS)} {STEPS[i - 1]}", flush=True)
         try:
             detail = fn()
-        except (Exception, SystemExit) as e:
-            print(f"LOOP_FAILED {STEPS[i - 1]} {_one_line(e)}", flush=True)
+        except (Exception, SystemExit, Cancelled) as e:  # a cancel has cleaned up by now: stop, do not go on
+            print(f"LOOP_FAILED {STEPS[i - 1]} {'cancelled' if isinstance(e, Cancelled) else _one_line(e)}", flush=True)
             raise SystemExit(1) from None
         print(f"  {detail}", flush=True)
         steps.append({"name": STEPS[i - 1], "status": "done", "detail": detail})
 
     def fix() -> dict:
         rows.extend(_work(runs, p, top))  # after issues: the causes and the tracker are fresh
-        detail, tested_fix = _fix_step(p, prompt_path, [r for r in rows if r["todo"] == "fix"])
+        detail, tested_fix = _fix_step(p, prompt_path, rows)
         tested.update(tested_fix)  # a cause that got no patch is a failure; test skips it
         return detail
 
