@@ -44,7 +44,7 @@ def test_submit_sends_file_and_id_then_shows_one_row_per_call():
 
 
 def test_read_only_leaves_no_enabled_control_in_operate():
-    """With read_only true every control in Run, Submit, Rubric, Tune and the stage Run bar is disabled, with a banner.
+    """With read_only true every control in Run, Submit, Rubric, Tune and the stage Run bar is disabled.
 
     If one stayed enabled the frozen demo folder could be written."""
     d = run("con-readonly")
