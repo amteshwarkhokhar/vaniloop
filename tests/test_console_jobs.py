@@ -294,34 +294,48 @@ def test_one_runner_per_server_even_with_racing_first_requests(data, monkeypatch
     assert web.make_server(0, data).RequestHandlerClass.runner is not None
 
 
-def _survivor(data):
-    """A live sleeping process in its own session, and a jobs.jsonl row that says it is running."""
-    import subprocess
+def test_job_survives_a_console_restart_and_finishes_done(data, monkeypatch):
+    """Protects a running job across a console restart: a new runner must adopt it (busy), and the job must
+    still finish done with exit 0 and its late, masked lines in the log. Before, the dead server's pipe broke
+    the job's next print."""
+    use_argv(monkeypatch, "import time; time.sleep(1.5); print('late sk-synthetic123', flush=True)")
+    first = console.JobRunner(data)
+    first._wait = lambda *a: None  # this runner is "dead": it must not record the end
+    job = first.start("issues", {})
+    proc = first.procs[job["id"]]
+    first.procs.clear()
+    del first
+    threading.Thread(target=proc.wait, daemon=True).start()  # reap: the real parent would be gone
+    second = console.JobRunner(data)
+    assert second.busy_job_id() == job["id"]
+    with pytest.raises(console.ConsoleError):
+        second.start("issues", {})
+    end = time.time() + 10
+    while time.time() < end and second.get(job["id"])["status"] == "running":
+        time.sleep(0.1)
+    row = second.get(job["id"])
+    assert (row["status"], row["exit_code"]) == ("done", 0)
+    assert second.log(job["id"], 0)["lines"] == ["late ***"]
+    assert "sk-synthetic123" not in (data / "console" / "jobs" / f"{job['id']}.log").read_text()
 
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
-    (data / "console").mkdir(exist_ok=True)
-    row = {"id": "j0000000000aa", "stage": "issues", "args": {}, "status": "running", "pid": proc.pid,
-           "started_ist": "10:00:00 10 Oct", "started_utc": "2026-10-10T04:30:00+00:00"}  # fmt: skip
-    (data / "console" / "jobs.jsonl").write_text(json.dumps(row) + "\n")
-    return proc
 
-
-def test_job_that_survives_restart_blocks_and_can_be_cancelled(data):
-    """Protects the one-job rule across a server restart: a still-running job from before must count as busy,
-    and cancel must kill its process group. Otherwise a second paid job could start or the survivor be stuck."""
-    proc = _survivor(data)
+def test_adopted_job_can_be_cancelled(data, monkeypatch):
+    """Protects cancel after a restart: cancel on an adopted job must kill its whole process group and end it
+    as cancelled."""
+    use_argv(monkeypatch, "import time; time.sleep(60)")
+    first = console.JobRunner(data)
+    first._wait = lambda *a: None
+    job = first.start("issues", {})
+    proc = first.procs[job["id"]]
+    first.procs.clear()
+    second = console.JobRunner(data)
     try:
-        runner = console.JobRunner(data)
-        assert runner.busy_job_id() == "j0000000000aa"
-        with pytest.raises(console.ConsoleError) as e:
-            runner.start("issues", {})
-        assert e.value.status == 409
-        assert runner.cancel("j0000000000aa")["id"] == "j0000000000aa"
-        assert proc.wait(timeout=3) != 0
+        second.cancel(job["id"])
+        proc.wait(timeout=3)
         end = time.time() + 5
-        while time.time() < end and runner.get("j0000000000aa")["status"] == "running":
+        while time.time() < end and second.get(job["id"])["status"] == "running":
             time.sleep(0.1)
-        assert runner.get("j0000000000aa")["status"] == "cancelled"
+        assert second.get(job["id"])["status"] == "cancelled"
     finally:
         proc.kill()
 

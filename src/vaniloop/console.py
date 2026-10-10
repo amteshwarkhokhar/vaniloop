@@ -13,6 +13,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta, timezone
@@ -270,7 +271,7 @@ class JobRunner:
                 self.adopted[row["id"]] = row.get("pgid") or row["pid"]
                 threading.Thread(target=self._watch, args=(row,), daemon=True).start()
             else:
-                self._finish(row, "failed", None)
+                self._end(row, self._exit_code(row["id"]))
 
     def _finish(self, row: dict, status: str, code, cost=None) -> None:
         ended = datetime.now(UTC)
@@ -282,11 +283,30 @@ class JobRunner:
             self._save(done)
 
     def _watch(self, row: dict) -> None:
-        """Wait for an adopted job's process to end. Its exit code is unknown."""
+        """Wait for an adopted job's wrapper to end, then read its exit code from the .exit file."""
         while _pid_alive(row["pid"]):
             time.sleep(0.5)
         self.adopted.pop(row["id"], None)
-        self._finish(row, "cancelled" if row["id"] in self.cancelled else "failed", None)
+        self._end(row, self._exit_code(row["id"]))
+
+    def _exit_path(self, job_id: str) -> Path:
+        return self.dir / "jobs" / f"{job_id}.exit"
+
+    def _exit_code(self, job_id: str) -> int | None:
+        """The exit code the wrapper wrote, or None when it was killed before it could."""
+        try:
+            return int(self._exit_path(job_id).read_text())
+        except (OSError, ValueError):
+            return None
+
+    def _end(self, row: dict, code: int | None) -> None:
+        """Record the end of a job whose wrapper we did not wait on (adopted or lost)."""
+        status = "cancelled" if row["id"] in self.cancelled else "done" if code == 0 else "failed"
+        try:
+            cost = job_cost(_parse_utc(row["started_utc"]), datetime.now(UTC))
+        except Exception:  # noqa: BLE001
+            cost = None
+        self._finish(row, status, code, cost)
 
     def _log_path(self, job_id: str) -> Path:
         return self.dir / "jobs" / f"{job_id}.log"
@@ -329,12 +349,12 @@ class JobRunner:
             (self.dir / "jobs").mkdir(parents=True, exist_ok=True)
             env = {**os.environ, "VANILOOP_RUBRIC": str(self.data / "rubric.json")}
             started = datetime.now(UTC)
+            wrapper = [sys.executable, "-m", "vaniloop.console_log", str(self._log_path(job_id)),
+                       str(self._exit_path(job_id)), "--", *argv]  # fmt: skip
             proc = subprocess.Popen(  # noqa: S603 - argv list, never a shell
-                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                wrapper, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True, env=env, cwd=Path(__file__).resolve().parents[2],
             )  # fmt: skip
-            reader = threading.Thread(target=self._pump, args=(proc, self._log_path(job_id)), daemon=True)
-            reader.start()
             row = {
                 "id": job_id, "stage": stage, "args": args, "status": "running", "pid": proc.pid, "pgid": proc.pid,
                 "started_ist": now_ist(started), "started_utc": started.isoformat(),
@@ -342,20 +362,11 @@ class JobRunner:
             }  # fmt: skip
             self.procs[job_id] = proc
             self._save(row)
-            threading.Thread(target=self._wait, args=(job_id, proc, row, reader), daemon=True).start()
+            threading.Thread(target=self._wait, args=(job_id, proc, row), daemon=True).start()
             return self.public(row)
 
-    @staticmethod
-    def _pump(proc: subprocess.Popen, path: Path) -> None:
-        """Copy the child's output to the log, line by line, masked. The log never holds a secret."""
-        with open(path, "wb") as log:
-            for raw in proc.stdout:
-                log.write(mask(raw.decode("utf-8", errors="replace").rstrip("\r\n")).encode("utf-8") + b"\n")
-                log.flush()
-
-    def _wait(self, job_id: str, proc: subprocess.Popen, row: dict, reader: threading.Thread) -> None:
+    def _wait(self, job_id: str, proc: subprocess.Popen, row: dict) -> None:
         code = proc.wait()
-        reader.join(timeout=10)
         ended = datetime.now(UTC)
         status = "cancelled" if job_id in self.cancelled else "done" if code == 0 else "failed"
         try:
