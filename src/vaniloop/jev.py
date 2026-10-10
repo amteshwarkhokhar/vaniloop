@@ -11,9 +11,9 @@ import hashlib
 import json
 import math
 
+from . import rules
 from .llm import complete_jev, jev_model
 from .models import CallRecord, Ledger
-from .rules import FRUSTRATED_P
 
 JEV_VERSION = "4"  # bump whenever the questions or the thresholds change; part of the cache key
 # Thresholds per label, tuned on the dev half of the Fable-reviewed set and checked on the held-out half (#121).
@@ -23,8 +23,20 @@ N_DROP_AT = 0.35  # name check: q is dropped when n <= this
 PM_TRUE_AT, PM_FALSE_AT = 0.65, 0.35  # product match
 
 
-def to_bool(p: float, true_at: float = PM_TRUE_AT, false_at: float = PM_FALSE_AT) -> bool | None:
-    """>= true_at True, <= false_at False, anything between None (the rule says Unknown). Default: product match."""
+def __getattr__(name: str):
+    """jev.FRUSTRATED_P stays readable; it is rules.FRUSTRATED_P, read live so a rubric override shows."""
+    if name == "FRUSTRATED_P":
+        return rules.FRUSTRATED_P
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def to_bool(p: float, true_at: float | None = None, false_at: float | None = None) -> bool | None:
+    """>= true_at True, <= false_at False, anything between None (the rule says Unknown). Default: product match.
+
+    The defaults are read at call time, so a rubric override of PM_TRUE_AT or PM_FALSE_AT applies.
+    """
+    true_at = PM_TRUE_AT if true_at is None else true_at
+    false_at = PM_FALSE_AT if false_at is None else false_at
     return True if p >= true_at else False if p <= false_at else None
 
 
@@ -32,54 +44,17 @@ def _noul(instructions: str, yes, no) -> dict:
     return {"type": "noul", "instructions": instructions, "criteria": {"true": yes, "false": no}}
 
 
-def _crit(description: str, *examples: str) -> dict:
-    return {"description": description, "examples": list(examples)}
+def _criterion(c: dict):
+    """A criterion with examples is sent as {description, examples}; one without is sent as its description."""
+    return {"description": c["description"], "examples": list(c["examples"])} if c["examples"] else c["description"]
 
 
-_SPEC_TRUE = _crit(
-    "A sales agent could reasonably ask a buyer of this product about it",
-    "voltage for an electric bike switch",
-    "texture (soft or hard) for copper wire",
-    "a generic buying question that fits any product: order type (monthly or sample), payment terms, usage, "
-    "any other details",
-)
-_SPEC_FALSE = _crit(
-    "It belongs to a different kind of product, or makes no sense for this one",
-    "flight time for a dome camera",
-    "fabric type for a steel pipe",
-    "what the buyer packs, asked about a machine belt",
-)
-_OPT_TRUE = _crit(
-    "A real, sensible choice of this specification for this product",
-    "soft or hard for copper wire texture",
-    "two or three lanes for a vending machine",
-)
-_OPT_FALSE = _crit(
-    "Not a sensible choice for this product, or not a kind of this specification",
-    "mild steel as the work material of a glass cutting line",
-    "HP or Dell as the brand of a car display",
-    "repairing as the type of a charger being bought",
-)
-_IRR_TRUE = _crit(
-    "The buyer shows annoyance at the bot",
-    "complains the bot keeps asking or repeating",
-    "says they already answered, or tells the bot to stop",
-    "speaks angrily, rudely or sarcastically to the bot",
-)
-_IRR_FALSE = _crit(
-    "Anything else",
-    "checking the line: 'hello?'",
-    "asking the bot to wait",
-    "answering, agreeing or repeating an answer",
-    "correcting the bot or disagreeing calmly",
-    "confusion, language trouble or an off-topic remark",
-)
-_PM_TRUE = _crit("Same product", "'pen holder' and 'doctor coat shape pen stand'")
-_PM_FALSE = _crit(
-    "Different products, even if they share a word",
-    "'chappal sheet' to buy and 'chappal sheet wastage' to sell",
-    "'Nokia 535 back door' and 'Lumia 535 back door'",
-)
+def _question(qid: str, instructions: str | None = None) -> dict:
+    """The Jev question of an editable id, built from the rubric (the applied override, else the default text)."""
+    from . import rubric  # late: rubric reads this module's thresholds at import
+
+    q = rubric.question(qid)
+    return _noul(instructions or q["instructions"], _criterion(q["true"]), _criterion(q["false"]))
 
 
 def spec_product(led: Ledger, idx: int) -> str | None:
@@ -96,6 +71,8 @@ def _requests(call: CallRecord, led: Ledger) -> list[tuple[str, int | None, dict
 
     kind is "spec" (one per spec turn with a product), "buyer" (one per buyer turn) or "pm" (one per call).
     """
+    from . import rubric
+
     text = {t.idx: t.text for t in call.turns}
     out: list[tuple[str, int | None, dict, dict[str, dict]]] = []
     for b in led.bot_turns:
@@ -109,27 +86,16 @@ def _requests(call: CallRecord, led: Ledger) -> list[tuple[str, int | None, dict
             "specification_asked": spec,
             "options_offered": list(b.options_offered),
         }
-        questions = {
-            "q": _noul(
-                "Could a sales agent reasonably ask a buyer of `product_the_buyer_wants` about "
-                "`specification_asked`" + ("" if spec else " (the specification asked in `bot_turn`)") + "? "
-                "Judge the specification only, not the options.",
-                _SPEC_TRUE,
-                _SPEC_FALSE,
-            )
-        }
+        q_text = rubric.question("spec_fit")["instructions"]
+        if not spec:  # no spec name: point the question at the turn
+            ref = "`specification_asked` (the specification asked in `bot_turn`)"
+            q_text = q_text.replace("`specification_asked`", ref, 1)
+        questions = {"q": _question("spec_fit", q_text)}
         if spec:  # spec_name is Gemini's: check it names what the turn really asks
-            questions["n"] = _noul(
-                "Ignoring any example options, does `bot_turn` ask the buyer about `specification_asked`?",
-                "The turn asks about this specification.",
-                "The turn asks about something else.",
-            )
+            questions["n"] = _question("spec_name_check")
+        opt_text = rubric.question("option_fit")["instructions"]
         for i in range(len(b.options_offered)):
-            questions[f"opt{i}"] = _noul(
-                f"Is `options_offered[{i}]` a sensible choice of `specification_asked` for `product_the_buyer_wants`?",
-                _OPT_TRUE,
-                _OPT_FALSE,
-            )
+            questions[f"opt{i}"] = _question("option_fit", opt_text.replace("{i}", str(i)))
         out.append(("spec", b.idx, state, questions))
     asked = {u.idx for u in led.user_turns}
     last_bot = ""
@@ -137,17 +103,11 @@ def _requests(call: CallRecord, led: Ledger) -> list[tuple[str, int | None, dict
         if t.speaker == "bot":
             last_bot = t.text
         elif t.idx in asked:
-            q = _noul("In `buyer_reply`, is the buyer irritated or annoyed with the sales bot?", _IRR_TRUE, _IRR_FALSE)
-            out.append(("buyer", t.idx, {"bot_turn": last_bot, "buyer_reply": t.text}, {"f": q}))
+            out.append(("buyer", t.idx, {"bot_turn": last_bot, "buyer_reply": t.text}, {"f": _question("irritation")}))
     confirmed, final = led.bot_confirmed.get("product"), led.final_product
     if confirmed and final:
         state = {"product_the_bot_confirmed": confirmed, "product_the_buyer_finally_wants": final}
-        q = _noul(
-            "Would a seller treat `product_the_bot_confirmed` and `product_the_buyer_finally_wants` as the same "
-            "product to quote for, even if one name adds details such as size, form, brand, model or concentration?",
-            _PM_TRUE,
-            _PM_FALSE,
-        )
+        q = _question("product_match")
         out.append(("pm", None, state, {"pm": q}))
     return out
 
@@ -209,10 +169,13 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
 
 
 def fingerprint(call: CallRecord, led: Ledger) -> str:
-    """sha256 of what a judged row depends on: every request (state and questions), the model, JEV_VERSION and the
-    source ledger (the row copies its structural fields, so a changed Gemini field must redo the row)."""
+    """sha256 of what a judged row depends on: every request (state and questions), the model, JEV_VERSION plus
+    the rubric's Jev overrides (nothing is added without overrides) and the source ledger (the row copies its
+    structural fields, so a changed Gemini field must redo the row)."""
+    from . import rubric
+
     raw = json.dumps(
-        [build_questions(call, led), jev_model(), JEV_VERSION, led.model_dump(mode="json")],
+        [build_questions(call, led), jev_model(), JEV_VERSION + rubric.version_suffix(), led.model_dump(mode="json")],
         sort_keys=True,
         ensure_ascii=False,
     )
@@ -238,7 +201,7 @@ def _fields(led: dict) -> dict[tuple, bool | None]:
     for u in led.get("user_turns", []):
         v = u.get("frustrated")
         ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-        out[("frustrated", u["idx"])] = v >= FRUSTRATED_P if ok else None  # missing stays None, never False
+        out[("frustrated", u["idx"])] = v >= rules.FRUSTRATED_P if ok else None  # missing stays None, never False
     return out
 
 
@@ -246,7 +209,7 @@ def judge_agreement(a_rows: list[dict], b_rows: list[dict]) -> list[dict]:
     """Per field: how often ledger files A (Gemini) and B (Jev) agree, and Cohen's kappa.
 
     Only labels that both files hold (not None) count. `none_a` and `none_b` count the labels dropped.
-    frustrated is compared as `>= FRUSTRATED_P`.
+    frustrated is compared as `>= rules.FRUSTRATED_P`.
     """
     b_by = {r["call_id"]: r for r in b_rows if "call_id" in r}
     pairs: dict[str, list[tuple[bool, bool]]] = {}
@@ -258,7 +221,7 @@ def judge_agreement(a_rows: list[dict], b_rows: list[dict]) -> list[dict]:
         fa, fb = _fields(ra), _fields(rb)
         for k, va in fa.items():
             vb = fb.get(k)
-            name = k[0] if k[0] != "frustrated" else f"frustrated>={FRUSTRATED_P}"
+            name = k[0] if k[0] != "frustrated" else f"frustrated>={rules.FRUSTRATED_P}"
             n = none.setdefault(name, [0, 0])
             pairs.setdefault(name, [])
             n[0] += va is None
