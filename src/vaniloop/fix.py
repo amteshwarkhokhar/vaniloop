@@ -461,12 +461,6 @@ def run_fix(
             )
     runs = out.parent
     prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
-    for c, action, why in routed:  # one routed event per change, so a rerun adds no noise
-        last = next((e for e in reversed(tracker.events(runs, c.cause_id)) if e["kind"] == "routed"), None)
-        if last is None or last["detail"] != {"action": action, "why": why}:
-            tracker.record("routed", c.cause_id, {"action": action, "why": why}, runs=runs)
-    for c in tickets:
-        tracker.record("ticket_written", c.cause_id, {"path": f"tickets/{c.cause_id}.md"}, runs=runs)
     rejected: list[dict] = []
     patches = []
     for cause in to_patch:
@@ -485,16 +479,20 @@ def run_fix(
             have = {x.get("cause_id") for x in fresh.get("patches", [])}
             have |= {x.get("cause_id") for x in fresh.get("history", [])}
             merged = [*fresh.get("patches", []), *(p.model_dump() for p in patches if p.cause_id not in have)]
-            for p in patches:
-                if p.cause_id not in have:
-                    tracker.record(
-                        "patch_written", p.cause_id,
-                        {"attempt": p.attempt, "changed_lines": changed_lines(p.old_text, p.new_text)}, runs=runs,
-                    )  # fmt: skip
             result = {**fresh, "patches": merged, "rejected": rejected}
             _write_doc(out, result)
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+    for c, action, why in routed:  # tracker events come last and are best-effort: the stage's own files are saved
+        tracker.emit_routed(runs, c.cause_id, action, why)
+    for c in tickets:
+        tracker.emit("ticket_written", c.cause_id, {"path": f"tickets/{c.cause_id}.md"}, runs=runs)
+    for p in patches:
+        if p.cause_id not in have:
+            tracker.emit(
+                "patch_written", p.cause_id,
+                {"attempt": p.attempt, "changed_lines": changed_lines(p.old_text, p.new_text)}, runs=runs,
+            )  # fmt: skip
     return {
         "patches": result["patches"],
         "rejected": rejected,
@@ -654,10 +652,10 @@ def run_refix(
             rows[slot] = new.model_dump()
             history = [*fresh.get("history", []), {**current.model_dump(), "decision": decision}]
             _write_doc(patches_path, {**fresh, "patches": rows, "history": history})
-            tracker.record(
-                "patch_written", cause_id,
-                {"attempt": new.attempt, "changed_lines": changed_lines(new.old_text, new.new_text)}, runs=runs,
-            )  # fmt: skip
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+    tracker.emit(
+        "patch_written", cause_id,
+        {"attempt": new.attempt, "changed_lines": changed_lines(new.old_text, new.new_text)}, runs=runs,
+    )  # fmt: skip
     return {"patches": [new.model_dump()], "rejected": []}

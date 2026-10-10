@@ -1,6 +1,7 @@
 """Tracker (#130): the state machine, the issues sync, tickets and the web routes. Synthetic data only."""
 
 import json
+import threading
 
 import pytest
 from test_fix import PROMPT, cause, ev_audits, stub, write_run
@@ -14,6 +15,11 @@ def ev(kind, **detail):
     return {"ts_ist": "t", "kind": kind, "detail": detail}
 
 
+SHIP = [
+    {"ts_ist": "t", "kind": "gated", "detail": {"decision": "ship"}},
+    {"ts_ist": "t", "kind": "shipped", "detail": {}},
+]
+
 TRANSITIONS = [
     ("open", [ev("detected")]),
     ("watching", [ev("detected"), ev("routed", action="watch")]),
@@ -24,6 +30,15 @@ TRANSITIONS = [
     ("ready_to_ship", [ev("patch_written"), ev("gated", decision="ship")]),
     ("ready_to_ship", [ev("gated", decision="ship"), ev("approved")]),
     ("shipped", [ev("gated", decision="ship"), ev("approved"), ev("shipped")]),
+    # an event that skips its prerequisite is kept in the log but changes nothing
+    ("open", [ev("detected"), ev("shipped")]),
+    ("in_fix", [ev("patch_written"), ev("shipped")]),
+    ("rejected", [ev("gated", decision="reject"), ev("shipped")]),
+    ("open", [ev("detected"), ev("ticket_sent")]),
+    ("ticket_open", [ev("ticket_written"), ev("ticket_resolved")]),
+    ("ticket_resolved", [ev("ticket_written"), ev("ticket_sent"), ev("ticket_resolved"), ev("ticket_sent")]),
+    ("open", [ev("detected"), ev("closed")]),
+    ("open", [ev("detected"), ev("regressed")]),
     ("exhausted", [ev("patch_written"), ev("gated", decision="reject", last_attempt=True)]),
     ("exhausted", [ev("patch_written"), ev("gated", decision="inconclusive", last_attempt=True)]),
     ("in_fix", [ev("gated", decision="reject"), ev("patch_written")]),  # a refix
@@ -31,9 +46,11 @@ TRANSITIONS = [
     ("ticket_sent", [ev("ticket_written"), ev("ticket_sent")]),
     ("ticket_resolved", [ev("ticket_written"), ev("ticket_sent"), ev("ticket_resolved")]),
     ("ticket_sent", [ev("ticket_written"), ev("ticket_sent"), ev("ticket_written")]),  # a rerun keeps the state
-    ("closed", [ev("shipped"), ev("closed")]),
-    ("regressed", [ev("shipped"), ev("regressed")]),
-    ("shipped", [ev("shipped"), ev("routed", action="patch"), ev("gated", decision="reject")]),  # ignored when shipped
+    ("closed", [*SHIP, ev("closed")]),
+    ("regressed", [*SHIP, ev("regressed")]),
+    ("closed", [*SHIP, ev("regressed"), ev("closed")]),
+    ("regressed", [*SHIP, ev("closed"), ev("regressed")]),
+    ("shipped", [*SHIP, ev("routed", action="patch"), ev("gated", decision="reject")]),  # ignored when shipped
     ("open", [ev("detected"), ev("count_changed"), ev("rubric_changed"), ev("screened")]),  # no state change
 ]
 
@@ -106,18 +123,125 @@ def test_sync_never_compares_counts_across_rubric_versions(tmp_path, monkeypatch
     assert tracker.events(tmp_path)[-1]["detail"]["note"] == "rubric changed"
 
 
+def ship(runs, cid="cause_looping"):
+    """What a real ship leaves in the log: a gated ship event, then shipped."""
+    tracker.record("gated", cid, {"decision": "ship"}, runs=runs)
+    tracker.record("shipped", cid, {"version": "v1"}, runs=runs)
+
+
 def test_shipped_cause_regresses_when_it_comes_back_and_closes_when_it_goes(tmp_path):
     """After a ship, a higher count is regressed and a count of 0 is closed.
 
     A shipped fix that nobody re-checks would stay green while the fault returned.
     """
     tracker.sync_causes([cause_row(fatal=1, nonfatal=0)], tmp_path)
-    tracker.record("shipped", "cause_looping", {"version": "v1"}, runs=tmp_path)
+    ship(tmp_path)
     tracker.sync_causes([cause_row(fatal=3, nonfatal=0)], tmp_path)
     assert tracker.state("cause_looping", tmp_path) == "regressed"
-    tracker.record("shipped", "cause_looping", {"version": "v2"}, runs=tmp_path)
     tracker.sync_causes([cause_row(fatal=0, nonfatal=0)], tmp_path)
     assert tracker.state("cause_looping", tmp_path) == "closed"
+
+
+def test_a_closed_fault_that_returns_is_regressed_and_closes_again_when_it_goes(tmp_path):
+    """detect, ship, vanish, reappear gives regressed (even at the same count); vanishing again gives closed.
+
+    Without the closed -> regressed path a returning fault stayed closed, hidden from the board.
+    """
+    tracker.sync_causes([cause_row(fatal=2, nonfatal=0)], tmp_path)
+    ship(tmp_path)
+    tracker.sync_causes([], tmp_path)
+    assert tracker.state("cause_looping", tmp_path) == "closed"
+    tracker.sync_causes([cause_row(fatal=2, nonfatal=0)], tmp_path)  # the same count as at the ship
+    assert tracker.state("cause_looping", tmp_path) == "regressed"
+    tracker.sync_causes([], tmp_path)
+    assert tracker.state("cause_looping", tmp_path) == "closed"
+
+
+def test_a_vanished_shipped_cause_is_not_closed_under_a_new_rubric(tmp_path, monkeypatch):
+    """A shipped cause that disappears after the rubric changed gets rubric_changed and stays shipped.
+
+    A new rubric can stop counting the fault; that is not proof the fix worked.
+    """
+    monkeypatch.setattr(tracker, "rubric_version", lambda: "4")
+    tracker.sync_causes([cause_row()], tmp_path)
+    ship(tmp_path)
+    monkeypatch.setattr(tracker, "rubric_version", lambda: "4+abc123")
+    tracker.sync_causes([], tmp_path)
+    assert tracker.state("cause_looping", tmp_path) == "shipped"
+    assert kinds(tmp_path)[-1] == "rubric_changed"
+    tracker.sync_causes([], tmp_path)  # a rerun must not close it either: the ship was under the old rubric
+    assert tracker.state("cause_looping", tmp_path) == "shipped"
+
+
+def test_a_rubric_change_updates_the_baseline_even_when_the_counts_are_equal(tmp_path, monkeypatch):
+    """Equal counts under a new rubric still write rubric_changed, so the next run compares like with like.
+
+    Without it the baseline kept the old rubric and the next real change was called a rubric change forever.
+    """
+    monkeypatch.setattr(tracker, "rubric_version", lambda: "4")
+    tracker.sync_causes([cause_row()], tmp_path)
+    monkeypatch.setattr(tracker, "rubric_version", lambda: "5")
+    tracker.sync_causes([cause_row()], tmp_path)
+    tracker.sync_causes([cause_row(fatal=7)], tmp_path)
+    assert kinds(tmp_path) == ["detected", "rubric_changed", "count_changed"]
+
+
+def test_rubric_version_hashes_the_overridden_params_and_questions(monkeypatch):
+    """The version is jev_version_effective plus a hash of overridden params and questions, nothing for defaults.
+
+    The rubric has no `overrides` key; reading one made every rubric look like the default.
+    """
+    from vaniloop import rubric
+
+    d = {"jev_version_effective": "4", "params": [{"id": "a", "value": 1, "overridden": False}], "questions": []}
+    monkeypatch.setattr(rubric, "describe", lambda: d)
+    assert tracker.rubric_version() == "4"
+    d["params"][0] = {"id": "a", "value": 2, "overridden": True}
+    v1 = tracker.rubric_version()
+    d["params"][0]["value"] = 3
+    assert v1.startswith("4+") and tracker.rubric_version() != v1
+
+
+def test_a_failing_tracker_never_loses_a_stage_result(tmp_path, monkeypatch):
+    """With the tracker raising, run_fix still saves its patches and returns them.
+
+    The patches cost LLM calls. A full disk under tracker.jsonl must not throw them away.
+    """
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    causes = [cause("c1")]
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode(), causes, ev_audits(causes))
+    monkeypatch.setattr(tracker, "_append", boom)
+    r = run_fix(cp, pp, op, llm=stub("line 3: rule text 3", "line 3: better"), audits_path=ap)
+    assert (
+        [p["cause_id"] for p in json.loads(op.read_text())["patches"]]
+        == ["c1"]
+        == [p["cause_id"] for p in r["patches"]]
+    )
+    tracker.sync_causes([cause_row()], tmp_path)  # must not raise
+
+
+def test_concurrent_writers_never_interleave_and_a_torn_tail_is_repaired(tmp_path):
+    """Eight threads append 25 events each: every line parses, none is lost. A torn last line gets a newline first.
+
+    Unlocked appends can interleave or join a torn line, and the lost events change a cause's state.
+    """
+    (tmp_path / "tracker.jsonl").write_text('{"kind": "detected", "cause_id": "torn"')  # no newline: a torn write
+
+    def work(n):
+        for i in range(25):
+            tracker.record("count_changed", f"cause_{n}", {"i": i, "pad": "x" * 500}, runs=tmp_path)
+
+    threads = [threading.Thread(target=work, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    lines = (tmp_path / "tracker.jsonl").read_text().splitlines()
+    assert len(lines) == 201  # the torn line stays its own line
+    assert sum(1 for line in lines[1:] if json.loads(line)["kind"] == "count_changed") == 200
 
 
 def test_ticket_sent_and_resolved_move_state_and_header(tmp_path):
@@ -189,3 +313,14 @@ def test_ticket_command_uses_the_runs_folder(tmp_path):
     tracker.record("ticket_written", "cause_x", runs=tmp_path)
     pipeline.main(["--runs", str(tmp_path), "ticket", "--cause", "cause_x", "--sent", "TKT-2"])
     assert tracker.state("cause_x", tmp_path) == "ticket_sent"
+
+
+def test_board_marks_an_event_that_skipped_its_prerequisite_as_ignored(tmp_path):
+    """A shipped event on a cause that no gate said ship for stays in the log, is marked ignored and keeps the state.
+
+    The history must stay complete for audit, and the board must not show a ship that never happened.
+    """
+    tracker.record("detected", "cause_x", runs=tmp_path)
+    tracker.record("shipped", "cause_x", runs=tmp_path)
+    c = tracker.board(tmp_path)["causes"][0]
+    assert c["state"] == "open" and [e.get("ignored") for e in c["events"]] == [None, True]

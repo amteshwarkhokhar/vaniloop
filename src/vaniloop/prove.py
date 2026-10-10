@@ -580,9 +580,9 @@ def run_prove(
     append_jsonl(gates_path, [result.model_dump(mode="json", exclude_none=True)])
     rd = Path(gates_path).parent
     if screen:
-        tracker.record("screened", cause_id, {"attempt": attempt, "screened": len(screened_items),
+        tracker.emit("screened", cause_id, {"attempt": attempt, "screened": len(screened_items),
                        "kept": len(plan.targets), "cost_usd": screen_cost}, runs=rd)  # fmt: skip
-    tracker.record(
+    tracker.emit(
         "gated", cause_id,
         {"decision": result.decision, "attempt": attempt, "last_attempt": attempt >= MAX_ATTEMPTS,
          "p": result.p_value if math.isfinite(result.p_value) else None, "lift": result.lift,

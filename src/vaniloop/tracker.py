@@ -6,14 +6,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .jsonl import append_jsonl, read_jsonl
+from .jsonl import read_jsonl
 
 IST = timezone(timedelta(hours=5, minutes=30))
 BASE = "base"  # the clean prompt file, before any shipped patch; a patch row without base_version means this
@@ -31,17 +33,38 @@ def now_ist() -> str:
 
 
 def rubric_version() -> str:
-    """Jev version plus a short hash of the param overrides; "default" while vaniloop.rubric (#125) is absent."""
+    """jev_version_effective plus a short hash of the overridden params and questions; "default" without a rubric."""
     try:
-        from . import rubric  # lazy: #125 may not be merged
+        from . import rubric  # lazy: the console rubric may be absent
 
         d = rubric.describe()
-        over = d.get("overrides") or {}
-        return str(d["jev_version_effective"]) + (
-            "+" + hashlib.sha1(json.dumps(over, sort_keys=True).encode()).hexdigest()[:6] if over else ""
-        )
+        over = {
+            "params": {x["id"]: x["value"] for x in d.get("params", []) if x.get("overridden")},
+            "questions": {x["id"]: x["value"] for x in d.get("questions", []) if x.get("overridden")},
+        }
+        tag = hashlib.sha1(json.dumps(over, sort_keys=True).encode()).hexdigest()[:6]
+        return str(d["jev_version_effective"]) + (f"+{tag}" if over["params"] or over["questions"] else "")
     except Exception:
         return "default"
+
+
+def _append(path: Path, row: dict) -> None:
+    """Append one JSON line under an flock on <path>.lock. The tail check, the newline repair and the row go out in
+    one write call, so two writers never interleave and a torn last line never joins a new row."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+    with path.with_name(path.name + ".lock").open("a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            torn = False
+            if path.exists() and path.stat().st_size:
+                with path.open("rb") as f:
+                    f.seek(-1, 2)
+                    torn = f.read(1) != b"\n"
+            with path.open("ab", buffering=0) as f:
+                f.write((b"\n" if torn else b"") + data)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def record(kind: str, cause_id: str, detail: dict | None = None, run_id: str | None = None, runs: Path | None = None):
@@ -53,8 +76,26 @@ def record(kind: str, cause_id: str, detail: dict | None = None, run_id: str | N
         "run_id": run_id or os.environ.get("VANILOOP_RUN_ID"), "rubric_version": rubric_version(),
         "detail": detail or {},
     }  # fmt: skip
-    Path(runs).mkdir(parents=True, exist_ok=True)
-    append_jsonl(Path(runs) / TRACKER, [row])
+    _append(Path(runs) / TRACKER, row)
+
+
+def emit(kind: str, cause_id: str, detail: dict | None = None, run_id: str | None = None, runs: Path | None = None):
+    """record() for a stage: a failure warns on stderr and the stage goes on. Saves come first."""
+    try:
+        record(kind, cause_id, detail, run_id, runs)
+    except Exception as e:
+        print(f"warning: tracker could not record {kind} for {cause_id}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def emit_routed(runs: Path, cause_id: str, action: str, why: str) -> None:
+    """Best-effort routed event, skipped when the cause's last routed event says the same."""
+    try:
+        last = next((e for e in reversed(events(runs, cause_id)) if e["kind"] == "routed"), None)
+        if last is not None and last["detail"] == {"action": action, "why": why}:
+            return
+    except Exception:
+        pass
+    emit("routed", cause_id, {"action": action, "why": why}, runs=runs)
 
 
 def events(runs: Path, cause_id: str | None = None) -> list[dict]:
@@ -63,7 +104,10 @@ def events(runs: Path, cause_id: str | None = None) -> list[dict]:
 
 
 def step(state: str | None, kind: str, d: dict) -> str | None:
-    """One transition: the state after an event. A shipped or closed cause ignores later fix events."""
+    """One transition: the state after an event. An event whose predecessor state is wrong changes nothing
+    (see `valid`). A shipped or closed cause ignores later fix events."""
+    if not valid(state, kind):
+        return state
     if kind == "detected":
         return state or "open"
     if kind == "routed":  # only an unrouted cause moves: a rerun of fix must not undo a later state
@@ -71,9 +115,9 @@ def step(state: str | None, kind: str, d: dict) -> str | None:
             return {"watch": "watching"}.get(d.get("action"), "open")
         return state
     if kind == "patch_written":
-        return state if state in ("shipped", "closed") else "in_fix"
+        return state if state in ("shipped", "closed", "regressed") else "in_fix"
     if kind == "gated":
-        if state in ("shipped", "closed"):
+        if state in ("shipped", "closed", "regressed"):
             return state
         if d.get("decision") == "ship":
             return "ready_to_ship"
@@ -84,6 +128,32 @@ def step(state: str | None, kind: str, d: dict) -> str | None:
         return state if state in ("ticket_sent", "ticket_resolved") else "ticket_open"
     return {"shipped": "shipped", "ticket_sent": "ticket_sent", "ticket_resolved": "ticket_resolved",
             "regressed": "regressed", "closed": "closed"}.get(kind, state)  # fmt: skip
+
+
+PREDECESSOR = {  # event kind -> the states it may follow. Other kinds have no guard.
+    "shipped": ("ready_to_ship",),
+    "ticket_sent": ("ticket_open",),
+    "ticket_resolved": ("ticket_sent",),
+    "regressed": ("shipped", "closed"),
+    "closed": ("shipped", "regressed"),
+}
+
+
+def valid(state: str | None, kind: str) -> bool:
+    """False when the event skips its prerequisite, e.g. shipped on a cause that no gate said ship for.
+    ready_to_ship has no entry: only a gated ship event leads there."""
+    return kind not in PREDECESSOR or state in PREDECESSOR[kind]
+
+
+def walk(evs: list[dict]) -> list[tuple[str, bool]]:
+    """(state after the event, event was valid) for every event in order."""
+    out, st = [], None
+    for e in evs:
+        d = e.get("detail") or {}
+        ok = valid(st, e["kind"])
+        st = step(st, e["kind"], d)
+        out.append((st or "open", ok))
+    return out
 
 
 def fold(evs: list[dict]) -> tuple[str, str | None]:
@@ -108,31 +178,46 @@ def _counts(c: dict) -> dict:
             "symptoms": len(c.get("symptom_calls") or [])}  # fmt: skip
 
 
+BASELINE = ("detected", "count_changed", "rubric_changed", "regressed", "closed")  # events that carry counts
+ZERO = {"fatal": 0, "nonfatal": 0, "symptoms": 0}
+
+
 def sync_causes(causes: list[dict], runs: Path, run_id: str | None = None) -> None:
+    """Best-effort `_sync`: a tracker failure warns on stderr and `issues` goes on."""
+    try:
+        _sync(causes, Path(runs), run_id)
+    except Exception as e:
+        print(f"warning: tracker could not sync causes: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def _sync(causes: list[dict], runs: Path, run_id: str | None) -> None:
     """Emit detected, count_changed, rubric_changed, regressed and closed by comparing causes.json with the log.
 
-    Counts recorded under another rubric version are never compared: that case writes rubric_changed and moves
-    the baseline. After a ship, a higher count is regressed; a count of 0 or a vanished cause is closed.
+    The rubric version is checked first: a change always writes rubric_changed with the new counts as the baseline
+    and nothing else, because counts under two rubrics are never compared. After that, per state:
+    shipped: a higher count is regressed, a count of 0 (or a vanished cause) is closed;
+    closed: any count again is regressed; regressed: a count of 0 (or vanished) is closed again.
+    A close needs the same rubric version as the event that set the baseline (the ship, or the regression), so a
+    cause is never closed by a rubric that changed the counting.
     """
-    runs, rv = Path(runs), rubric_version()
+    rv = rubric_version()
     by_cause: dict[str, list[dict]] = {}
     for e in events(runs):
         by_cause.setdefault(e["cause_id"], []).append(e)
-    seen = set()
-    for c in causes:
-        cid = c["cause_id"]
-        seen.add(cid)
-        new, evs = _counts(c), by_cause.get(cid, [])
+    present = {c["cause_id"]: c for c in causes}
+    for cid in [*present, *(i for i in by_cause if i not in present)]:
+        evs = by_cause.get(cid, [])
+        c = present.get(cid)
+        new = _counts(c) if c else ZERO
         if not evs:
-            record(
-                "detected", cid, {"counts": new, "name": c.get("name"), "parameter": c.get("parameter")}, run_id, runs
-            )
-            continue
-        base = next((e for e in reversed(evs) if e["kind"] in ("detected", "count_changed", "rubric_changed")), evs[0])
-        old = (base.get("detail") or {}).get("counts") or {}
-        if (old.get("fatal"), old.get("nonfatal")) == (new["fatal"], new["nonfatal"]):
+            d = {"counts": new, "name": c.get("name"), "parameter": c.get("parameter")}
+            record("detected", cid, d, run_id, runs)
             continue
         st = fold(evs)[0]
+        if c is None and st not in ("shipped", "regressed"):
+            continue  # a vanished cause only matters after a ship
+        base = next(e for e in reversed(evs) if e["kind"] in BASELINE)
+        old = (base.get("detail") or {}).get("counts") or {}
         d = {"old": old, "new": new, "counts": new}
         if base.get("rubric_version") != rv:
             record(
@@ -142,15 +227,24 @@ def sync_causes(causes: list[dict], runs: Path, run_id: str | None = None) -> No
                 run_id,
                 runs,
             )
-        elif st == "shipped" and new["fatal"] + new["nonfatal"] == 0:
-            record("closed", cid, {**d, "counts": new}, run_id, runs)
-        elif st == "shipped" and new["fatal"] + new["nonfatal"] > old.get("fatal", 0) + old.get("nonfatal", 0):
+            continue
+        total, old_total = new["fatal"] + new["nonfatal"], old.get("fatal", 0) + old.get("nonfatal", 0)
+        if st == "closed":
+            if total:
+                record("regressed", cid, d, run_id, runs)
+            continue
+        if (old.get("fatal"), old.get("nonfatal")) == (new["fatal"], new["nonfatal"]):
+            continue
+        anchor = next((e for e in reversed(evs) if e["kind"] in ("shipped", "regressed")), {})
+        if st in ("shipped", "regressed") and not total:
+            if anchor.get("rubric_version") == rv:
+                record("closed", cid, d, run_id, runs)
+            else:
+                record("rubric_changed", cid, {**d, "note": "rubric changed since the ship: not closed"}, run_id, runs)
+        elif st == "shipped" and total > old_total:
             record("regressed", cid, d, run_id, runs)
         else:
             record("count_changed", cid, d, run_id, runs)
-    for cid, evs in by_cause.items():
-        if cid not in seen and fold(evs)[0] == "shipped":
-            record("closed", cid, {"note": "cause no longer detected"}, run_id, runs)
 
 
 def _versions(runs: Path) -> list[dict]:
@@ -205,8 +299,11 @@ def ticket(cause_id: str, runs: Path, sent: str | None = None, resolved: str | N
 # ---- board ----
 
 
-def _event_view(e: dict) -> dict:
-    return {k: e.get(k) for k in ("ts_ist", "kind", "run_id", "rubric_version", "detail")}
+def _event_view(e: dict, ok: bool = True) -> dict:
+    return {
+        **{k: e.get(k) for k in ("ts_ist", "kind", "run_id", "rubric_version", "detail")},
+        **({} if ok else {"ignored": True}),
+    }
 
 
 def cause_view(cause_id: str, runs: Path, raw: dict | None = None) -> dict:
@@ -227,7 +324,7 @@ def cause_view(cause_id: str, runs: Path, raw: dict | None = None) -> dict:
         "cause_id": cause_id, "name": raw.get("name"), "parameter": raw.get("parameter"), "type": raw.get("type"),
         "owner": raw.get("owner"), "route": route, "state": st, "state_since_ist": since,
         "counts": _counts(raw), "rubric_version": evs[-1].get("rubric_version") if evs else None,
-        "events": [_event_view(e) for e in evs],
+        "events": [_event_view(e, ok) for e, (_, ok) in zip(evs, walk(evs), strict=True)],
     }  # fmt: skip
 
 
