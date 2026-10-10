@@ -28,10 +28,9 @@ Data contracts for every stage: `src/vaniloop/models.py`. Change them only in an
    skip when the files are absent. Fixtures in `tests/fixtures/` are synthetic.
 2. **No real buyer names, phone numbers or quotes longer than one line** in code, tests,
    docs, issues or PR text. Use placeholders such as `BuyerA`. `bin/check` scans for phone numbers.
-3. **Which models may read call data:** Claude, OpenAI/Codex and Google Gemini only.
-   GLM, DeepSeek and other providers work on code only, in a checkout with no data.
-   TypeSafe (Jev) may read call data, owner-approved on 10 Oct 2026. Sarvam gets synthetic data only
-   until the owner approves.
+3. **Which models may read call data:** Claude, OpenAI/Codex, Google Gemini, TypeSafe Jev (owner-approved
+   10 Oct 2026) and Sarvam in IndiaMART's workspace (owner-approved 9 Oct 2026 for the real VANI prompt and
+   real call text). GLM, DeepSeek and other providers work on code only, in a checkout with no data.
 4. **Secrets live in `.env`** (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `TYPESAFE_API_KEY`). Never print,
    log or commit a value.
 
