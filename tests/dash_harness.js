@@ -20,7 +20,7 @@ doc.querySelector = (q) => (q === ".menu" ? menu : q === ".bar .mark" ? mark : n
 doc.addEventListener = (t, f) => (doc.listeners[t] = f);
 
 const cfg = {
-  judge: { available: { value: ["jev", "gemini"] }, active: { value: "jev", source: "t" }, structure_model: { value: "m" }, jev_model: { value: "j" }, jev_version: { value: "1" }, thresholds: { true_at: { value: 0.7 }, false_at: { value: 0.3 } } },
+  judge: { available: { value: ["jev", "gemini"] }, active: { value: "jev", source: "t" }, structure_model: { value: "m" }, jev_model: { value: "j" }, jev_version: { value: "1" }, thresholds: { question_fits: { true_at: { value: 0.55 }, false_at: { value: 0.2 } }, product_match: { true_at: { value: 0.65 }, false_at: { value: 0.35 } }, name_check_drop_at: { value: 0.35 } } },
   audit: {}, fix_loop: { alpha_per_attempt: { value: 0.05 }, last_run: {} }, data: { files: [], folder: { value: "d" } },
 };
 const audit = (judge, total) => ({ judge, total, verdicts: {}, scopes: {}, by_parameter: {}, flags: {} });
@@ -64,6 +64,8 @@ const key = (k, shiftKey = false) => { let pd = false; doc.listeners.keydown({ k
     out.panel = ids.panel.innerHTML; out.toggle = ids.judge.innerHTML;
   } else if (scenario === "panels") {
     for (const id of ["issues", "fix", "review"]) { await click({ go: id }); out[id] = ids.panel.innerHTML; }
+  } else if (scenario === "judge") {
+    await click({ go: "judge" }); out.judge = ids.panel.innerHTML;
   } else if (scenario === "drawer") {
     menu.dataset.menu = "1";
     await click({ menu: "1" });

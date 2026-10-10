@@ -98,16 +98,28 @@
   const failed = (e) => `<p class="empty">This panel could not load (${esc(e.message)}).</p>`;
 
   const P = {};
+  const LABEL_NAME = { question_fits: "Question fits the product", option_fits: "Each option fits", product_match: "Same product" };
+  const band = (name, t, f) =>
+    `<div class="card rv"><p class="label">${esc(name)}</p><div class="band" role="img" aria-label="${esc(name)}: false below ${esc(f)}, unsure between, true above ${esc(t)}"><span class="f" style="width:${f * 100}%">False</span><span class="u" style="width:${(t - f) * 100}%">Unsure</span><span class="t" style="width:${(1 - t) * 100}%">True</span>` +
+    `<span class="tick" style="left:${f * 100}%">${esc(f)}</span><span class="tick" style="left:${t * 100}%">${esc(t)}</span></div><div class="axis"><span>0</span><span>1</span></div></div>`;
   P.judge = () => {
-    const j = S.cfg.judge, th = j.thresholds, t = leaf(th.true_at), f = leaf(th.false_at);
+    const j = S.cfg.judge, th = j.thresholds || {};
+    const bands = Object.keys(th)
+      .filter((k) => th[k] && typeof th[k] === "object" && "true_at" in th[k])
+      .map((k) => {
+        const t = num(leaf(th[k].true_at)), f = num(leaf(th[k].false_at));
+        return t === null || f === null ? "" : band(LABEL_NAME[k] || k, t, f);
+      })
+      .join("");
+    const drop = th.name_check_drop_at ? leaf(th.name_check_drop_at) : null;
     return (
       head("Configure", "Who <em>judges</em>", "Two models share the audit. One reads the transcript, the other makes the judgement calls.") +
       `<div class="roles rv"><div class="card role"><p class="label">Structure</p><p class="big">${esc(leaf(j.structure_model))}</p><p class="lede">Gemini reads the call and lays out its turns, specs and quantities.</p></div>` +
       `<div class="card role"><p class="label">Judgement</p><p class="big">${esc(leaf(j.jev_model))}</p><p class="lede">Jev, version <span class="mono">${esc(leaf(j.jev_version))}</span>, labels each judgement as true, false or unsure.</p></div></div>` +
       sec("Probability bands") +
-      `<div class="card rv"><div class="band" role="img" aria-label="False below ${esc(f)}, unsure between, true above ${esc(t)}"><span class="f" style="width:${f * 100}%">False</span><span class="u" style="width:${(t - f) * 100}%">Unsure</span><span class="t" style="width:${(1 - t) * 100}%">True</span>` +
-      `<span class="tick" style="left:${f * 100}%">${esc(f)}</span><span class="tick" style="left:${t * 100}%">${esc(t)}</span></div><div class="axis"><span>0</span><span>1</span></div>` +
-      `<p class="lede" style="margin-top:18px">Below ${esc(f)} Jev says false. Above ${esc(t)} it says true. Between, the label stays unsure and the call goes to review.</p></div>` +
+      `<p class="lede rv">Each label has its own band, tuned on the reviewed calls. Below the low mark Jev says false. Above the high mark it says true. Between, the label stays unsure and the call goes to review.</p>` +
+      bands +
+      (drop !== null ? `<p class="lede rv">A spec turn's question label is dropped to unsure when Jev's check that the turn asks that spec is at or below <span class="mono">${esc(drop)}</span>.</p>` : "") +
       sec("Active") +
       `<p class="lede rv">Showing <b class="mono">${esc(S.judge)}</b> numbers. <span class="mono">${esc(S.cfg.judge.active.source)}</span></p>`
     );
