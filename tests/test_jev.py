@@ -132,7 +132,8 @@ def test_every_question_is_complete_on_its_own(transport):
     for qid, q in qs.items():
         assert q["type"] == "noul" and q["criteria"]["true"] and q["criteria"]["false"]
         assert qid not in q["instructions"]
-    assert "laptop" in qs["q2"]["instructions"] and "Laptop ka brand kaunsa chahiye" in qs["q2"]["instructions"]
+    assert "laptop" in qs["q2"]["instructions"] and '"brand"' in qs["q2"]["instructions"]  # the spec name (#113)
+    assert "Laptop ka brand kaunsa chahiye" in qs["o2"]["instructions"]
     assert "DJI, MI" in qs["o2"]["instructions"]
     assert "drone camera" in qs["pm"]["instructions"] and '"laptop"' in qs["pm"]["instructions"]
     assert "Nahi, mujhe laptop chahiye." in qs["f1"]["instructions"]
@@ -149,8 +150,8 @@ def test_spec_turn_is_judged_against_the_product_after_the_change(transport):
     led = _ledger()
     led.bot_turns.insert(1, BotTurnLabel(idx=0, slot="spec", options_offered=[]))  # before the change at turn 1
     qs = jev.build_questions(_call(), led)
-    assert 'wants the product "drone camera"' in qs["q0"]["instructions"]
-    assert 'wants the product "laptop"' in qs["q2"]["instructions"]
+    assert '"drone camera"' in qs["q0"]["instructions"] and '"laptop"' not in qs["q0"]["instructions"]
+    assert '"laptop"' in qs["q2"]["instructions"] and '"drone camera"' not in qs["q2"]["instructions"]
     assert "o0" not in qs  # no options: the question alone is used for both labels
 
 
@@ -460,3 +461,29 @@ def test_judge_skips_a_malformed_ledger_row_and_goes_on(transport, tmp_path):
     errs = tmp_path / "e.jsonl"
     r = pipeline.run_judge(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=errs, workers=1)
     assert r == {"judged": 1, "skipped": 0, "errors": 1} and "bad_row" in errs.read_text()
+
+
+def test_question_alone_is_asked_about_the_spec_name_not_the_utterance():
+    """question_fits_product judges the question without its options, so Jev must get the spec name alone.
+
+    With the whole utterance ("Voltage, 60V or 48V?") Jev judged the options too: on 42 real turns where Gemini said
+    the question fits, Jev said it did not, and a pilot asking about the spec name alone agreed with Gemini on 35.
+    If this failed, wrong options would make category_isq Fatal instead of Non-fatal.
+    """
+    call = CallRecord(
+        call_id="syn_spec",
+        duration_sec=2,
+        turns=[Turn(idx=0, speaker="bot", start_sec=0, end_sec=1, text="Voltage mein 60V chahiye ya 48V?")],
+    )
+    led = Ledger.model_validate(
+        {
+            "call_id": "syn_spec",
+            "scope": "bl_collection",
+            "initial_product": "bike switch",
+            "bot_turns": [{"idx": 0, "slot": "spec", "spec_name": "voltage", "options_offered": ["60V", "48V"]}],
+        }
+    )
+    q = jev.build_questions(call, led)
+    assert '"voltage"' in q["q0"]["instructions"] and "60V" not in q["q0"]["instructions"]
+    assert "60V" in q["o0"]["instructions"]  # the options stay in the question-with-options label
+    assert jev.JEV_VERSION == "3"

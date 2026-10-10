@@ -15,7 +15,7 @@ from .llm import complete_jev, jev_model
 from .models import CallRecord, Ledger
 from .rules import FRUSTRATED_P
 
-JEV_VERSION = "2"  # bump whenever the questions or the thresholds change; part of the cache key
+JEV_VERSION = "3"  # bump whenever the questions or the thresholds change; part of the cache key
 TRUE_AT, FALSE_AT = 0.65, 0.35
 
 
@@ -47,12 +47,22 @@ def build_questions(call: CallRecord, led: Ledger) -> dict[str, dict]:
             continue
         head = f'A buyer wants the product "{product}". In `call.turns`, the sales bot turn with idx {b.idx} asked: '
         ask = f'"{text[b.idx]}".'
-        questions[f"q{b.idx}"] = _noul(
-            f"{head}{ask} Is the specification the bot asks about (ignore any example options) "
-            f"one that makes sense for {product}?",
-            f"The specification belongs to {product}.",
-            "The specification belongs to a different kind of product.",
-        )
+        if b.spec_name:  # the attribute alone: with the whole utterance Jev judged the options too (pilot, #113)
+            spec = b.spec_name
+            questions[f"q{b.idx}"] = _noul(
+                f'A buyer wants to buy "{product}". In `call.turns`, the sales bot turn with idx {b.idx} asks the '
+                f'buyer about the specification "{spec}". Is "{spec}" a property that a product like "{product}" '
+                "can have, so the question makes sense?",
+                f'"{spec}" is a sensible property of {product}.',
+                f'"{spec}" belongs to a different kind of product, not {product}.',
+            )
+        else:
+            questions[f"q{b.idx}"] = _noul(
+                f"{head}{ask} Is the specification the bot asks about (ignore any example options) "
+                f"one that makes sense for {product}?",
+                f"The specification belongs to {product}.",
+                "The specification belongs to a different kind of product.",
+            )
         if b.options_offered:
             opts = ", ".join(b.options_offered)
             questions[f"o{b.idx}"] = _noul(
