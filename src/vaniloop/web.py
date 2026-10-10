@@ -14,12 +14,13 @@ import math
 import mimetypes
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from vaniloop import fix, gate, jev, llm, prove, rules
+from vaniloop import console, fix, gate, jev, llm, prove, rules
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +48,9 @@ DATA_FILES = (
     "jev_review",
 )
 DATA_FILE_EXT = {"causes": "json", "patches": "json"}
+RUNNER_LOCK = threading.Lock()
+MAX_BODY = 30 * 1024 * 1024
+JOB_PATH = re.compile(r"^/api/jobs/([^/]+)/(log|cancel)$")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 
 
@@ -54,6 +58,21 @@ def data_dir() -> Path:
     """The folder with the run files: VANILOOP_DATA when set, else runs/."""
     env = os.environ.get("VANILOOP_DATA")
     return Path(env) if env else ROOT / "runs"
+
+
+def read_only(d: Path) -> bool:
+    """True when the data folder is inside <repo>/.cache/ (the demo freeze): writes are refused."""
+    return Path(d).resolve().is_relative_to((ROOT / ".cache").resolve())
+
+
+def console_info(d: Path, runner) -> dict:
+    """GET /api/console: read-only flag, folder name, the busy job and the stage list."""
+    return {
+        "read_only": read_only(d),
+        "data_dir_name": Path(d).resolve().name,
+        "busy_job_id": runner.busy_job_id(),
+        "stages": console.describe(),
+    }
 
 
 def clean(value):
@@ -570,10 +589,91 @@ class Handler(BaseHTTPRequestHandler):
             ctype = MIME.get(target.suffix) or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             self._send(200, target.read_bytes(), ctype)
 
-    def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+    runner: console.JobRunner | None = None
+
+    def _runner(self) -> console.JobRunner:
+        with RUNNER_LOCK:
+            if self.runner is None:
+                type(self).runner = console.JobRunner(self.data, read_only(self.data))
+        return self.runner
+
+    def _host_ok(self) -> bool:
         hosts = self.headers.get_all("Host") or []
         if len(hosts) != 1 or not host_allowed(hosts[0]):
             self._json({"error": "forbidden host"}, 403)
+            return False
+        return True
+
+    def _origin_ok(self) -> bool:
+        """The Origin header must name this server: an allowed host with this server's port."""
+        origins = self.headers.get_all("Origin") or []
+        try:
+            u = urlsplit(origins[0]) if len(origins) == 1 else None
+            ok = (
+                bool(u)
+                and u.scheme == "http"
+                and u.hostname in ALLOWED_HOSTS
+                and u.port == self.server.server_address[1]
+            )
+        except ValueError:
+            ok = False
+        return ok
+
+    def _read_json(self):
+        """For POST and PUT: run the security checks, then return the parsed JSON object, or None after an error
+        reply. Order: host, origin, read-only folder, content type, body size, JSON shape."""
+        self.close_connection = True  # an early refusal leaves the body unread, so do not reuse the socket
+        if not self._host_ok():
+            return None
+        if not self._origin_ok():
+            self._json({"error": "forbidden origin"}, 403)
+            return None
+        if read_only(self.data):
+            self._json({"error": "read-only data folder"}, 403)
+            return None
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+            self._json({"error": "content type must be application/json"}, 415)
+            return None
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            length = -1
+        if length < 0:
+            self._json({"error": "bad content length"}, 400)
+            return None
+        if length > MAX_BODY:
+            self._json({"error": "body too large"}, 413)
+            return None
+        try:
+            body = json.loads(self.rfile.read(length) or b"null")
+        except ValueError:
+            self._json({"error": "bad json"}, 400)
+            return None
+        if not isinstance(body, dict):
+            self._json({"error": "body must be a JSON object"}, 400)
+            return None
+        return body
+
+    def do_POST(self) -> None:  # noqa: N802
+        body = self._read_json()
+        if body is None:
+            return
+        path = unquote(urlsplit(self.path).path)
+        try:
+            if path == "/api/jobs":
+                d = self.data
+                spec, args = console.validate(d, body.get("stage"), body.get("args"), body.get("confirm"))
+                self._json({"job": self._runner().start(spec["id"], args)}, 202)
+            elif (m := JOB_PATH.match(path)) and m.group(2) == "cancel":
+                job = self._runner().cancel(m.group(1))
+                self._json({"job": job} if job else {"error": "unknown job"}, 200 if job else 404)
+            else:
+                self._json({"error": "not found"}, 404)
+        except console.ConsoleError as e:
+            self._json(e.payload, e.status)
+
+    def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
+        if not self._host_ok():
             return
         parts = urlsplit(self.path)
         path = unquote(parts.path)
@@ -608,6 +708,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "unknown stage"}, 404)
             else:
                 self._json(result)
+        elif path == "/api/console":
+            self._json(console_info(d, self._runner()))
+        elif path == "/api/jobs":
+            self._json({"jobs": self._runner().list()})
+        elif (m := JOB_PATH.match(path)) and m.group(2) == "log":
+            try:
+                start = int(parse_qs(parts.query).get("from", ["0"])[0])
+            except ValueError:
+                start = 0
+            out = self._runner().log(m.group(1), start)
+            self._json(out if out else {"error": "unknown job"}, 200 if out else 404)
         elif path == "/dash":
             self._static("dash.html")
         else:
@@ -616,7 +727,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def make_server(port: int = DEFAULT_PORT, data: Path | str | None = None) -> ThreadingHTTPServer:
     """A server bound to 127.0.0.1 only. Port 0 picks a free port."""
-    handler = type("BoundHandler", (Handler,), {"data": Path(data) if data else data_dir()})
+    folder = Path(data) if data else data_dir()
+    runner = console.JobRunner(folder, read_only(folder))
+    handler = type("BoundHandler", (Handler,), {"data": folder, "runner": runner})
     return ThreadingHTTPServer((HOST, port), handler)
 
 
