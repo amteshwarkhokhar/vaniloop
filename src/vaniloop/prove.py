@@ -293,8 +293,9 @@ def root_sets(cause_id: str, causes_path: Path) -> tuple[set[str] | None, set[st
                 tickets |= set(c.get("fatal_calls") or []) | set(c.get("nonfatal_calls") or [])
         except ValueError:
             continue
-    mine_roots = set(mine.get("fatal_calls") or []) | set(mine.get("nonfatal_calls") or [])
-    return (mine_roots or None), tickets  # a row with no call lists is an old file: no root rule
+    if "fatal_calls" not in mine and "nonfatal_calls" not in mine:
+        return None, tickets  # an old file with no call lists: no root rule. An empty list is not that: no targets
+    return set(mine.get("fatal_calls") or []) | set(mine.get("nonfatal_calls") or []), tickets
 
 
 def call_values(ledger: Ledger) -> dict:
@@ -639,6 +640,9 @@ def run_prove(
     gates_path = Path(gates_path)
     gates_path.parent.mkdir(parents=True, exist_ok=True)
     row = result.model_dump(mode="json", exclude_none=True)
+    patched = json.loads(Path(patches_path).read_text(encoding="utf-8")).get("patches", [])
+    patch = PromptPatch.model_validate(next(x for x in reversed(patched) if x.get("cause_id") == cause_id))
+    row["patch_fp"], row["base_fp"] = tracker.patch_fingerprint(patch), tracker.fingerprint(old)  # ship checks both
     counts = {r: len(ids) for r, ids in dropped.items() if ids}
     if counts:  # candidates each target rule dropped (first pass); no key when nothing was dropped
         row["dropped"] = counts

@@ -1,6 +1,8 @@
 """Prompt lineage (#130): ship, versioned prompts, the overlap guard and root-only targets. Synthetic data only."""
 
 import json
+import threading
+import time
 
 import pytest
 from test_fix import PROMPT, cause, ev_audits, stub, write_run
@@ -17,10 +19,19 @@ def patch_row(cid, line, attempt=1, base=None):
             "base_version": base}  # fmt: skip
 
 
+def signed(g, patches, base_text=PROMPT):
+    """The gate row as prove writes it: with the fingerprints of the exact patch and of the replayed prompt text."""
+    mine = [p for p in patches if p["cause_id"] == g["cause_id"]]
+    if g.get("unsigned") or not mine:
+        return {k: v for k, v in g.items() if k != "unsigned"}
+    return {**g, "patch_fp": tracker.fingerprint(mine[-1]["old_text"], mine[-1]["new_text"]),
+            "base_fp": tracker.fingerprint(base_text)}  # fmt: skip
+
+
 def world(tmp_path, patches, gates):
     """A runs folder with patches.json, gates.jsonl and the base prompt file; returns (runs, prompt path)."""
     (tmp_path / "patches.json").write_text(json.dumps({"patches": patches}))
-    (tmp_path / "gates.jsonl").write_text("".join(json.dumps(g) + "\n" for g in gates))
+    (tmp_path / "gates.jsonl").write_text("".join(json.dumps(signed(g, patches)) + "\n" for g in gates))
     pf = tmp_path / "prompt.md"
     pf.write_text(PROMPT)
     return tmp_path, pf
@@ -43,7 +54,7 @@ def test_ship_needs_a_ship_gate_row_of_the_current_attempt(tmp_path, row, attemp
     runs, pf = world(tmp_path, [patch_row("cause_a", 10, attempt=attempt)], [row])
     with pytest.raises(SystemExit):
         tracker.ship("cause_a", runs, pf)
-    assert not (runs / "prompts").exists()
+    assert not list((runs / "prompts").glob("v*"))  # the lock file may exist, no version does
 
 
 def test_ship_writes_a_version_and_the_next_patch_is_gated_on_top_of_it(tmp_path):
@@ -57,7 +68,7 @@ def test_ship_writes_a_version_and_the_next_patch_is_gated_on_top_of_it(tmp_path
     old, new = prove.build_prompts("cause_b", pf, runs / "patches.json")
     assert "FIXED-cause_a" in old and "FIXED-cause_b" in new
     assert tracker.state("cause_a", runs) == "shipped"
-    assert [e["kind"] for e in tracker.events(runs, "cause_a")] == ["approved", "shipped"]
+    assert [e["kind"] for e in tracker.events(runs, "cause_a")] == ["gated", "approved", "shipped"]
     assert tracker.board(runs)["current_prompt_version"] == "v1"
 
 
@@ -82,7 +93,7 @@ def test_fix_refuses_a_patch_that_overlaps_a_shipped_range_and_an_in_flight_patc
     runs = op.parent
     runs.mkdir(parents=True, exist_ok=True)
     op.write_text(json.dumps({"patches": [patch_row("cause_a", 10)]}))
-    (runs / "gates.jsonl").write_text(json.dumps(gate("cause_a")) + "\n")
+    (runs / "gates.jsonl").write_text(json.dumps(signed(gate("cause_a"), [patch_row("cause_a", 10)])) + "\n")
     tracker.ship("cause_a", runs, pp)  # v1: line 10 changed
     inflight = patch_row("cause_z", 5, base="v1")
     op.write_text(json.dumps({"patches": [patch_row("cause_a", 10), inflight]}))
@@ -143,6 +154,7 @@ def test_drop_counts_reach_the_gate_row(tmp_path):
     out, paths, _ = run(tmp_path, n=12, guards=2)
     row = json.loads(paths["gates_path"].read_text().splitlines()[-1])
     assert row["dropped"] == {"symptom of another root": 1}
+    assert len(row["patch_fp"]) == len(row["base_fp"]) == 64  # ship binds the row to the exact patch and prompt
     gated = [e for e in tracker.events(paths["gates_path"].parent, CAUSE) if e["kind"] == "gated"]
     assert gated[0]["detail"]["decision"] == out.result.decision
 
@@ -157,3 +169,91 @@ def test_ship_command_uses_the_runs_folder(tmp_path):
     runs, pf = world(tmp_path, [patch_row("cause_a", 10)], [gate("cause_a")])
     pipeline.main(["--runs", str(runs), "ship", "--cause", "cause_a", "--prompt", str(pf)])
     assert (runs / "prompts" / "v1.md").exists()
+
+
+def test_concurrent_ships_never_share_a_version_name(tmp_path, monkeypatch):
+    """Two ships at once: one makes v1 and the other is refused (its base is now stale); v1 is written once.
+
+    Without the ship lock both read "no versions", both wrote v1, and one patch vanished from the live prompt.
+    """
+    runs, pf = world(tmp_path, [patch_row("cause_a", 10), patch_row("cause_b", 20)], [gate("cause_a"), gate("cause_b")])
+    real = tracker._atomic
+    monkeypatch.setattr(tracker, "_atomic", lambda path, text: (time.sleep(0.2), real(path, text))[1])  # widen the race
+    results = []
+
+    def go(cid):
+        try:
+            results.append(tracker.ship(cid, runs, pf))
+        except SystemExit as e:
+            results.append(str(e))
+
+    threads = [threading.Thread(target=go, args=(c,)) for c in ("cause_a", "cause_b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(r for r in results if r.startswith("v")) == ["v1"] and len(results) == 2
+    assert [v["version"] for v in json.loads((runs / "prompts" / "versions.json").read_text())["versions"]] == ["v1"]
+
+
+@pytest.mark.parametrize("how", ["unsigned", "patch edited", "prompt edited"])
+def test_ship_binds_the_gate_row_to_the_exact_patch_and_prompt(tmp_path, how):
+    """A gate row without fingerprints, or for another patch or another base text, cannot ship.
+
+    The gate proved one edit on one prompt. A patch rewritten or a prompt file changed after the gate is unproven.
+    """
+    patch = patch_row("cause_a", 10)
+    runs, pf = world(tmp_path, [patch], [{**gate("cause_a"), "unsigned": how == "unsigned"}])
+    if how == "patch edited":
+        (runs / "patches.json").write_text(json.dumps({"patches": [{**patch, "new_text": "line 10: other"}]}))
+    if how == "prompt edited":
+        pf.write_text(PROMPT.replace("rule text 1:", "rule text one:").replace("line 1:", "line 1 edited:"))
+    with pytest.raises(SystemExit, match="does not match"):
+        tracker.ship("cause_a", runs, pf)
+    assert not list((runs / "prompts").glob("v*"))
+
+
+def test_trailing_newlines_do_not_inflate_the_shipped_range(tmp_path):
+    """old "line\n" -> new "line\n" is one changed line: the recorded range is (10, 10) with new_lines 1.
+
+    A count of the newline as a line shifted every later range by one and made overlap checks wrong.
+    """
+    patch = {**patch_row("cause_a", 10), "old_text": "line 10: rule text 10\n", "new_text": "line 10: better\n"}
+    runs, pf = world(tmp_path, [patch], [gate("cause_a")])
+    tracker.ship("cause_a", runs, pf)
+    assert tracker.shipped_ranges(runs) == [(10, 10)]
+    assert json.loads((runs / "prompts" / "versions.json").read_text())["versions"][0]["patch"]["new_lines"] == 1
+
+
+def test_a_malformed_versions_manifest_fails_closed(tmp_path):
+    """A present but invalid versions.json stops fix, refix and prove with SystemExit; a missing one means "base".
+
+    Falling back to the clean base would test and ship patches against a prompt that is not the live one.
+    """
+    runs, pf = world(tmp_path, [patch_row("cause_a", 10)], [])
+    assert tracker.current_prompt(pf, runs)[1] == "base"
+    (runs / "prompts").mkdir()
+    for bad in ("{not json", '{"versions": "x"}', '{"versions": [{"version": "v2", "causes": []}]}'):
+        (runs / "prompts" / "versions.json").write_text(bad)
+        with pytest.raises(SystemExit, match="malformed"):
+            tracker.current_prompt(pf, runs)
+    (runs / "prompts" / "versions.json").write_text('{"versions": [{"version": "v1", "causes": []}]}')
+    with pytest.raises(SystemExit, match="missing"):  # the manifest names v1 but v1.md is gone
+        tracker.current_prompt(pf, runs)
+
+
+def test_an_explicit_empty_root_list_means_no_targets_not_no_filter(tmp_path):
+    """A cause whose causes.json row has fatal_calls [] and nonfatal_calls [] has no roots, so no calls can target it.
+
+    Reading [] as "no list" turned root filtering off and let symptom calls become targets.
+    """
+    row = {"cause_id": CAUSE, "name": "n", "description": "d", "type": "prompt", "parameter": "looping",
+           "status": "ranked", "fatal_calls": [], "nonfatal_calls": []}  # fmt: skip
+    (tmp_path / "causes.json").write_text(json.dumps({"causes": [row]}))
+    assert prove.root_sets(CAUSE, tmp_path / "causes.json")[0] == set()
+    old = {k: v for k, v in row.items() if not k.endswith("_calls")}
+    (tmp_path / "causes.json").write_text(json.dumps({"causes": [old]}))
+    assert prove.root_sets(CAUSE, tmp_path / "causes.json")[0] is None  # an old file: no call lists at all
+    calls, ledgers, audits = synthetic()
+    items, _ = prove.select_targets(calls, ledgers, audits, "looping", 5, roots=set())
+    assert items == []
