@@ -36,11 +36,13 @@ def _num(name: str, v) -> float:
 
 def resolve(thresholds: dict | None) -> dict[str, float]:
     """Thresholds in the POST /api/tune shape -> the jev.thresholds() shape. Missing keys keep the current value."""
-    th, t = jev.thresholds(), thresholds or {}
-    if not isinstance(t, dict) or not set(t) <= {*_PAIRS, "name_check_drop_at", "frustrated_p"}:
-        raise ValueError("thresholds: unknown key")
+    th, t = jev.thresholds(), {} if thresholds is None else thresholds
+    if not isinstance(t, dict):
+        raise ValueError("thresholds: must be an object")
+    if unknown := sorted(set(t) - {*_PAIRS, "name_check_drop_at", "frustrated_p"}, key=str):
+        raise ValueError(f"thresholds: unknown key {unknown[0]}")
     for key, (true_name, false_name) in _PAIRS.items():
-        pair = t.get(key) or {}
+        pair = t.get(key, {})
         if not isinstance(pair, dict) or not set(pair) <= {"true_at", "false_at"}:
             raise ValueError(f"{key}: expected true_at and false_at")
         if "true_at" in pair:

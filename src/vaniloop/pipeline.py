@@ -214,9 +214,16 @@ def run_judge(
                         errors_path, [{"call_id": futs[fut]["call_id"], "error": f"jev {type(e).__name__}: {e}"}]
                     )
                 continue
-            with lock:  # one step: the ledger row and the raw row of a call go together
-                append_jsonl(out_path, [led])
-                append_jsonl(raw_path, [raw_row])
+            try:
+                with lock:  # raw row first: no ledger row without one, and a call without a ledger row is redone
+                    append_jsonl(raw_path, [raw_row])
+                    append_jsonl(out_path, [led])
+            except Exception as e:  # a failed write is a call error; the run goes on
+                errors += 1
+                with lock:
+                    append_jsonl(
+                        errors_path, [{"call_id": futs[fut]["call_id"], "error": f"jev write {type(e).__name__}: {e}"}]
+                    )
     return {"judged": len(todo) - errors, "skipped": len(done), "errors": errors + invalid}
 
 
@@ -579,7 +586,11 @@ def main(argv: list[str] | None = None) -> None:
         print(f"judged={s['judged']} skipped={s['skipped']} errors={s['errors']}")
     elif args.cmd == "tune":
         try:
-            print(json.dumps(tune.score(Path(args.runs) if args.runs else RUNS, json.loads(args.thresholds)), ensure_ascii=False))
+            print(
+                json.dumps(
+                    tune.score(Path(args.runs) if args.runs else RUNS, json.loads(args.thresholds)), ensure_ascii=False
+                )
+            )
         except (tune.NoRaw, ValueError) as e:
             raise SystemExit(f"tune: {e}") from None
     elif args.cmd == "judge-agreement":

@@ -134,6 +134,9 @@ def test_missing_raw_file_raises_noraw(tmp_path):
 @pytest.mark.parametrize(
     "bad",
     [{"question_fits": {"true_at": 0.1}}, {"question_fits": {"true_at": 1.5}}, {"frustrated_p": "high"},
+     {"question_fits": False}, {"option_fits": []}, {"product_match": "x"},
+     {"question_fits": {"true_at": float("nan")}},
+     {"frustrated_p": float("inf")}, {"name_check_drop_at": True}, [], "x", 3,
      {"nope": 1}, {"product_match": {"true_at": True}}],
 )  # fmt: skip
 def test_bad_thresholds_raise_value_error(tmp_path, bad):
@@ -189,3 +192,15 @@ def test_pipeline_tune_prints_the_score_as_json(tmp_path, monkeypatch, capsys):
     (tmp_path / "jev_raw.jsonl").unlink()
     with pytest.raises(SystemExit, match="run judge"):
         pipeline.main(["tune"])
+
+
+def test_malformed_threshold_error_names_the_field(tmp_path):
+    """Protects the API message: a malformed section raises ValueError that names the field.
+
+    If it failed, {"question_fits": false} would pass as "keep the current value" and the console would not tell.
+    """
+    _write(tmp_path, [_raw(DEV)], _review(DEV))
+    with pytest.raises(ValueError, match="question_fits"):
+        tune.score(tmp_path, {"question_fits": False})
+    with pytest.raises(ValueError, match="thresholds"):
+        tune.score(tmp_path, [])

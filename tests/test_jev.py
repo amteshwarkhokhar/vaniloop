@@ -701,3 +701,30 @@ def test_judge_backfills_a_missing_raw_row_without_a_request(transport, tmp_path
     assert pipeline.run_judge(**kw) == {"judged": 1, "skipped": 0, "errors": 0}
     assert len(transport["bodies"]) == sent and (tmp_path / "jev_raw.jsonl").exists()
     assert pipeline.run_judge(**kw)["skipped"] == 1
+
+
+def test_judge_raw_write_failure_leaves_no_ledger_row_and_the_next_run_repairs_it(transport, tmp_path, monkeypatch):
+    """Protects the pair of files: the raw row is written first, so a failed raw write leaves no ledger row.
+
+    If it failed, a call would have a ledger row but no raw row, and the run would abort or skip it as done.
+    """
+    calls, ledgers, out = tmp_path / "calls.jsonl", tmp_path / "ledgers.jsonl", tmp_path / "ledgers_jev.jsonl"
+    calls.write_text(json.dumps(_call().model_dump(mode="json")) + "\n")
+    ledgers.write_text(json.dumps(_ledger().model_dump(mode="json")) + "\n")
+    errors = tmp_path / "e.jsonl"
+    kw = dict(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=errors, workers=1)
+    real = pipeline.append_jsonl
+
+    def flaky(path, rows):
+        if str(path).endswith("jev_raw.jsonl"):
+            raise OSError("disk full")
+        return real(path, rows)
+
+    monkeypatch.setattr(pipeline, "append_jsonl", flaky)
+    assert pipeline.run_judge(**kw) == {"judged": 0, "skipped": 0, "errors": 1}
+    assert not out.exists() or out.read_text() == ""
+    (err,) = [json.loads(ln) for ln in errors.read_text().splitlines()]
+    assert err["call_id"] == "c1" and "OSError" in err["error"]
+    monkeypatch.setattr(pipeline, "append_jsonl", real)
+    assert pipeline.run_judge(**kw) == {"judged": 1, "skipped": 0, "errors": 0}
+    assert len(out.read_text().splitlines()) == 1 and (tmp_path / "jev_raw.jsonl").exists()
