@@ -16,7 +16,7 @@ console shows the whole loop.
 
 | Stage | What it does | Module |
 |---|---|---|
-| Ingest | mp3 → Gemini transcript with per-turn tone, overlap and unclear-audio flags → `CallRecord` | `transcribe.py`, `ingest.py` |
+| Ingest | mp3 → LLM transcript with per-turn tone, overlap and unclear-audio flags → `CallRecord` | `transcribe.py`, `ingest.py` |
 | Audit | An LLM labels each turn (slot, value, declined, misheard). Python rules grade 9 rubric parameters. Jev (TypeSafe) makes the four judgement labels. | `ledger.py`, `jev.py`, `rules.py`, `grading.py` |
 | Issue | Root-vs-symptom per call, audio-born faults split off as `channel` causes, patterns ranked by frequency × severity with Wilson bounds | `issue.py`, `categorize.py`, `rootcause.py` |
 | Fix | A prompt patch (diff against the real VANI prompt) for prompt-owned causes, an evidence ticket for tool- and data-owned causes, watch for the rest | `fix.py` |
@@ -56,7 +56,7 @@ cp .env.example .env                                  # fill LLM_* and TYPESAFE_
 bin/check                                             # tests + data-leak scan
 
 uv run python -m vaniloop.ingest                      # transcripts → runs/calls.jsonl
-uv run python -m vaniloop.pipeline audit --limit 20   # Gemini labels + rule grades
+uv run python -m vaniloop.pipeline audit --limit 20   # LLM labels + rule grades
 uv run python -m vaniloop.pipeline judge              # Jev judgement labels
 uv run python -m vaniloop.pipeline regrade --ledgers runs/ledgers_jev.jsonl --audits runs/audits_jev.jsonl
 uv run python -m vaniloop.pipeline issues             # ranked root causes → runs/causes.json
@@ -76,7 +76,7 @@ Every stage writes one file in `runs/` (gitignored, because it holds call data):
 | File | Contents |
 |---|---|
 | `calls.jsonl` | one `CallRecord` per call: turns, timestamps, audio flags |
-| `ledgers.jsonl`, `ledgers_jev.jsonl` | per-turn labels (Gemini structure, Jev judgements) |
+| `ledgers.jsonl`, `ledgers_jev.jsonl` | per-turn labels (LLM structure, Jev judgements) |
 | `audits.jsonl` | per-call verdict, 9 findings with reason, evidence turn and basis, risk flags |
 | `causes.json` | ranked causes with type, owner, member calls, symptoms, priority |
 | `patches.json` | prompt patches with anchor lines, rationale, attempt history |
