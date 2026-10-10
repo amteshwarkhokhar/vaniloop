@@ -406,3 +406,20 @@ def test_safe_model_hides_paths_and_credentials(name):
 def test_safe_model_keeps_real_model_ids(name):
     """Protects the config view: ordinary model ids, including two-level provider paths, must still show."""
     assert web._safe_model(name) == name
+
+
+def test_dash_page_links_its_assets_and_serves_them(server):
+    """/dash must link dash.css and dash.js, and both must be served; a missing asset would leave the page blank."""
+    _, body = get(server, "/dash")
+    for asset in (b"/static/dash.css", b"/static/dash.js"):
+        assert asset in body
+        status, content = get(server, asset.decode())
+        assert status == 200 and content
+
+
+def test_hostile_review_text_reaches_the_page_as_data(server):
+    """The fixture's <img onerror> string must come through the API as plain text, so the page's esc() is what keeps it inert."""
+    _, body = get_json(server, "/api/stage/review")
+    assert any("<img src=x onerror=alert(1)>" in it["reason"] for it in body["items"])
+    _, js = get(server, "/static/dash.js")
+    assert b"innerHTML = " in js and b"const esc = " in js
