@@ -418,7 +418,7 @@ def test_dash_page_links_its_assets_and_serves_them(server):
 
 
 def test_hostile_review_text_reaches_the_page_as_data(server):
-    """The fixture's <img onerror> string must come through the API as plain text, so the page's esc() is what keeps it inert."""
+    """The fixture's <img onerror> string must reach the page as plain text, so esc() keeps it inert."""
     _, body = get_json(server, "/api/stage/review")
     assert any("<img src=x onerror=alert(1)>" in it["reason"] for it in body["items"])
     _, js = get(server, "/static/dash.js")
