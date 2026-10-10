@@ -338,11 +338,27 @@ def test_call_detail_returns_call_and_audit(server):
     """The call route returns the raw call record and its audit, with onset turns the tape draws its notches from."""
     status, body = get_json(server, "/api/call/web_04")
     assert status == 200
-    assert set(body) == {"call", "audit"}
+    assert set(body) == {"call", "audit", "ledger", "ledger_source", "causes", "patches", "gates"}
     assert body["call"]["call_id"] == body["audit"]["call_id"] == "web_04"
     assert body["call"]["silences"], "web_04 carries a silence longer than 5 s"
     onsets = [f["onset_turn"] for f in body["audit"]["findings"] if f["onset_turn"] is not None]
     assert onsets == [6, 8]
+
+
+def test_call_detail_adds_each_step_output_for_the_call(server):
+    """The call route adds the Jev ledger, the causes that hold the call, their patches and the call's gate replays.
+
+    The call page shows each step's output for one call from these. Without them the page could show the transcript
+    but not why the call is in a cause, what patch it got or how its replays went."""
+    status, body = get_json(server, "/api/call/web_04")
+    assert status == 200
+    assert body["ledger_source"] == "jev" and body["ledger"]["bot_turns"][1]["question_fits_product"] is False
+    assert [(c["cause_id"], c["role"]) for c in body["causes"]] == [("C-01", "fatal"), ("C-03", "nonfatal")]
+    assert body["patches"] == [], "no patch exists for C-01 or C-03 in the fixture"
+    assert [(g["cause_id"], g["attempt"], g["old_fails"], g["new_fails"]) for g in body["gates"]] == [
+        ("C-01", 1, 3, 3), ("C-01", 2, 3, 1), ("C-03", 1, 1, 0)]
+    status, other = get_json(server, "/api/call/web_08")
+    assert {p["cause_id"] for p in other["patches"]} == {"C-02"} and other["ledger"] is None
 
 
 def test_unknown_call_returns_404_json(server):

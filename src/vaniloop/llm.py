@@ -235,6 +235,25 @@ def _header_cost(headers) -> float | None:
     return value
 
 
+# OpenRouter sends no LiteLLM cost header. Its list price per token in USD (openrouter.ai/api/v1/models, 10 Oct 2026).
+OPENROUTER_PRICES = {"google/gemini-3-flash-preview": (0.0000005, 0.000003)}
+
+
+def _token_cost(model: str, resp) -> float | None:
+    """The cost of an OpenRouter call: usage.cost when it is sent, else tokens at the list price. Null otherwise."""
+    if "openrouter.ai" not in (os.environ.get("LLM_BASE_URL") or ""):
+        return None
+    usage = getattr(resp, "usage", None)
+    sent = getattr(usage, "cost", None)
+    if isinstance(sent, (int, float)) and not isinstance(sent, bool) and math.isfinite(sent) and sent >= 0:
+        return float(sent)
+    price = OPENROUTER_PRICES.get(model)
+    if price is None or usage is None:
+        return None
+    tokens_in, tokens_out = getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0
+    return tokens_in * price[0] + tokens_out * price[1]
+
+
 def _exception_headers(exc) -> dict:
     """Best-effort headers from an SDK exception's response (for example APIStatusError.response.headers)."""
     response = getattr(exc, "response", None)
@@ -320,7 +339,9 @@ def metered_create(client, request: dict, cache_tag: str):
             headers = _exception_headers(exc)
         raise
     finally:
-        _settle(model, cache_tag, resp, _header_cost(headers), status, error, reserve_id=reserve_id)
+        cost = _header_cost(headers)
+        cost = _token_cost(model, resp) if cost is None else cost
+        _settle(model, cache_tag, resp, cost, status, error, reserve_id=reserve_id)
 
 
 def _make_client(base_url: str, api_key: str, max_retries: int | None):
