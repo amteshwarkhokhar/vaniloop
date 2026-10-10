@@ -27,6 +27,7 @@ from .golden import (
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
+from .jev import fingerprint, judge_agreement, judge_ledger
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord, Ledger
@@ -37,6 +38,7 @@ from .rules import audit_call
 RUNS = AUDITS_PATH.parent
 LEDGERS_PATH = RUNS / "ledgers.jsonl"
 ERRORS_PATH = RUNS / "errors.jsonl"
+LEDGERS_JEV_PATH = RUNS / "ledgers_jev.jsonl"
 GRADE_SAMPLE_PATH = RUNS / "grade_sample.json"
 GOLDEN_INPUTS = {
     "hand_grades.jsonl": RUNS / "hand_grades.jsonl",
@@ -115,6 +117,68 @@ def _run_audit(calls_path, ledgers_path, audits_path, errors_path, workers, limi
                 append_jsonl(audits_path, [aud.model_dump(mode="json")])  # audit last: it marks the call done
             verdicts[aud.verdict] += 1
     return {"processed": len(todo) - errors, "skipped": skipped, "errors": errors, "verdicts": dict(verdicts)}
+
+
+def run_judge(
+    calls_path=CALLS_PATH,
+    ledgers_path=LEDGERS_PATH,
+    out_path=LEDGERS_JEV_PATH,
+    errors_path=ERRORS_PATH,
+    workers: int = 4,
+) -> dict:
+    """Replace the judgement labels of every saved ledger with Jev's. Writes ledgers_jev.jsonl; resumes by call id.
+
+    One Jev request per call. A failed call goes to the errors file and the run goes on. A missing
+    TYPESAFE_API_KEY stops the run.
+    """
+    calls = {r["call_id"]: r for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)}
+    ledgers = dedupe_by_call_id(read_jsonl(ledgers_path), last_wins=True)
+    stored = {r["call_id"]: r.get("jev_fp") for r in read_jsonl(out_path) if "call_id" in r}  # last row wins
+    refresh = os.environ.get("VANILOOP_CACHE") == "refresh"
+
+    def fp(r: dict) -> str:
+        return fingerprint(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
+
+    lock = threading.Lock()
+    errors = invalid = 0
+    done: set[str] = set()
+    todo = []
+    for r in (r for r in ledgers if r.get("call_id") in calls):
+        try:  # a malformed row goes to the errors file; it must not stop the run
+            same = not refresh and stored.get(r["call_id"]) == fp(r)
+        except Exception as e:
+            invalid += 1
+            append_jsonl(errors_path, [{"call_id": r["call_id"], "error": f"jev invalid row {type(e).__name__}"}])
+            continue
+        (done.add(r["call_id"]) if same else todo.append(r))
+
+    def work(r: dict) -> dict:
+        led = judge_ledger(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
+        return {**led.model_dump(mode="json"), "jev_fp": fp(r)}
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futs = {ex.submit(work, r): r for r in todo}
+        for fut in as_completed(futs):
+            try:
+                led = fut.result()
+            except Exception as e:  # one bad call must not stop the run
+                errors += 1
+                with lock:
+                    append_jsonl(
+                        errors_path, [{"call_id": futs[fut]["call_id"], "error": f"jev {type(e).__name__}: {e}"}]
+                    )
+                continue
+            with lock:
+                append_jsonl(out_path, [led])
+    return {"judged": len(todo) - errors, "skipped": len(done), "errors": errors + invalid}
+
+
+def describe_agreement(rows: list[dict]) -> str:
+    lines = ["field                  n  agree  kappa  none(gemini/jev)"]
+    for r in rows:
+        k = "n/a" if r["kappa"] is None else f"{r['kappa']:.2f}"
+        lines.append(f"{r['field']:20} {r['n']:4} {r['agree']:6} {k:>6}  {r['none_a']}/{r['none_b']}")
+    return "\n".join(lines)
 
 
 def run_grade_sample(
@@ -216,7 +280,14 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--workers", type=int, default=4)
     a.add_argument("--limit", type=int, default=None)
     sub.add_parser("issues")
-    sub.add_parser("regrade")
+    rg = sub.add_parser("regrade")
+    rg.add_argument("--ledgers", default=str(LEDGERS_PATH), help="ledgers file to grade, e.g. runs/ledgers_jev.jsonl")
+    rg.add_argument("--audits", default=str(AUDITS_PATH), help="audits file to rewrite")
+    jd = sub.add_parser("judge", help="Jev makes the judgement labels: ledgers.jsonl -> ledgers_jev.jsonl")
+    jd.add_argument("--workers", type=int, default=4)
+    ja = sub.add_parser("judge-agreement", help="Gemini vs Jev agreement and kappa per field")
+    ja.add_argument("--a", default=str(LEDGERS_PATH))
+    ja.add_argument("--b", default=str(LEDGERS_JEV_PATH))
     sub.add_parser("categorize")
     f = sub.add_parser("fix")
     f.add_argument("--prompt", default=None, help="the VANI prompt file; not needed with --dry-run")
@@ -265,8 +336,13 @@ def main(argv: list[str] | None = None) -> None:
         s = run_audit(workers=args.workers, limit=args.limit)
         print(f"processed={s['processed']} skipped={s['skipped']} errors={s['errors']} verdicts={s['verdicts']}")
     elif args.cmd == "regrade":
-        s = run_regrade()
+        s = run_regrade(ledgers_path=args.ledgers, audits_path=args.audits)
         print(f"regraded={s['regraded']} verdicts={s['verdicts']}")
+    elif args.cmd == "judge":
+        s = run_judge(workers=args.workers)
+        print(f"judged={s['judged']} skipped={s['skipped']} errors={s['errors']}")
+    elif args.cmd == "judge-agreement":
+        print(describe_agreement(judge_agreement(read_jsonl(args.a), read_jsonl(args.b))))
     elif args.cmd == "categorize":
         s = run_categorize(ledgers_path=LEDGERS_PATH)
         print(

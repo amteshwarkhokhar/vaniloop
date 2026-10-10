@@ -933,6 +933,14 @@ def rule_product_accuracy(call: CallRecord, led: Ledger) -> Finding:
                 onset_turn=_handoff_turn(led),
                 reason="handoff call with no evidence the bot confirmed a product",
             )
+        if led.product_match is None and kept:  # a judge that was unsure must not give Pass
+            return Finding(
+                parameter="product_change",
+                status="Unknown",
+                basis="spoken_proxy",
+                evidence=ev,
+                reason="product match not judged",
+            )
         return Finding(
             parameter="product_change",
             status="Pass",

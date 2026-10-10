@@ -30,8 +30,9 @@ Data contracts for every stage: `src/vaniloop/models.py`. Change them only in an
    docs, issues or PR text. Use placeholders such as `BuyerA`. `bin/check` scans for phone numbers.
 3. **Which models may read call data:** Claude, OpenAI/Codex and Google Gemini only.
    GLM, DeepSeek and other providers work on code only, in a checkout with no data.
-   Sarvam and TypeSafe get synthetic data only until the owner approves.
-4. **Secrets live in `.env`** (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`). Never print,
+   TypeSafe (Jev) may read call data, owner-approved on 10 Oct 2026. Sarvam gets synthetic data only
+   until the owner approves.
+4. **Secrets live in `.env`** (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `TYPESAFE_API_KEY`). Never print,
    log or commit a value.
 
 ## Audit design rules (keep these when you change `rules.py`)
@@ -74,6 +75,10 @@ uv run pytest -q                                      # tests only
 uv run python -m vaniloop.ingest                      # transcripts → runs/calls.jsonl
 uv run python -m vaniloop.pipeline audit --limit 20   # audit (needs LLM key in .env)
 uv run python -m vaniloop.pipeline issues             # runs/audits.jsonl → runs/causes.json
+uv run python -m vaniloop.pipeline judge              # Jev labels: ledgers.jsonl → ledgers_jev.jsonl (needs TYPESAFE_API_KEY)
+uv run python -m vaniloop.pipeline judge-agreement    # Gemini vs Jev agreement and kappa per field
+uv run python -m vaniloop.pipeline regrade --ledgers runs/ledgers_jev.jsonl --audits runs/audits_jev.jsonl
+VANILOOP_JUDGE=jev uv run python -m vaniloop.pipeline prove ...   # gate replays graded with Jev labels
 uv run streamlit run src/vaniloop/dashboard.py        # dashboard (VANILOOP_DATA=dir to override)
 ```
 

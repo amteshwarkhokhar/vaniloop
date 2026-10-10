@@ -317,8 +317,16 @@ def real_replay_fn(max_turns: int) -> ReplayFn:
 
 
 def real_audit_fn(call: CallRecord) -> AuditRecord:
-    """The same two steps as pipeline.run_audit: LLM ledger, then the Python rules."""
-    return audit_call(call, extract_ledger(call))
+    """The same two steps as pipeline.run_audit: LLM ledger, then the Python rules.
+
+    With VANILOOP_JUDGE=jev, Jev makes the judgement labels, so replays are graded by the same judge as the main grade.
+    """
+    led = extract_ledger(call)
+    if os.environ.get("VANILOOP_JUDGE") == "jev":
+        from .jev import judge_ledger
+
+        led = judge_ledger(call, led)
+    return audit_call(call, led)
 
 
 def warm_cache(plan: Plan, replay_fn: ReplayFn, audit_fn: AuditFn, workers: int) -> int:
