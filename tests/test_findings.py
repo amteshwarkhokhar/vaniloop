@@ -567,6 +567,44 @@ def test_no_audio_gives_no_dead_air_review_flag():
     assert by(a)["dead_air"].reason == "no audio to measure silence" and "dead_air_review" not in a.flags
 
 
+def test_overlapping_turns_are_not_back_to_back_and_timing_stays_trusted():
+    """An overlap (a negative gap) must not count as back to back: 20 s audio, buyer 0-12, bot 10-19.
+
+    If this failed, honest overlapping speech would look like made-up edge-to-edge timing, and dead_air would
+    flip to Unknown with a review flag on calls whose timing is fine.
+    """
+    call = _timed([("user", 0.0, 12.0), ("bot", 10.0, 19.0)], duration=20.0)
+    assert rules._timing_trusted(call)[0] is True
+    a = audit_call(call, mk_led(call))
+    assert by(a)["dead_air"].status == "Pass" and "dead_air_review" not in a.flags
+
+
+def test_turn_ending_after_the_audio_gives_unknown_and_review_flag():
+    """A turn ending at 104 s on 20 s audio is impossible: dead_air must be Unknown (unavailable) and flagged.
+
+    If this failed, a transcript whose timestamps run past the audio would Pass a gap check it cannot support.
+    """
+    call = _timed([("bot", 0.0, 4.0), ("user", 5.0, 9.0), ("bot", 100.0, 104.0)], duration=20.0)
+    a = audit_call(call, mk_led(call))
+    f = by(a)["dead_air"]
+    assert f.status == "Unknown" and f.basis == "unavailable"
+    assert "a turn ends at 104.0 s, after the 20.0 s audio" in f.reason
+    assert "dead_air_review" in a.flags
+
+
+def test_turn_ending_before_it_starts_gives_unknown_and_review_flag():
+    """A turn whose end is before its start is impossible: dead_air must be Unknown (unavailable) and flagged.
+
+    If this failed, reversed timestamps would be trusted and dead_air would Pass on timing that cannot be read.
+    """
+    call = _timed([("bot", 0.0, 4.0), ("user", 8.0, 12.0), ("bot", 18.0, 14.0)], duration=16.0)
+    a = audit_call(call, mk_led(call))
+    f = by(a)["dead_air"]
+    assert f.status == "Unknown" and f.basis == "unavailable"
+    assert "a turn ends before it starts" in f.reason
+    assert "dead_air_review" in a.flags
+
+
 # ---- F9
 class FakeClient:
     calls = 0

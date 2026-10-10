@@ -334,10 +334,18 @@ def _timing_trusted(call: CallRecord) -> tuple[bool, str]:
     """Whether the turn timestamps can show a gap: (True, "") or (False, which test failed, with the number).
 
     The transcriber's timing often does not match the audio: the last turn ends well before the audio does,
-    turns sit back to back with made-up lengths, or several turns collapse onto one time. A gap can never be
-    found on that timing, so a Pass would claim a check that was never made.
+    turns sit back to back with made-up lengths, or several turns collapse onto one time. Timing can also be
+    impossible, with a turn ending after the audio or before it starts. A gap can never be found on that timing,
+    so a Pass would claim a check that was never made.
     """
     turns = sorted(call.turns, key=lambda t: (t.start_sec, t.end_sec))
+    if any(t.end_sec < t.start_sec for t in turns):
+        return False, "a turn ends before it starts"
+    if call.duration_sec > 0:
+        late = [t for t in turns if t.end_sec > call.duration_sec + 1.0]
+        if late:
+            worst = max(late, key=lambda t: t.end_sec)
+            return False, f"a turn ends at {worst.end_sec:.1f} s, after the {call.duration_sec:.1f} s audio"
     if turns and call.duration_sec > 0:
         coverage = max(t.end_sec for t in turns) / call.duration_sec
         if coverage < TIMING_MIN_COVERAGE:
@@ -347,7 +355,7 @@ def _timing_trusted(call: CallRecord) -> tuple[bool, str]:
             )
     if len(turns) >= 2:
         pairs = len(turns) - 1
-        touching = sum(1 for a, b in zip(turns, turns[1:], strict=False) if b.start_sec - a.end_sec < 0.01)
+        touching = sum(1 for a, b in zip(turns, turns[1:], strict=False) if 0 <= b.start_sec - a.end_sec < 0.01)
         if touching / pairs > TIMING_MAX_BACK_TO_BACK:
             return (
                 False,
