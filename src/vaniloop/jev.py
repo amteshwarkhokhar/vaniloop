@@ -1,8 +1,8 @@
 """AUDIT step 1b: Jev (TypeSafe) makes the judgement labels, Gemini keeps the structure.
 
 Jev owns question_fits_product, fits_confirmed_product, product_match and frustrated. Every other ledger
-field stays as Gemini extracted it, and the Python rules do not change. One request per call, all questions
-batched. Question ids are not sent to the model, so each question states the product and quotes the turn.
+field stays as Gemini extracted it, and the Python rules do not change. One focused request per judgement (a spec
+turn, a buyer turn, the product match): the state holds only the fields that judgement needs, never the call.
 """
 
 from __future__ import annotations
@@ -15,17 +15,71 @@ from .llm import complete_jev, jev_model
 from .models import CallRecord, Ledger
 from .rules import FRUSTRATED_P
 
-JEV_VERSION = "3"  # bump whenever the questions or the thresholds change; part of the cache key
-TRUE_AT, FALSE_AT = 0.65, 0.35
+JEV_VERSION = "4"  # bump whenever the questions or the thresholds change; part of the cache key
+# Thresholds per label, tuned on the dev half of the Fable-reviewed set and checked on the held-out half (#121).
+Q_TRUE_AT, Q_FALSE_AT = 0.55, 0.20  # question_fits_product
+OPT_TRUE_AT, OPT_FALSE_AT = 0.50, 0.20  # one option of a spec turn
+N_DROP_AT = 0.35  # name check: q is dropped when n <= this
+PM_TRUE_AT, PM_FALSE_AT = 0.65, 0.35  # product match
 
 
-def to_bool(p: float) -> bool | None:
-    """>= 0.65 True, <= 0.35 False, anything between None (the rule then says Unknown)."""
-    return True if p >= TRUE_AT else False if p <= FALSE_AT else None
+def to_bool(p: float, true_at: float = PM_TRUE_AT, false_at: float = PM_FALSE_AT) -> bool | None:
+    """>= true_at True, <= false_at False, anything between None (the rule says Unknown). Default: product match."""
+    return True if p >= true_at else False if p <= false_at else None
 
 
-def _noul(instructions: str, yes: str, no: str) -> dict:
+def _noul(instructions: str, yes, no) -> dict:
     return {"type": "noul", "instructions": instructions, "criteria": {"true": yes, "false": no}}
+
+
+def _crit(description: str, *examples: str) -> dict:
+    return {"description": description, "examples": list(examples)}
+
+
+_SPEC_TRUE = _crit(
+    "A sales agent could reasonably ask a buyer of this product about it",
+    "voltage for an electric bike switch",
+    "texture (soft or hard) for copper wire",
+    "a generic buying question that fits any product: order type (monthly or sample), payment terms, usage, "
+    "any other details",
+)
+_SPEC_FALSE = _crit(
+    "It belongs to a different kind of product, or makes no sense for this one",
+    "flight time for a dome camera",
+    "fabric type for a steel pipe",
+    "what the buyer packs, asked about a machine belt",
+)
+_OPT_TRUE = _crit(
+    "A real, sensible choice of this specification for this product",
+    "soft or hard for copper wire texture",
+    "two or three lanes for a vending machine",
+)
+_OPT_FALSE = _crit(
+    "Not a sensible choice for this product, or not a kind of this specification",
+    "mild steel as the work material of a glass cutting line",
+    "HP or Dell as the brand of a car display",
+    "repairing as the type of a charger being bought",
+)
+_IRR_TRUE = _crit(
+    "The buyer shows annoyance at the bot",
+    "complains the bot keeps asking or repeating",
+    "says they already answered, or tells the bot to stop",
+    "speaks angrily, rudely or sarcastically to the bot",
+)
+_IRR_FALSE = _crit(
+    "Anything else",
+    "checking the line: 'hello?'",
+    "asking the bot to wait",
+    "answering, agreeing or repeating an answer",
+    "correcting the bot or disagreeing calmly",
+    "confusion, language trouble or an off-topic remark",
+)
+_PM_TRUE = _crit("Same product", "'pen holder' and 'doctor coat shape pen stand'")
+_PM_FALSE = _crit(
+    "Different products, even if they share a word",
+    "'chappal sheet' to buy and 'chappal sheet wastage' to sell",
+    "'Nokia 535 back door' and 'Lumia 535 back door'",
+)
 
 
 def spec_product(led: Ledger, idx: int) -> str | None:
@@ -37,125 +91,132 @@ def spec_product(led: Ledger, idx: int) -> str | None:
     return led.final_product if changed is not None and idx > changed else led.initial_product
 
 
-def build_questions(call: CallRecord, led: Ledger) -> dict[str, dict]:
-    """One yes/no question per label. Each names its turns by idx, so identical replies still differ."""
+def _requests(call: CallRecord, led: Ledger) -> list[tuple[str, int | None, dict, dict[str, dict]]]:
+    """Every Jev request of a call as (kind, idx, state, questions). One focused state per judgement, never the call.
+
+    kind is "spec" (one per spec turn with a product), "buyer" (one per buyer turn) or "pm" (one per call).
+    """
     text = {t.idx: t.text for t in call.turns}
-    questions: dict[str, dict] = {}
+    out: list[tuple[str, int | None, dict, dict[str, dict]]] = []
     for b in led.bot_turns:
         product = spec_product(led, b.idx)
         if b.slot != "spec" or not product or b.idx not in text:
             continue
-        head = f'A buyer wants the product "{product}". In `call.turns`, the sales bot turn with idx {b.idx} asked: '
-        ask = f'"{text[b.idx]}".'
-        if b.spec_name:  # the attribute alone: with the whole utterance Jev judged the options too (pilot, #113)
-            spec = b.spec_name
-            questions[f"q{b.idx}"] = _noul(
-                f'A buyer wants to buy "{product}". In `call.turns`, the sales bot turn with idx {b.idx} asks the '
-                f'buyer about the specification "{spec}". Is "{spec}" a property that a product like "{product}" '
-                "can have, so the question makes sense?",
-                f'"{spec}" is a sensible property of {product}.',
-                f'"{spec}" belongs to a different kind of product, not {product}.',
+        spec = b.spec_name or ""
+        state = {
+            "product_the_buyer_wants": product,
+            "bot_turn": text[b.idx],
+            "specification_asked": spec,
+            "options_offered": list(b.options_offered),
+        }
+        questions = {
+            "q": _noul(
+                "Could a sales agent reasonably ask a buyer of `product_the_buyer_wants` about "
+                "`specification_asked`" + ("" if spec else " (the specification asked in `bot_turn`)") + "? "
+                "Judge the specification only, not the options.",
+                _SPEC_TRUE,
+                _SPEC_FALSE,
             )
-            questions[f"n{b.idx}"] = _noul(  # spec_name is Gemini's: check it names what the turn really asks
-                f'In `call.turns`, the sales bot turn with idx {b.idx} said: "{text[b.idx]}". Leaving aside any '
-                f'example options, is this turn asking the buyer about "{spec}"?',
-                f'The turn asks about "{spec}".',
-                f'The turn asks about something other than "{spec}".',
+        }
+        if spec:  # spec_name is Gemini's: check it names what the turn really asks
+            questions["n"] = _noul(
+                "Ignoring any example options, does `bot_turn` ask the buyer about `specification_asked`?",
+                "The turn asks about this specification.",
+                "The turn asks about something else.",
             )
-        else:
-            questions[f"q{b.idx}"] = _noul(
-                f"{head}{ask} Is the specification the bot asks about (ignore any example options) "
-                f"one that makes sense for {product}?",
-                f"The specification belongs to {product}.",
-                "The specification belongs to a different kind of product.",
+        for i in range(len(b.options_offered)):
+            questions[f"opt{i}"] = _noul(
+                f"Is `options_offered[{i}]` a sensible choice of `specification_asked` for `product_the_buyer_wants`?",
+                _OPT_TRUE,
+                _OPT_FALSE,
             )
-        if b.options_offered:
-            opts = ", ".join(b.options_offered)
-            questions[f"o{b.idx}"] = _noul(
-                f"{head}{ask} It offered these options: {opts}. "
-                f"Do the question and all its options make sense for {product}?",
-                f"The question and its options all fit {product}.",
-                "The question or an option belongs to a different kind of product.",
-            )
-    confirmed, final = led.bot_confirmed.get("product"), led.final_product
-    if confirmed and final:
-        questions["pm"] = _noul(
-            f'A sales bot confirmed the product "{confirmed}". The buyer finally wants "{final}". '
-            "Is the product the bot confirmed the same product the buyer finally wants? Sharing a word is not enough.",
-            "Same product.",
-            "Different product.",
-        )
+        out.append(("spec", b.idx, state, questions))
     asked = {u.idx for u in led.user_turns}
-    last_bot = None
+    last_bot = ""
     for t in call.turns:
         if t.speaker == "bot":
-            last_bot = t
+            last_bot = t.text
         elif t.idx in asked:
-            who = f"In `call.turns`, the buyer turn with idx {t.idx} "
-            if last_bot:
-                who += f'replies to the sales bot turn with idx {last_bot.idx}. Bot: "{last_bot.text}". '
-            else:
-                who += "opens the call. "
-            questions[f"f{t.idx}"] = _noul(
-                f'{who}Buyer: "{t.text}". In this reply, is the buyer irritated or annoyed with the bot '
-                "(for example complaining that it keeps asking, telling it to stop, or speaking angrily)? "
-                'Short agreement words repeated, such as "haan haan" or "ji ji", and a plain answer are not '
-                "irritation.",
-                "The buyer is irritated or annoyed with the bot.",
-                "The buyer is calm: agreeing, answering or asking normally.",
-            )
-    return questions
+            q = _noul("In `buyer_reply`, is the buyer irritated or annoyed with the sales bot?", _IRR_TRUE, _IRR_FALSE)
+            out.append(("buyer", t.idx, {"bot_turn": last_bot, "buyer_reply": t.text}, {"f": q}))
+    confirmed, final = led.bot_confirmed.get("product"), led.final_product
+    if confirmed and final:
+        state = {"product_the_bot_confirmed": confirmed, "product_the_buyer_finally_wants": final}
+        q = _noul(
+            "Would a seller treat `product_the_bot_confirmed` and `product_the_buyer_finally_wants` as the same "
+            "product to quote for, even if one name adds details such as size, form, brand, model or concentration?",
+            _PM_TRUE,
+            _PM_FALSE,
+        )
+        out.append(("pm", None, state, {"pm": q}))
+    return out
+
+
+def build_questions(call: CallRecord, led: Ledger) -> list[tuple[dict, dict[str, dict]]]:
+    """The (state, questions) of each Jev request of the call, in call order (spec and buyer turns, then product)."""
+    return [(state, questions) for _, _, state, questions in _requests(call, led)]
+
+
+def _spec_labels(options: int, ans: dict[str, float], named: bool) -> tuple[bool | None, bool | None]:
+    """(question_fits_product, fits_confirmed_product) from the answers of one spec turn."""
+    q = None if "q" not in ans else to_bool(ans["q"], Q_TRUE_AT, Q_FALSE_AT)
+    if named and ans.get("n", 0.0) <= N_DROP_AT:  # a missing check counts as a failed one
+        q = None
+    if q is None:
+        return None, None
+    opts = [
+        None if f"opt{i}" not in ans else to_bool(ans[f"opt{i}"], OPT_TRUE_AT, OPT_FALSE_AT) for i in range(options)
+    ]
+    if q is False or False in opts:
+        return q, False
+    return q, True if all(o is True for o in opts) else None
 
 
 def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
     """Return a copy of led with Jev's labels in place of Gemini's. Every other field is unchanged."""
-    questions = build_questions(call, led)
-    ans = complete_jev(_state(call), questions, cache_tag=JEV_VERSION) if questions else {}
-    bots = []
-    for b in led.bot_turns:
-        if b.slot != "spec":
-            bots.append(b)
-            continue
-        q = ans.get(f"q{b.idx}")
-        if b.spec_name and to_bool(ans.get(f"n{b.idx}", 0.5)) is not True:  # a missing check counts as unsure
-            q = None  # Jev does not confirm the spec name is what the turn asks: the spec-name answer is not usable
-        o = ans.get(f"o{b.idx}", q)  # no options offered: the question alone is the whole turn
-        if q is None or to_bool(q) is None:
-            o = None  # unsure or missing whether the question fits: the turn is not judged, never (None, True)
-        bots.append(
-            b.model_copy(
-                update={
-                    "question_fits_product": None if q is None else to_bool(q),
-                    "fits_confirmed_product": None if o is None else to_bool(o),
-                }
-            )
-        )
-    users = [u.model_copy(update={"frustrated": ans.get(f"f{u.idx}", 0.0)}) for u in led.user_turns]
-    pm = ans.get("pm")
-    return led.model_copy(
-        update={"bot_turns": bots, "user_turns": users, "product_match": None if pm is None else to_bool(pm)}
-    )
+    spec: dict[int, tuple[bool | None, bool | None]] = {}
+    frustrated: dict[int, float] = {}
+    pm: bool | None = None
+    opts = {b.idx: len(b.options_offered) for b in led.bot_turns}
+    named = {b.idx: bool(b.spec_name) for b in led.bot_turns}
+    # A failed request or a missing answer raises: the whole call fails, the judge step logs it and retries it,
+    # and no row with a made-up label is written.
+    for kind, idx, state, questions in _requests(call, led):
+        ans = complete_jev(state, questions, cache_tag=JEV_VERSION)
+        if kind == "spec":
+            spec[idx] = _spec_labels(opts[idx], ans, named[idx])
+        elif kind == "buyer":
+            if "f" not in ans:
+                raise ValueError(f"jev: no irritation answer for user turn {idx}")
+            frustrated[idx] = ans["f"]  # the probability, used directly
+        else:
+            if "pm" not in ans:
+                raise ValueError("jev: no product match answer")
+            pm = to_bool(ans["pm"])
+    unjudged = [u.idx for u in led.user_turns if u.idx not in frustrated]
+    if unjudged:  # a ledger buyer turn with no transcript turn: never default it to calm
+        raise ValueError(f"jev: user turns {unjudged} have no transcript turn")
+    bots = [
+        b.model_copy(update={"question_fits_product": spec[b.idx][0], "fits_confirmed_product": spec[b.idx][1]})
+        if b.idx in spec
+        else b.model_copy(update={"question_fits_product": None, "fits_confirmed_product": None})
+        if b.slot == "spec"
+        else b
+        for b in led.bot_turns
+    ]
+    users = [u.model_copy(update={"frustrated": frustrated[u.idx]}) for u in led.user_turns]
+    return led.model_copy(update={"bot_turns": bots, "user_turns": users, "product_match": pm})
 
 
 def fingerprint(call: CallRecord, led: Ledger) -> str:
-    """sha256 of what a judged row depends on: the state, the questions, the model, JEV_VERSION and the source
-    ledger (the row copies its structural fields, so a changed Gemini field must redo the row)."""
+    """sha256 of what a judged row depends on: every request (state and questions), the model, JEV_VERSION and the
+    source ledger (the row copies its structural fields, so a changed Gemini field must redo the row)."""
     raw = json.dumps(
-        [_state(call), build_questions(call, led), jev_model(), JEV_VERSION, led.model_dump(mode="json")],
+        [build_questions(call, led), jev_model(), JEV_VERSION, led.model_dump(mode="json")],
         sort_keys=True,
         ensure_ascii=False,
     )
     return hashlib.sha256(raw.encode()).hexdigest()
-
-
-def _state(call: CallRecord) -> dict:
-    """The call as named JSON turns (TypeSafe docs, State: an object keeps each part named and related)."""
-    who = {"bot": "sales bot", "user": "buyer"}
-    return {
-        "call": {
-            "turns": [{"idx": t.idx, "speaker": who.get(t.speaker, t.speaker), "text": t.text} for t in call.turns]
-        }
-    }
 
 
 def _kappa(pairs: list[tuple[bool, bool]]) -> float | None:

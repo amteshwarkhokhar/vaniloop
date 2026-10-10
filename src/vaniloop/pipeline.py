@@ -128,7 +128,7 @@ def run_judge(
 ) -> dict:
     """Replace the judgement labels of every saved ledger with Jev's. Writes ledgers_jev.jsonl; resumes by call id.
 
-    One Jev request per call. A failed call goes to the errors file and the run goes on. A missing
+    Several focused Jev requests per call. If any fails, the call goes to the errors file and the run goes on. A missing
     TYPESAFE_API_KEY stops the run.
     """
     calls = {r["call_id"]: r for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)}
