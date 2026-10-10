@@ -1,0 +1,22 @@
+{
+ "patches": [
+  {
+   "cause_id": "C-02",
+   "attempt": 2,
+   "old_text": "Ask the spec questions for the product.",
+   "new_text": "Ask only spec questions that fit the confirmed product.",
+   "rationale": "Synthetic rationale: the old line did not name the confirmed product."
+  }
+ ],
+ "history": [
+  {
+   "cause_id": "C-02",
+   "attempt": 1,
+   "old_text": "Ask the spec questions for the product.",
+   "new_text": "Ask spec questions.",
+   "rationale": "Synthetic first try.",
+   "decision": "reject"
+  }
+ ],
+ "rejected": []
+}
