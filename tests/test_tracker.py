@@ -4,10 +4,11 @@ import json
 import threading
 
 import pytest
+from test_console_jobs import call, data, srv, use_argv  # noqa: F401 - shared console helpers and fixtures
 from test_fix import PROMPT, cause, ev_audits, stub, write_run
 from test_prove import CAUSE, run
 
-from vaniloop import tracker
+from vaniloop import console, tracker
 from vaniloop.fix import run_fix
 
 
@@ -337,3 +338,55 @@ def test_an_ignored_event_is_never_a_count_baseline(tmp_path):
     ship(tmp_path)
     tracker.sync_causes([cause_row(fatal=3, nonfatal=0)], tmp_path)
     assert tracker.state("cause_looping", tmp_path) == "regressed"
+
+
+# ---- web: the routes use the console's shared POST checks (#132) and job runner ----
+
+
+def test_web_get_tracker_and_ticket_post(srv, data):  # noqa: F811
+    """GET /api/tracker lists the cause; POST ticket sent then resolved returns 200 {cause} with the new state."""
+    tracker.record("ticket_written", "C-01", runs=data)
+    assert call(srv, "GET", "/api/tracker")[1]["causes"][0]["state"] == "ticket_open"
+    s, body = call(srv, "POST", "/api/tracker/C-01/ticket", {"action": "sent", "ref": "TKT-9"})
+    assert (s, body["cause"]["state"]) == (200, "ticket_sent")
+    s, body = call(srv, "POST", "/api/tracker/C-01/ticket", {"action": "resolved", "note": "ok"})
+    assert (s, body["cause"]["state"]) == (200, "ticket_resolved")
+    assert call(srv, "POST", "/api/tracker/C-01/ticket", {"action": "sent", "ref": "x" * 201})[0] == 400
+    assert call(srv, "POST", "/api/tracker/C-99/ticket", {"action": "sent", "ref": "x"})[0] == 404
+
+
+def test_tracker_posts_use_the_shared_checks(srv):  # noqa: F811
+    """A foreign Origin is 403 and a negative Content-Length 400 on the tracker routes, as on /api/jobs.
+
+    The routes go through the console's one `_read_json`; a private copy once let both through.
+    """
+    path = "/api/tracker/C-01/ticket"
+    good = {"action": "sent", "ref": "x"}
+    assert call(srv, "POST", path, good, origin="http://evil.example")[0] == 403
+    assert call(srv, "POST", path, good, clen=-1)[0] == 400
+
+
+def test_ship_is_a_console_job_that_needs_confirm_and_ready_to_ship(srv, data, monkeypatch):  # noqa: F811
+    """POST ship checks confirm and the state ready_to_ship, then starts the `ship` job: 202 {job}.
+
+    Running it through the job runner means the one-job-at-a-time rule stops fix and prove during a ship.
+    """
+    path = "/api/tracker/C-01/ship"
+    assert call(srv, "POST", path, {})[0] == 400  # no confirm
+    s, body = call(srv, "POST", path, {"confirm": True})
+    assert s == 409 and "ready_to_ship" in body["error"]  # the cause is not gated yet
+    tracker.record("gated", "C-01", {"decision": "ship"}, runs=data)
+    seen = []
+    use_argv(monkeypatch, "import time; time.sleep(30)", seen)
+    s, body = call(srv, "POST", path, {"confirm": True})
+    assert s == 202 and body["job"]["stage"] == "ship" and seen == [("ship", {"cause": "C-01"})]
+    s, body = call(srv, "POST", path, {"confirm": True})  # the runner is busy now
+    assert (s, body["error"]) == (409, "busy")
+    assert call(srv, "POST", "/api/jobs", {"stage": "fix", "confirm": True})[0] == 409  # fix cannot run during a ship
+
+
+def test_ship_argv_is_built_from_validated_values(data):  # noqa: F811
+    """The ship job runs `pipeline --runs <data> ship --cause C --prompt P` and nothing from the client."""
+    argv = console.build_argv(data, "ship", {"cause": "C-01"})
+    assert argv[argv.index("ship") :] == ["ship", "--prompt", str(console.PROMPT_PATH), "--cause", "C-01"]
+    assert argv[argv.index("--runs") + 1] == str(data)

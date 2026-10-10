@@ -316,3 +316,19 @@ def test_an_explicit_empty_root_list_means_no_targets_not_no_filter(tmp_path):
     calls, ledgers, audits = synthetic()
     items, _ = prove.select_targets(calls, ledgers, audits, "looping", 5, roots=set())
     assert items == []
+
+
+def test_ship_rechecks_the_state_under_the_lock(tmp_path):
+    """A ship validated as ready_to_ship must be refused when a new patch lands before it runs (state in_fix).
+
+    The console queues a ship job after its own state check. Without the re-check under the ship lock, an edit
+    written between the check and the job would be shipped on an old gate row's word.
+    """
+    runs, pf = world(tmp_path, [patch_row("cause_a", 10)], [gate("cause_a")])
+    tracker.record("gated", "cause_a", {"decision": "ship", "attempt": 1}, runs=runs)
+    assert tracker.state("cause_a", runs) == "ready_to_ship"
+    tracker.record("patch_written", "cause_a", {"attempt": 1, "changed_lines": 1}, runs=runs)
+    assert tracker.state("cause_a", runs) == "in_fix"
+    with pytest.raises(SystemExit, match="not ready_to_ship"):
+        tracker.ship("cause_a", runs, pf)
+    assert not list((runs / "prompts").glob("v*"))

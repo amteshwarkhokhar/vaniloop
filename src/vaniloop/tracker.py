@@ -414,6 +414,11 @@ def _ship(cause_id, runs, prompt_path, patches_path, PromptPatch, _count_overlap
             f"the latest gate row for {cause_id} is for attempt {gate_row.get('attempt', 1)}, "
             f"the current patch is attempt {patch.attempt}"
         )
+    # Re-check the tracker state under the ship lock: a console ship job is validated when it is queued, and a
+    # refix or a new gate can land before it runs. With no events at all (a lost log), the signed gate row is the proof.
+    st = state(cause_id, runs)
+    if events(runs, cause_id) and st != "ready_to_ship":
+        raise SystemExit(f"{cause_id} is in state '{st}', not ready_to_ship: ship refused")
     text, cur = current_prompt(prompt_path, runs)
     if any(cause_id in v.get("causes", []) for v in _versions(runs)):
         raise SystemExit(f"{cause_id} is already shipped")
@@ -435,7 +440,7 @@ def _ship(cause_id, runs, prompt_path, patches_path, PromptPatch, _count_overlap
         "patch": {"cause_id": cause_id, **edit_span(text, patch.old_text, patch.new_text)},  # exact offsets
     }  # fmt: skip
     _atomic(runs / "prompts" / "versions.json", json.dumps({"versions": [*_versions(runs), entry]}, indent=1))
-    if state(cause_id, runs) != "ready_to_ship":  # the log may be missing the gated event: the gate row is the proof
+    if st != "ready_to_ship":  # the log is missing the gated event: the signed gate row is the proof
         emit("gated", cause_id, {"decision": "ship", "attempt": patch.attempt, "source": "gates.jsonl"}, runs=runs)
     emit("approved", cause_id, {"attempt": patch.attempt}, runs=runs)
     emit("shipped", cause_id, {"version": name, "attempt": patch.attempt}, runs=runs)
