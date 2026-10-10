@@ -43,6 +43,7 @@ GATES_PATH = RUNS / "gates.jsonl"
 REPLAYS_PATH = RUNS / "replays.jsonl"
 
 PICK_SEED = 0
+RELEASE_TARGETS = 4  # hold-out target calls per shipped cause in release-check
 CALL_VALUES_HEADING = "Call values"
 SCREEN_SEEDS = 3  # the screen replays OLD on seeds 0..2; the gate then starts at seed_base = SCREEN_SEEDS
 SCREEN_MIN_FAILS = 2  # a call is kept when OLD fails the parameter on at least this many screen seeds
@@ -672,6 +673,89 @@ def run_prove(
     if screen:
         out.screened, out.kept = result.screened, result.kept
         out.not_reproduced, out.screen_cost_usd = result.not_reproduced or [], screen_cost
+    return out
+
+
+def run_release_check(
+    prompt_path: Path,
+    guards: int = 10,
+    per_cause: int = RELEASE_TARGETS,
+    max_turns: int = 12,
+    dry_run: bool = False,
+    calls_path: Path = CALLS_PATH,
+    ledgers_path: Path = LEDGERS_PATH,
+    audits_path: Path = AUDITS_PATH,
+    patches_path: Path = PATCHES_PATH,
+    causes_path: Path | None = None,
+    replay_fn: ReplayFn | None = None,
+    audit_fn: AuditFn | None = None,
+) -> dict:
+    """Replay the current prompt version (every shipped patch together) against the clean base, K=1, seed 0.
+
+    Items: the Pass guard calls and up to `per_cause` hold-out target calls per shipped cause (root calls only).
+    A new Fatal is a Fatal on a parameter under the bundle that the base replay of the same call does not show.
+    A cause fails when a new Fatal appears on any item (the bundle is to blame, so every shipped cause fails) or
+    when its own targets fail again: the bundle fail rate is above gate.DEFAULT_MAX_NEW_FAIL_RATE. It records a
+    release_check event per shipped cause and, on a fail, a regressed event. It never ships anything. A dry run
+    makes no LLM call and writes nothing. Returns {"ok", "causes", "new_fatals", "targets", "guards", "replays"}.
+    """
+    runs = Path(patches_path).parent
+    shipped = [c for v in tracker._versions(runs) for c in v.get("causes", [])]
+    if not shipped:
+        raise SystemExit("no shipped prompt version: nothing to release-check")
+    causes_path = causes_path or runs / "causes.json"
+    base = prompt.load(prompt_path)
+    bundle, version = tracker.current_prompt(prompt_path, runs)
+    calls = {
+        r["call_id"]: CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)
+    }
+    ledgers = {r["call_id"]: Ledger.model_validate(r) for r in dedupe_by_call_id(read_jsonl(ledgers_path))}
+    audits = {a.call_id: a for a in load_audits(Path(audits_path))}
+    targets: dict[str, list[Item]] = {}
+    candidates: set[str] = set()
+    ticket_calls: set[str] = set()
+    for cid in shipped:
+        roots, ticket_calls = root_sets(cid, causes_path)
+        targets[cid], seen = select_targets(
+            calls, ledgers, audits, cid.removeprefix("cause_"), per_cause, None, None, True, quiet=True, roots=roots
+        )
+        candidates |= seen
+    guard_items = select_guards(calls, ledgers, audits, candidates, guards, ticket_calls)
+    n_items = sum(map(len, targets.values())) + len(guard_items)
+    out = {
+        "ok": None, "version": version, "causes": {}, "new_fatals": [], "guards": len(guard_items),
+        "targets": {c: len(t) for c, t in targets.items()}, "replays": 0, "max_replays": 2 * n_items,
+    }  # fmt: skip
+    if dry_run:
+        return out
+    replay_fn, audit_fn = replay_fn or real_replay_fn(max_turns), audit_fn or real_audit_fn
+
+    def fatals(item: Item, text: str) -> tuple[set[str], AuditRecord]:
+        res = replay_fn(*item, text, 0)
+        out["replays"] += 1
+        audit = audit_fn(res.call)
+        return {f.parameter for f in audit.findings if f.status == "Fatal"}, audit
+
+    def check(item: Item):
+        old_fatal, _ = fatals(item, base)
+        new_fatal, audit = fatals(item, bundle)
+        out["new_fatals"] += [{"call_id": item[0].call_id, "parameter": p} for p in sorted(new_fatal - old_fatal)]
+        return audit
+
+    for item in guard_items:
+        check(item)
+    for cid in shipped:
+        fails = [gate.failed(check(item), cid.removeprefix("cause_")) for item in targets[cid]]
+        out["causes"][cid] = {"targets": len(fails), "target_fails": sum(fails)}
+    for cid, r in out["causes"].items():
+        r["targets_fail_again"] = (
+            bool(r["targets"]) and r["target_fails"] / r["targets"] > gate.DEFAULT_MAX_NEW_FAIL_RATE
+        )
+        r["ok"] = not (r["targets_fail_again"] or out["new_fatals"])
+        tracker.emit("release_check", cid, {**r, "version": version, "new_fatals": out["new_fatals"]}, runs=runs)
+        if not r["ok"]:
+            tracker.emit("regressed", cid, {"note": "release check failed", "version": version}, runs=runs)
+    out["ok"] = all(r["ok"] for r in out["causes"].values())
     return out
 
 

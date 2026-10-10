@@ -34,7 +34,7 @@ from .jev import ask, fingerprint, judge_agreement, labels
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord, Ledger
-from .prove import describe, run_prove
+from .prove import describe, run_prove, run_release_check
 from .rootcause import DEFAULT_PROMPT, ROOTCAUSE_PATH, describe_rootcause, run_rootcause
 from .rules import audit_call
 from .tracker import ship, ticket
@@ -541,6 +541,13 @@ def main(argv: list[str] | None = None) -> None:
     tk.add_argument("--cause", required=True)
     tk.add_argument("--sent", metavar="REF", default=None, help="the ticket id or link")
     tk.add_argument("--resolved", metavar="NOTE", default=None)
+    rl = sub.add_parser(
+        "release-check", help="replay every shipped patch together against the clean base; ships nothing"
+    )
+    rl.add_argument("--prompt", required=True, help="the clean base VANI prompt file")
+    rl.add_argument("--guards", type=int, default=10)
+    rl.add_argument("--max-turns", type=int, default=12)
+    rl.add_argument("--dry-run", action="store_true")
     rc = sub.add_parser("rootcause")
     rc.add_argument("--cause", required=True)
     rc.add_argument("--prompt", default=str(DEFAULT_PROMPT))
@@ -692,6 +699,18 @@ def main(argv: list[str] | None = None) -> None:
         print(f"{args.cause} shipped in prompt version {version}")
     elif args.cmd == "ticket":
         print(f"{args.cause}: {ticket(args.cause, P['patches'].parent, sent=args.sent, resolved=args.resolved)}")
+    elif args.cmd == "release-check":
+        r = run_release_check(
+            Path(args.prompt), guards=args.guards, max_turns=args.max_turns, dry_run=args.dry_run,
+            calls_path=P["calls"], patches_path=P["patches"], causes_path=P["causes"],
+            **extra(ledgers_path="ledgers", audits_path="audits"),
+        )  # fmt: skip
+        print(f"release check of {r['version']}: {r['guards']} guards, targets {r['targets']}, {r['replays']} replays")
+        if not args.dry_run:
+            print(
+                f"new Fatals: {r['new_fatals'] or 'none'}; "
+                + ("OK" if r["ok"] else "FAILED: causes moved to regressed")
+            )
     elif args.cmd == "rootcause":
         out = run_rootcause(
             args.cause,

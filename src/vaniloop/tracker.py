@@ -27,6 +27,7 @@ TRACKER = "tracker.jsonl"
 KINDS = (
     "detected", "routed", "patch_written", "screened", "gated", "approved", "shipped", "ticket_written",
     "ticket_sent", "ticket_resolved", "count_changed", "regressed", "closed",
+    "release_check",  # PR 4: the bundle check of every shipped patch together; no state change
     "rubric_changed",  # not in the contract list: counts under two rubric versions are never compared, so say so
 )  # fmt: skip
 TICKET_STATES = ("ticket_open", "ticket_sent", "ticket_resolved")
