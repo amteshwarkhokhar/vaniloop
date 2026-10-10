@@ -249,7 +249,134 @@
       V.sec("Past submissions") + `<div class="tw rv"><table><tbody>${sub.list.map((s) => `<tr><td class="m">${esc(s.submission_id)}</td><td class="m">${esc(s.created_ist)}</td><td class="m r">${esc(s.calls)} calls</td><td class="r"><button type="button" class="btn sm" data-op="open-sub" data-sid="${esc(s.submission_id)}"${dis()}>Open</button></td></tr>`).join("") || '<tr><td class="src">None yet.</td></tr>'}</tbody></table></div>`;
   };
 
-  V.ITEMS.push({ id: "run", group: "operate", name: "Run" }, { id: "submit", group: "operate", name: "Submit calls" });
+  // ---- rubric ----
+  const RB = { data: null, err: null, edits: {}, qedits: {}, errs: {}, msg: null, saved: false };
+  const pval = (p) => (p.id in RB.edits ? RB.edits[p.id] : p.value);
+  const pdirty = (p) => p.id in RB.edits && Number(RB.edits[p.id]) !== Number(p.value);
+  // The API nests a question's current texts under value, with the defaults under default.
+  const qv = (q) => (q && (q.value || q)) || {};
+  const qnorm = (q) => { const v = qv(q); return { instructions: v.instructions, true: { description: v.true.description, examples: v.true.examples || [] }, false: { description: v.false.description, examples: v.false.examples || [] } }; };
+  const qok = (q) => !!(qv(q).true && qv(q).false);
+  const qdirty = (q) => qok(q) && q.id in RB.qedits && JSON.stringify(RB.qedits[q.id]) !== JSON.stringify(qnorm(q));
+  const anyDirty = () => !!RB.data && (RB.data.params.some(pdirty) || (RB.data.questions || []).some(qdirty));
+  const errFor = (id) => Object.keys(RB.errs).filter((f) => f === id || f.startsWith(`${id}.`) || f.startsWith(`questions.${id}`)).map((f) => `<p class="err" role="alert">${esc(RB.errs[f])}</p>`).join("");
+  async function loadRubric() {
+    const r = await call("GET", "/api/rubric");
+    if (r.ok && Array.isArray(r.data.params)) { RB.data = r.data; RB.err = null; } else RB.err = errText(r);
+  }
+  const paramField = (p, ctx) => {
+    const v = pval(p), changed = Number(v) !== Number(p.default), id = `p-${ctx}-${p.id}`;
+    return `<div class="fld prm"><label class="label" for="${esc(id)}">${esc(p.label)}</label><div class="addrow"><input class="inp" id="${esc(id)}" type="number" data-op="param" data-id="${esc(p.id)}" min="${esc(p.min)}" max="${esc(p.max)}" step="${esc(p.step)}" value="${esc(v)}"${dis()}>` +
+      `<span class="chg" data-chg="${esc(p.id)}"${changed ? "" : " hidden"}>changed</span><button type="button" class="btn sm" data-op="reset-param" data-id="${esc(p.id)}" data-ctx="${esc(ctx)}"${changed || pdirty(p) ? dis() : " disabled"}>Reset</button></div>` +
+      `<p class="src">${esc(p.help)} Default ${esc(p.default)}.</p>${errFor(p.id)}</div>`;
+  };
+  const savedBanner = () => (RB.saved ? `<p class="note rv" role="status"><b>Saved.</b> The change is not live until you re-judge and regrade. <button type="button" class="btn sm" data-op="rejudge"${dis()}>Re-judge and regrade</button></p>` : "") + (RB.msg ? `<p class="err" role="alert">${esc(RB.msg)}</p>` : "");
+  const qCard = (q) => {
+    if (!qok(q)) return "";
+    const e = RB.qedits[q.id] || qnorm(q), on = (f) => `data-op="q" data-q="${esc(q.id)}" data-f="${f}"`;
+    const area = (f, label, v) => `<div class="fld"><label class="label" for="q-${esc(q.id)}-${f}">${label}</label><textarea class="inp" id="q-${esc(q.id)}-${f}" rows="${f === "instructions" ? 5 : 3}" ${on(f)}${dis()}>${esc(v)}</textarea></div>`;
+    const ex = (x) => (x.examples || []).join("\n");
+    const changed = q.overridden || qdirty(q);
+    return `<div class="card op-card rv"><h3>${esc(q.label || q.id)}</h3><p class="label"><span class="mono">${esc(q.id)}</span> <span class="chg"${changed ? "" : " hidden"}>changed</span></p><div class="flds">` +
+      area("instructions", "Instructions", e.instructions) + area("true.description", "True means", e.true.description) + area("true.examples", "True examples, one per line", ex(e.true)) +
+      area("false.description", "False means", e.false.description) + area("false.examples", "False examples, one per line", ex(e.false)) + `</div>${errFor(q.id)}` +
+      `<button type="button" class="btn sm" data-op="reset-q" data-q="${esc(q.id)}"${q.overridden || qdirty(q) ? dis() : " disabled"}>Reset</button></div>`;
+  };
+  P.rubric = () => {
+    if (!C.con) return V.head("Operate", "Audit <em>rubric</em>", "") + unavailable();
+    const d = RB.data;
+    if (!d) return V.head("Operate", "Audit <em>rubric</em>", "") + (RB.err ? `<p class="empty">The rubric could not load (${esc(RB.err)}).</p>` : '<p class="empty">Loading.</p>');
+    const byId = Object.fromEntries(d.params.map((p) => [p.id, p])), used = new Set();
+    const check = (c) => {
+      const ps = (c.params || []).map((id) => byId[id]).filter(Boolean);
+      ps.forEach((p) => used.add(p.id));
+      return `<div class="card op-card rv"><h3>${esc(c.name || c.id)}</h3><p class="label"><span class="mono">${esc(c.id)}</span> · ${esc(c.judged_by)}${c.prompt_ref ? ` · ${esc(c.prompt_ref)}` : ""}</p>` +
+        `<p class="lede">${esc(c.what)}</p><p class="why"><b>Fatal when</b> ${esc(c.fatal_when)}</p><p class="why"><b>Non-fatal when</b> ${esc(c.nonfatal_when)}</p><div class="flds">${ps.map((p) => paramField(p, c.id)).join("")}</div></div>`;
+    };
+    const cards = d.checks.map(check).join(""), rest = d.params.filter((p) => !used.has(p.id));
+    return V.head("Operate", "Audit <em>rubric</em>", `Each check and the numbers it grades with. Jev version ${d.jev_version_effective || ""}.`) + banner() + savedBanner() +
+      `<div class="savebar"><button type="button" class="btn pri" id="rb-save" data-op="save-rubric"${anyDirty() ? dis() : " disabled"}>Save rubric</button></div>` +
+      V.sec("Checks") + `<div class="cards">${cards}${rest.length ? `<div class="card op-card rv"><h3>Other numbers</h3><div class="flds">${rest.map((p) => paramField(p, "other")).join("")}</div></div>` : ""}</div>` +
+      V.sec("Jev questions") + `<div class="cards">${(d.questions || []).map(qCard).join("")}</div>`;
+  };
+  const putRubric = async (body) => {
+    const r = await call("PUT", "/api/rubric", body);
+    if (r.ok && Array.isArray(r.data.params)) { RB.data = r.data; RB.edits = {}; RB.qedits = {}; RB.errs = {}; RB.msg = null; RB.saved = true; }
+    else {
+      const f = str(r.data.field), own = RB.data.params.some((p) => p.id === f) || (RB.data.questions || []).some((q) => f === `questions.${q.id}` || f.startsWith(`questions.${q.id}.`));
+      RB.saved = false; RB.errs = own ? { [f]: str(r.data.error) } : {}; RB.msg = own ? null : errText(r); // a field with no input of its own shows in the banner
+    }
+    return r;
+  };
+  async function saveRubric() {
+    const params = {}, questions = {};
+    for (const p of RB.data.params) if (pdirty(p)) {
+      const n = Number(RB.edits[p.id]);
+      if (!isFinite(n) || RB.edits[p.id] === "") { RB.errs = { [p.id]: "Enter a number." }; return redraw(); }
+      params[p.id] = n === p.default ? (p.overridden ? null : p.value) : n;
+    }
+    for (const q of RB.data.questions || []) if (qdirty(q)) questions[q.id] = q.default && JSON.stringify(RB.qedits[q.id]) === JSON.stringify(qnorm({ id: q.id, ...q.default })) ? null : RB.qedits[q.id];
+    await putRubric({ params, questions });
+    redraw();
+  }
+  const qedit = (qid, f, text) => {
+    const q = RB.data.questions.find((x) => x.id === qid);
+    if (!qok(q)) return;
+    const e = (RB.qedits[qid] = RB.qedits[qid] || qnorm(q)), [side, part] = f.split(".");
+    if (f === "instructions") e.instructions = text;
+    else e[side][part] = part === "examples" ? text.split("\n").map((l) => l.trim()).filter(Boolean) : text;
+  };
+
+  // ---- tune ----
+  const SL = [["question_fits.true_at", "Question fits: true at", "jev.Q_TRUE_AT"], ["question_fits.false_at", "Question fits: false at", "jev.Q_FALSE_AT"], ["option_fits.true_at", "Each option fits: true at", "jev.OPT_TRUE_AT"],
+    ["option_fits.false_at", "Each option fits: false at", "jev.OPT_FALSE_AT"], ["product_match.true_at", "Same product: true at", "jev.PM_TRUE_AT"], ["product_match.false_at", "Same product: false at", "jev.PM_FALSE_AT"],
+    ["name_check_drop_at", "Name check drops at", "jev.N_DROP_AT"], ["frustrated_p", "Frustrated at", "rules.FRUSTRATED_P"]];
+  const LBL = { question_fits: "Question fits", with_options_fits: "Each option fits", option_fits: "Each option fits", product_match: "Same product", irritated: "Irritated" };
+  const T = { vals: {}, res: null, err: null, timer: null, seq: 0 };
+  const sp = (id) => (RB.data ? RB.data.params.find((p) => p.id === id) : null);
+  const tval = (k, id) => (k in T.vals ? T.vals[k] : sp(id) ? sp(id).value : 0);
+  const tbody = () => {
+    const out = {};
+    for (const [k, , id] of SL) { const [a, b] = k.split("."); if (b) (out[a] = out[a] || {})[b] = Number(tval(k, id)); else out[a] = Number(tval(k, id)); }
+    return out;
+  };
+  async function runTune() {
+    const n = ++T.seq, r = await call("POST", "/api/tune", { thresholds: tbody() });
+    if (n !== T.seq) return;
+    if (r.ok) { T.res = r.data; T.err = null; } else T.err = { text: errText(r), noraw: r.status === 409 };
+    const el = $("tune-res");
+    if (el) el.innerHTML = tuneRes(); else redraw();
+  }
+  const delta = (a, b, up) => (num(a) == null || num(b) == null || a === b ? "" : ` <span class="${(a > b) === up ? "ok" : "no"}">${a > b ? "+" : ""}${a - b}</span>`);
+  const tuneRes = () => {
+    if (T.err) return `<p class="err" role="alert">${esc(T.err.text)}</p>${T.err.noraw ? `<button type="button" class="btn" data-op="prefill" data-stage="judge" data-chain=""${dis()}>Run judge</button>` : ""}`;
+    const r = T.res;
+    if (!r) return '<p class="empty">Scoring.</p>';
+    const cur = (x) => (r.current || []).find((c) => c.label === x.label && c.split === x.split) || {};
+    return `<div class="tw"><table><thead><tr><th>Label</th><th>Split</th><th class="r">Calls</th><th class="r">Right</th><th class="r">Wrong</th><th class="r">Unsure</th><th class="r">Gemini right</th></tr></thead><tbody>${(r.labels || []).map((x) => {
+      const c = cur(x);
+      return `<tr><td>${esc(V.own(LBL, x.label) || x.label)}</td><td class="m">${esc(x.split === "test" ? "held-out test" : "dev")}</td><td class="m r">${esc(x.n)}</td><td class="m r">${esc(x.right)}${delta(x.right, c.right, true)}</td><td class="m r">${esc(x.wrong)}${delta(x.wrong, c.wrong, false)}</td><td class="m r">${esc(x.unsure)}</td><td class="m r">${esc(x.gemini_right)}</td></tr>`;
+    }).join("")}</tbody></table></div><p class="lede">Changes against the current values show in colour. Labels that would flip over all ${esc(r.calls)} calls:</p><div class="chips">${Object.entries(r.flips || {}).map(([k, n]) => `<span class="pill">${esc(V.own(LBL, k) || k)}<b>${esc(n)}</b></span>`).join("")}</div>`;
+  };
+  P.tune = () => {
+    if (!C.con) return V.head("Operate", "Tune the <em>thresholds</em>", "") + unavailable();
+    if (!RB.data) return V.head("Operate", "Tune the <em>thresholds</em>", "") + (RB.err ? `<p class="empty">The rubric could not load (${esc(RB.err)}).</p>` : '<p class="empty">Loading.</p>');
+    const slider = ([k, label, id]) => {
+      const p = sp(id) || { min: 0, max: 1, step: 0.01 }, v = tval(k, id);
+      return `<div class="fld"><label class="label" for="s-${esc(k)}">${esc(label)} <output id="o-${esc(k)}" class="mono">${esc(v)}</output></label><input id="s-${esc(k)}" type="range" class="rng" data-op="tune" data-key="${esc(k)}" min="${esc(p.min)}" max="${esc(p.max)}" step="${esc(p.step)}" value="${esc(v)}"${dis()}></div>`;
+    };
+    return V.head("Operate", "Tune the <em>thresholds</em>", "Move a slider to re-score the reviewed calls. Nothing is saved until you press Save to rubric.") + banner() + savedBanner() +
+      `<div class="card rv"><div class="sliders">${SL.map(slider).join("")}</div><button type="button" class="btn pri" data-op="tune-save"${dis()}>Save to rubric</button></div>` + V.sec("Against the reviewed truth") + `<div id="tune-res">${tuneRes()}</div>`;
+  };
+  async function saveTune() {
+    const params = {};
+    for (const [k, , id] of SL) { const p = sp(id); if (p && Number(tval(k, id)) !== Number(p.value)) params[id] = Number(tval(k, id)); }
+    const r = await putRubric({ params, questions: {} });
+    if (r.ok) T.vals = {}; else T.err = { text: errText(r) };
+    redraw();
+  }
+
+  V.ITEMS.push({ id: "run", group: "operate", name: "Run" }, { id: "submit", group: "operate", name: "Submit calls" }, { id: "rubric", group: "operate", name: "Rubric" }, { id: "tune", group: "operate", name: "Tune" });
   const enter = async () => { if (!C.con) await loadConsole(); await loadJobs(); redraw(); };
   V.enter = {
     run: async () => { await enter(); },
@@ -259,6 +386,8 @@
       if (x.ok && Array.isArray(x.data)) C.calls = x.data.map((r) => str(r && r.call_id)).filter(Boolean);
       redraw();
     },
+    rubric: async () => { await enter(); RB.saved = false; await loadRubric(); redraw(); },
+    tune: async () => { await enter(); await loadRubric(); redraw(); runTune(); },
   };
   const BARS = { audit: ["audit", ["judge", "regrade"]], issues: ["issues", []], fix: ["fix", []], gate: ["prove", []] };
   V.stageBar = (id) => {
@@ -284,6 +413,11 @@
     else if (op === "rm-f") { C.sub.files.splice(Number(t.dataset.i), 1); redraw(); }
     else if (op === "rm-i") { C.sub.ids.splice(Number(t.dataset.i), 1); redraw(); }
     else if (op === "send") await send();
+    else if (op === "save-rubric") await saveRubric();
+    else if (op === "tune-save") await saveTune();
+    else if (op === "reset-param") { const p = sp(t.dataset.id); if (p) { RB.edits[p.id] = String(p.default); delete RB.errs[p.id]; redraw(); const f = $(`p-${t.dataset.ctx}-${p.id}`); if (f) f.focus(); } }
+    else if (op === "reset-q") { const q = RB.data.questions.find((x) => x.id === t.dataset.q); if (q && q.default) { RB.qedits[q.id] = qnorm({ id: q.id, ...q.default }); delete RB.errs[q.id]; redraw(); } }
+    else if (op === "rejudge") { C.chain = ["regrade", "issues"]; RB.saved = false; RB.msg = null; if (!(await startJob("judge", {}, false, true))) { C.chain = []; RB.msg = (C.msg.judge && C.msg.judge.err) || "Could not start judge."; } redraw(); }
     else if (op === "open-sub") { C.sub.sid = t.dataset.sid; C.sub.watch = null; C.sub.result = null; await loadSub(t.dataset.sid); }
   });
   const onField = (e) => {
@@ -291,6 +425,23 @@
     if (!d) return;
     if (d.op === "arg") { (C.form[d.stage] = C.form[d.stage] || {})[d.arg] = t.type === "checkbox" ? !!t.checked : t.value; }
     else if (d.op === "id-draft") C.sub.draft = t.value;
+    else if (d.op === "param") {
+      RB.edits[d.id] = t.value;
+      const p = sp(d.id), save = $("rb-save");
+      if (save && !ro()) save.disabled = !anyDirty();
+      if (document.querySelectorAll && p) document.querySelectorAll(`[data-chg="${d.id}"]`).forEach((m) => (m.hidden = Number(t.value) === Number(p.default)));
+    } else if (d.op === "q") {
+      qedit(d.q, d.f, t.value);
+      const save = $("rb-save");
+      if (save && !ro()) save.disabled = !anyDirty();
+    }
+    else if (d.op === "tune") {
+      T.vals[d.key] = Number(t.value);
+      const o = $(`o-${d.key}`);
+      if (o) o.textContent = t.value;
+      clearTimeout(T.timer);
+      T.timer = setTimeout(runTune, 250);
+    }
   };
   document.addEventListener("input", onField);
   document.addEventListener("change", (e) => {
