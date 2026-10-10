@@ -45,7 +45,7 @@
 .note{ padding-left:12px; border-left:1px solid var(--tone); overflow-wrap:anywhere; transition:opacity .6s var(--ease), transform .6s var(--ease); }
 .note.rest{ opacity:.55; transform:translateY(6px); }
 .note .label{ color:var(--ivory); font-size:11px; }
-.note .st{ color:var(--tone); margin-left:6px; }
+.note .st{ color:var(--ink, var(--tone)); margin-left:6px; }
 .note p{ margin:4px 0; font-size:13px; line-height:1.5; color:var(--ash); }
 .note .basis{ font:400 15px/1.4 var(--mono); color:var(--ash); }
 
