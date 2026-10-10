@@ -444,17 +444,19 @@
     { id: "tracker", group: "operate", name: "Tracker", side: "top", fam: "tracker" });
   V.vals = () => { const n = TR.data && TR.data.causes.filter((c) => c.state === "ready_to_ship" || c.state === "ticket_open").length; return { tracker: n == null ? "" : n ? `${n} waiting` : "None waiting" }; };
   const enter = async () => { if (!C.con) await loadConsole(); await loadJobs(); redraw(); };
+  // The last redraw of a route change is the page's entrance, so it plays once its data has landed.
+  const land = () => redraw(); // the router plays the entrance once the hook settles
   V.enter = {
-    run: async () => { await enter(); },
+    run: async () => { if (!C.con) await loadConsole(); await loadJobs(); land(); },
     submit: async () => {
       await enter(); await loadSubs();
       const x = await call("GET", "/api/calls");
       if (x.ok && Array.isArray(x.data)) C.calls = x.data.map((r) => str(r && r.call_id)).filter(Boolean);
-      redraw();
+      land();
     },
-    rubric: async () => { await enter(); RB.saved = false; await loadRubric(); redraw(); },
-    tracker: async () => { await enter(); await loadTracker(); redraw(); },
-    tune: async () => { await enter(); await loadRubric(); redraw(); runTune(); },
+    rubric: async () => { await enter(); RB.saved = false; await loadRubric(); land(); },
+    tracker: async () => { await enter(); await loadTracker(); land(); },
+    tune: async () => { await enter(); await loadRubric(); land(); runTune(); },
   };
   const BARS = { audit: ["audit", ["judge", "regrade"]], issues: ["issues", []], fix: ["fix", []], gate: ["prove", []] };
   V.stageBar = (id) => {

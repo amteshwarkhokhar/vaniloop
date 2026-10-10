@@ -146,6 +146,14 @@ def test_tune_debounces_three_moves_into_one_post_and_renders_dev_and_test():
     assert "no raw Jev answers: run judge" in d["noraw"] and "Run judge" in d["noraw"]
 
 
+def test_page_entrance_plays_once_per_navigation_and_not_on_a_redraw():
+    """Going to a page sets #panel.enter (the CSS entrance), a filter redraw clears it, and a console.js page gets it.
+
+    Without this the entrance would replay on every filter click and log poll, or never play on Rubric, Tune,
+    Tracker, Run and Add calls, whose data lands after the route change."""
+    assert run("con-enter") == [True, False, True]
+
+
 def test_editing_only_a_question_enables_save_and_sends_only_that_question():
     """A Jev question edit with no number edit must turn Save on, and the PUT carries just that question.
 
