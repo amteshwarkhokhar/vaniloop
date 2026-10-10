@@ -107,9 +107,9 @@ def fake_modules(monkeypatch, *, noraw=False):
     rubric = types.ModuleType("vaniloop.rubric")
     rubric.RubricError = FakeRubricError
 
-    def save(path, params, questions):
-        calls.append(("save", path.name, params, questions))
-        if "bad" in params:
+    def save(path, body):
+        calls.append(("save", path.name, body))
+        if "bad" in body.get("params", {}):
             raise FakeRubricError("unknown parameter", "params.bad")
 
     rubric.save = save
@@ -137,7 +137,7 @@ def test_rubric_get_and_put_pass_through(srv, monkeypatch):  # noqa: F811
     assert call(srv, "GET", "/api/rubric") == (200, {"params": [], "from": "rubric.json"})
     status, out = call(srv, "PUT", "/api/rubric", {"params": {"x": 1}, "questions": {"q": None}})
     assert status == 200 and out["from"] == "rubric.json"
-    assert calls == [("save", "rubric.json", {"x": 1}, {"q": None})]
+    assert calls == [("save", "rubric.json", {"params": {"x": 1}, "questions": {"q": None}})]
     assert call(srv, "PUT", "/api/rubric", {"params": {"bad": 1}}) == (
         400,
         {"error": "unknown parameter", "field": "params.bad"},

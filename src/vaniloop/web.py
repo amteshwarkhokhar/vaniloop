@@ -705,7 +705,7 @@ class Handler(BaseHTTPRequestHandler):
 
         path = self.data / "rubric.json"
         try:
-            rubric.save(path, body.get("params") or {}, body.get("questions") or {})
+            rubric.save(path, body)
             self._json(rubric.describe(path))
         except rubric.RubricError as e:
             self._json({"error": str(e)[:300], "field": getattr(e, "field", None)}, 400)
