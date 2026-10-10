@@ -166,8 +166,11 @@ const SC = {
     ids["rb-save"].disabled = true;
     await emit("input", { dataset: { op: "q", q: "spec_fit", f: "true.examples" }, value: "one\ntwo" });
     const afterEdit = ids["rb-save"].disabled;
+    routes["PUT /api/rubric"] = [[400, { error: "must be an object", field: "body" }], [200, RUB]];
     await click({ op: "save-rubric" });
-    return { afterEdit, put: calls.filter((c) => c.method === "PUT").map((c) => c.body) };
+    const banner = ids.panel.innerHTML;
+    await click({ op: "save-rubric" });
+    return { afterEdit, banner, put: calls.filter((c) => c.method === "PUT").map((c) => c.body).slice(-1) };
   },
   async "con-tune"() {
     const out = {};

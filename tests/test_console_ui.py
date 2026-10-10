@@ -138,6 +138,7 @@ def test_editing_only_a_question_enables_save_and_sends_only_that_question():
     Before the fix only number edits updated the dirty state, so a question-only edit left Save disabled."""
     d = run("con-rubric-q")
     assert d["afterEdit"] is False
+    assert "must be an object" in d["banner"], "a 400 whose field has no input must still show"
     (put,) = d["put"]
     assert put["params"] == {} and list(put["questions"]) == ["spec_fit"]
     assert put["questions"]["spec_fit"]["true"]["examples"] == ["one", "two"]

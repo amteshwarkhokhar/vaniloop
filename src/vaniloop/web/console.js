@@ -302,7 +302,10 @@
   const putRubric = async (body) => {
     const r = await call("PUT", "/api/rubric", body);
     if (r.ok && Array.isArray(r.data.params)) { RB.data = r.data; RB.edits = {}; RB.qedits = {}; RB.errs = {}; RB.msg = null; RB.saved = true; }
-    else { RB.saved = false; RB.errs = r.data.field ? { [str(r.data.field)]: str(r.data.error) } : {}; RB.msg = r.data.field ? null : errText(r); }
+    else {
+      const f = str(r.data.field), own = RB.data.params.some((p) => p.id === f) || (RB.data.questions || []).some((q) => f === `questions.${q.id}` || f.startsWith(`questions.${q.id}.`));
+      RB.saved = false; RB.errs = own ? { [f]: str(r.data.error) } : {}; RB.msg = own ? null : errText(r); // a field with no input of its own shows in the banner
+    }
     return r;
   };
   async function saveRubric() {
