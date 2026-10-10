@@ -1,0 +1,58 @@
+/* vaniloop Pipeline: the run as a waveform, then every step on one horizontal line of panes. Tokens come from app.css. */
+.wave-box{ margin:0 0 18px; padding:18px 20px 14px; background:var(--surface); border-radius:var(--r-group); box-shadow:var(--edge); }
+.wave{ display:grid; grid-template-columns:repeat(70, minmax(0, 1fr)); align-items:center; gap:3px; height:64px; }
+.wave i{ display:block; border-radius:3px; background:var(--fill); transition:background .4s var(--ease); }
+.wave i.w-done{ background:var(--accent); }
+.wave i.w-run{ background:var(--accent); animation:meter .9s var(--ease) infinite alternate; animation-delay:var(--d); }
+.wave i.w-fail{ background:var(--fatal); }
+@keyframes meter{ from{ transform:scaleY(.35); opacity:.6; } to{ transform:scaleY(1.08); opacity:1; } }
+.wave-steps{ list-style:none; display:grid; grid-template-columns:repeat(7, minmax(0, 1fr)); margin:8px 0 0; padding:0; font:500 12px/1.3 var(--font); color:var(--text-2); }
+.wave-steps li{ border-top:2px solid var(--line); padding-top:5px; }
+.wave-steps .ws-done{ color:var(--accent-text); border-color:var(--accent); }
+.wave-steps .ws-run{ color:var(--text); font-weight:600; border-color:var(--accent); }
+.wave-steps .ws-fail{ color:var(--fatal-ink); border-color:var(--fatal); }
+.wave-label{ display:flex; align-items:center; gap:8px; margin:10px 0 0; font-size:14px; color:var(--text); }
+
+.flow-pick{ display:flex; flex-wrap:wrap; align-items:center; gap:10px 12px; margin:0 0 14px; }
+.flow-pick .inp{ max-width:280px; }
+
+/* the lane: panes side by side on a signal line, scrolled sideways */
+.lane{ overflow-x:auto; overscroll-behavior-x:contain; scroll-snap-type:x proximity; padding:4px 2px 16px; }
+.lane-in{ position:relative; display:flex; gap:18px; width:max-content; }
+.lane-in::before{ content:""; position:absolute; left:0; right:0; top:27px; height:2px; background:linear-gradient(90deg, var(--accent), var(--line) 85%); }
+.pn{ position:relative; flex:0 0 340px; display:flex; flex-direction:column; max-height:calc(100vh - 330px); min-height:360px; scroll-snap-align:start;
+  background:var(--surface); border-radius:14px; box-shadow:var(--edge); }
+.pn.wide{ flex-basis:560px; }
+.pn-h{ display:flex; align-items:center; gap:10px; padding:14px 16px 10px; border-bottom:1px solid var(--line); }
+.pn-h h2{ margin:0; font:600 16px/1.2 var(--font); } .pn-h .src{ margin:2px 0 0; font-size:12px; }
+.pn-n{ flex:none; display:inline-grid; place-items:center; width:26px; height:26px; border-radius:50%; background:var(--accent); color:var(--on-accent); font:600 13px/1 var(--rounded); box-shadow:0 0 0 4px var(--surface); }
+.pn-b{ padding:12px 16px 16px; overflow:auto; }
+.kvs{ display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0 0 10px; font-size:14px; } .kvs dt{ color:var(--text-2); } .kvs dd{ margin:0; overflow-wrap:anywhere; }
+.rows{ list-style:none; margin:8px 0 0; padding:0; } .rows li{ display:flex; flex-direction:column; gap:2px; padding:8px 0; border-top:1px solid var(--line); font-size:14px; }
+.rows li:first-child{ border-top:0; } .rows b{ font-weight:500; color:var(--text-2); font-size:13px; }
+.sq{ display:grid; grid-template-columns:repeat(auto-fill, 9px); gap:3px; margin-top:6px; }
+.sq .cd{ width:9px; height:9px; border-radius:2px; background:var(--tone, var(--line-strong)); cursor:pointer; transition:transform .15s var(--ease); }
+.sq .cd:hover{ transform:scale(1.8); }
+.pick-hint{ margin:10px 0 0; font-size:13px; }
+.patch{ padding:10px 0; border-top:1px solid var(--line); font-size:14px; } .patch:first-child{ border-top:0; }
+.patch p{ margin:0 0 6px; } .patch .old,.patch .new{ padding:8px 10px; border-radius:8px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; }
+.patch .old{ background:var(--fatal-soft); } .patch .new{ background:var(--pass-soft); }
+.cause{ padding:8px 0; border-top:1px solid var(--line); } .cause:first-child{ border-top:0; } .cause p{ margin:2px 0 0; font-size:13px; }
+.finds{ list-style:none; margin:8px 0 0; padding:0; } .finds li{ padding:9px 0; border-top:1px solid var(--line); font-size:14px; } .finds li:first-child{ border-top:0; }
+.finds p{ margin:4px 0 0; } .finds .src{ font-size:12px; }
+.turn-go{ margin-left:6px; padding:1px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent-text); font:500 12px/1.5 var(--font); }
+
+/* the transcript: faults in red, evidence marked inside the text */
+.tr{ list-style:none; margin:0; padding:0; }
+.tt{ position:relative; padding:9px 12px 9px 14px; margin:0 0 6px; border-radius:10px; background:var(--surface-2); transition:box-shadow .3s var(--ease); }
+.tt.user{ background:var(--surface); box-shadow:inset 0 0 0 1px var(--line); }
+.tt-h{ display:flex; gap:8px; align-items:baseline; font-size:12px; color:var(--text-2); } .tt-h b{ color:var(--text); font-weight:600; }
+.tt p{ margin:4px 0 0; font-size:14px; overflow-wrap:anywhere; }
+.tt.fault{ background:var(--tone-soft); box-shadow:inset 3px 0 0 var(--tone); }
+.tt.flash{ box-shadow:inset 3px 0 0 var(--tone, var(--accent)), 0 0 0 3px var(--accent); }
+.tt mark{ padding:0 2px; border-radius:3px; background:transparent; color:var(--ink); box-shadow:inset 0 -2px 0 var(--tone); font-weight:600; }
+.flag{ display:flex; flex-direction:column; gap:2px; margin:6px 0 0 !important; color:var(--ink); font-weight:600; font-size:13px !important; }
+.flag span{ color:var(--text); font-weight:400; }
+.lbls{ display:flex; flex-wrap:wrap; gap:4px; } .lbl{ padding:0 7px; border-radius:999px; background:var(--fill); font-size:12px; color:var(--text-2); }
+.lbl.bad{ background:var(--fatal-soft); color:var(--fatal-ink); }
+@media (max-width:640px){ .pn{ flex-basis:84vw; max-height:none; } .pn.wide{ flex-basis:88vw; } .wave{ height:48px; gap:2px; } .wave-steps{ font-size:11px; } }

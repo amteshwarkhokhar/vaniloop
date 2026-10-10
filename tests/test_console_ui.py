@@ -275,6 +275,26 @@ def test_home_a_real_job_replaces_a_replay():
     assert 'class="st st-run" data-step="ingest"' not in d["home"], "the replay's first step must be gone"
 
 
+def test_pipeline_page_shows_every_step_and_one_call_with_its_faults_in_red():
+    """The Pipeline page lays out the five steps in one lane under the run waveform. Picking a call shows its
+    transcript with the fault turn marked in its tone, the evidence quote marked, the Jev label, and one pane per step.
+
+    The owner asked to see the real transcript with the fault in red and each step's output for the call. If this
+    broke, the page would show totals only, or unescaped call text."""
+    d = run("con-flow")
+    assert d["all"].count('<section class="pn') == 5 and 'class="wave"' in d["all"]
+    assert d["all"].count("<i class=") == 70, "ten waveform bars per loop step"
+    assert 'data-pick="c1&#60;b&#62;"' in d["all"] and "<b>c1" not in d["all"]
+    c = d["call"]
+    heads = [c.index(f"<h2>{n}</h2>") for n in ("Transcript", "Ingest", "Audit", "Judge", "Issues", "Fix", "Test")]
+    assert heads == sorted(heads)
+    assert 'id="ft-2" class="tt bot fault t-fatal"' in c and '<mark class="t-fatal">Which colour</mark>' in c
+    assert "&#60;img src=x&#62;" in c and "<img" not in c
+    assert c.count("<mark") == 1, "an overlapping quote or one that only matches inside an entity marks nothing"
+    assert "✕ question does not fit" in c and "Wrong spec question" in c and "ask grade" in c
+    assert "old prompt failed 3 of 3 · new failed 1 of 3" in c and "c1.mp3" in c and "/x/y" not in c
+
+
 CALL_LINK = re.compile(r'href="/#/call/([^"]+)"')
 SCRIPT_ID = "%3Cscript%3Ealert(1)%3C%2Fscript%3E"
 
