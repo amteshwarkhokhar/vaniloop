@@ -55,15 +55,29 @@ def _ledger() -> Ledger:
 
 @pytest.fixture
 def transport(monkeypatch, tmp_path):
-    """Mock the Jev transport: `answers` maps a question id to a noul value (default 0.5), `bodies` records requests."""
+    """Mock the Jev transport: `answers` maps a tag to a noul value (default 0.5), `bodies` records requests.
+
+    A tag names the judgement: "q2", "n2" and "opt2_0" for the spec turn at idx 2, "f1" for the buyer turn at idx 1,
+    "pm" for the product match. The mock finds the turn idx from the state text of the synthetic call.
+    """
     monkeypatch.setattr(llm, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-not-real")
     monkeypatch.delenv("VANILOOP_CACHE", raising=False)
     state = {"answers": {}, "bodies": []}
+    idx_of = {t.text: t.idx for t in _call().turns}
+
+    def tag(body, qid):
+        st = body["state"]
+        if "bot_turn" in st and "buyer_reply" not in st:
+            i = idx_of[st["bot_turn"]]
+            return f"{qid}{i}" if qid in ("q", "n") else f"opt{i}_{qid[3:]}"
+        if "buyer_reply" in st:
+            return f"f{idx_of[st['buyer_reply']]}"
+        return qid
 
     def fake(url, api_key, body):
         state["bodies"].append(body)
-        ans = {i: {"type": "noul", "noul": state["answers"].get(i, 0.5)} for i in body["questions"]}
+        ans = {i: {"type": "noul", "noul": state["answers"].get(tag(body, i), 0.5)} for i in body["questions"]}
         return {"model": "jev-1", "answers": ans, "usage": {"input_tokens": 100, "output_tokens": 4}}
 
     monkeypatch.setattr(llm, "_jev_post", fake)
@@ -75,7 +89,7 @@ def test_jev_labels_replace_gemini_and_structure_is_kept(transport):
 
     If it failed, Gemini's labels would still decide Fatals, or Jev would overwrite slots, values, declined or scope.
     """
-    transport["answers"] = {"q2": 0.1, "o2": 0.2, "n2": 0.9, "pm": 0.9, "f1": 0.3, "f3": 0.8}
+    transport["answers"] = {"q2": 0.1, "n2": 0.9, "opt2_0": 0.9, "opt2_1": 0.9, "pm": 0.9, "f1": 0.3, "f3": 0.8}
     led, out = _ledger(), jev.judge_ledger(_call(), _ledger())
     spec = next(b for b in out.bot_turns if b.idx == 2)
     assert (spec.question_fits_product, spec.fits_confirmed_product) == (False, False)
@@ -109,37 +123,61 @@ def test_thresholds_and_unknown_product_change(transport):
     assert finding.status == "Unknown"
 
 
-def test_one_request_per_call_then_cached(transport):
-    """Protects the cost: one request carries every question, and a rerun reads the disk cache.
+def test_one_request_per_judgement_then_cached(transport):
+    """Protects the cost and the focus: the call makes one request per spec turn, buyer turn and product match.
 
-    If it failed, a regrade or a resumed run would pay for Jev again.
+    If it failed, the whole call would go back into one state (v3) or a regrade would pay for Jev again.
     """
     jev.judge_ledger(_call(), _ledger())
-    assert len(transport["bodies"]) == 1
-    body = transport["bodies"][0]
-    assert body["model"] == "jev-latest" and set(body) == {"state", "model", "questions"}
+    assert len(transport["bodies"]) == 4  # 1 spec turn, 2 buyer turns, 1 product match
+    for body in transport["bodies"]:
+        assert body["model"] == "jev-latest" and set(body) == {"state", "model", "questions"}
     jev.judge_ledger(_call(), _ledger())
-    assert len(transport["bodies"]) == 1
+    assert len(transport["bodies"]) == 4
 
 
-def test_every_question_is_complete_on_its_own(transport):
-    """Protects Jev's rule that question ids are never sent: each question names its product and quotes its turn.
+def test_each_judgement_gets_only_its_own_state():
+    """Protects the v4 design (#121): a spec turn's state holds four fields and a buyer turn's holds two.
 
-    If it failed, Jev would answer a question about "it" with no product or no turn to read.
+    If it failed, a request would again carry the whole call and Jev's irritation and fit answers would drop (v3).
     """
-    qs = jev.build_questions(_call(), _ledger())
-    assert set(qs) == {"q2", "n2", "o2", "pm", "f1", "f3"}
-    for qid, q in qs.items():
-        assert q["type"] == "noul" and q["criteria"]["true"] and q["criteria"]["false"]
-        assert qid not in q["instructions"]
-    assert "laptop" in qs["q2"]["instructions"] and '"brand"' in qs["q2"]["instructions"]  # the spec name (#113)
-    assert "Laptop ka brand kaunsa chahiye" in qs["o2"]["instructions"]
-    assert "DJI, MI" in qs["o2"]["instructions"]
-    assert "drone camera" in qs["pm"]["instructions"] and '"laptop"' in qs["pm"]["instructions"]
-    assert "Nahi, mujhe laptop chahiye." in qs["f1"]["instructions"]
-    assert (
-        "Laptop ka brand kaunsa chahiye" in qs["f3"]["instructions"] and "Maine kaha laptop" in qs["f3"]["instructions"]
-    )
+    reqs = jev.build_questions(_call(), _ledger())
+    states = [st for st, _ in reqs]
+    assert [set(st) for st in states] == [
+        {"product_the_buyer_wants", "bot_turn", "specification_asked", "options_offered"},
+        {"bot_turn", "buyer_reply"},
+        {"bot_turn", "buyer_reply"},
+        {"product_the_bot_confirmed", "product_the_buyer_finally_wants"},
+    ]
+    assert states[0] == {
+        "product_the_buyer_wants": "laptop",
+        "bot_turn": "Laptop ka brand kaunsa chahiye, DJI ya MI?",
+        "specification_asked": "brand",
+        "options_offered": ["DJI", "MI"],
+    }
+    assert states[1] == {
+        "bot_turn": "Namaste, aap drone camera chahte hain?",
+        "buyer_reply": "Nahi, mujhe laptop chahiye.",
+    }
+    assert states[3] == {"product_the_bot_confirmed": "drone camera", "product_the_buyer_finally_wants": "laptop"}
+    assert [list(qs) for _, qs in reqs] == [["q", "n", "opt0", "opt1"], ["f"], ["f"], ["pm"]]
+    for _, qs in reqs:
+        for q in qs.values():
+            assert q["type"] == "noul" and q["criteria"]["true"] and q["criteria"]["false"]
+
+
+def test_questions_carry_criteria_objects_with_examples():
+    """Protects the tuned wording: spec, option, irritation and product questions give description and examples.
+
+    If it failed, the definitions that lifted the held-out scores would be lost and Jev would judge on thin criteria.
+    """
+    qs = [q for _, qs in jev.build_questions(_call(), _ledger()) for q in qs.values()]
+    spec_q = next(q for q in qs if q["instructions"].startswith("Could a sales agent"))
+    assert "voltage for an electric bike switch" in spec_q["criteria"]["true"]["examples"]
+    assert "flight time for a dome camera" in spec_q["criteria"]["false"]["examples"]
+    for q in qs:
+        if q["instructions"].startswith(("Could", "Is `options", "In `buyer", "Would")):
+            assert q["criteria"]["true"]["description"] and q["criteria"]["false"]["examples"]
 
 
 def test_spec_turn_is_judged_against_the_product_after_the_change(transport):
@@ -149,10 +187,11 @@ def test_spec_turn_is_judged_against_the_product_after_the_change(transport):
     """
     led = _ledger()
     led.bot_turns.insert(1, BotTurnLabel(idx=0, slot="spec", options_offered=[]))  # before the change at turn 1
-    qs = jev.build_questions(_call(), led)
-    assert '"drone camera"' in qs["q0"]["instructions"] and '"laptop"' not in qs["q0"]["instructions"]
-    assert '"laptop"' in qs["q2"]["instructions"] and '"drone camera"' not in qs["q2"]["instructions"]
-    assert "o0" not in qs  # no options: the question alone is used for both labels
+    specs = [st for st, qs in jev.build_questions(_call(), led) if "specification_asked" in st]
+    assert [st["product_the_buyer_wants"] for st in specs] == ["drone camera", "laptop"]
+    assert list(jev.build_questions(_call(), led)[0][1]) == ["q"]  # no spec_name and no options: the question only
+    q = jev.build_questions(_call(), led)[0][1]["q"]["instructions"]
+    assert "(the specification asked in `bot_turn`)" in q  # a missing spec_name points at the turn
 
 
 def test_missing_key_stops_with_the_variable_name(monkeypatch, tmp_path):
@@ -245,12 +284,12 @@ def test_real_audit_fn_uses_jev_only_when_asked(transport, monkeypatch):
     assert transport["bodies"] == []
     monkeypatch.setenv("VANILOOP_JUDGE", "jev")
     prove.real_audit_fn(_call())
-    assert len(transport["bodies"]) == 1
+    assert len(transport["bodies"]) == 4
 
 
-def test_frustration_question_asks_for_irritation_not_repetition():
+def test_frustration_question_asks_for_irritation_with_calm_examples():
     """The irritation test (matrix: Fatal when the buyer gets irritated) must ask about irritation with the bot and
-    say that repeated agreement words are not irritation. With "repeating themselves" in the question, Jev scored a
+    list the calm replies (checking the line, repeated answers) as not irritated. Asked about repetition, Jev scored a
     plain "Haan, haan. Haan." at 0.73 on a real call, which would make most loops and calls Fatal or flagged."""
     call = CallRecord(
         call_id="syn_irritation",
@@ -268,10 +307,13 @@ def test_frustration_question_asks_for_irritation_not_repetition():
             "bot_turns": [{"idx": 0, "slot": "confirm"}],
         }
     )
-    q = jev.build_questions(call, led)["f1"]
-    text = q["instructions"].lower()
-    assert "irritated or annoyed" in text and "repeating themselves" not in text and "haan haan" in text
-    assert jev.JEV_VERSION != "1"
+    ((state, qs),) = jev.build_questions(call, led)
+    assert state == {"bot_turn": "Aapko packing machine chahiye na?", "buyer_reply": "Haan, haan. Haan."}
+    q = qs["f"]
+    assert "irritated or annoyed" in q["instructions"] and "`buyer_reply`" in q["instructions"]
+    assert "answering, agreeing or repeating an answer" in q["criteria"]["false"]["examples"]
+    assert "complains the bot keeps asking or repeating" in q["criteria"]["true"]["examples"]
+    assert jev.JEV_VERSION == "4"
 
 
 def test_unsure_question_fit_leaves_fits_confirmed_unjudged(transport):
@@ -279,7 +321,7 @@ def test_unsure_question_fit_leaves_fits_confirmed_unjudged(transport):
 
     If it failed, (None, True) would reach the rule and a spec turn nobody judged would Pass.
     """
-    transport["answers"] = {"q2": 0.5, "o2": 0.9, "pm": 0.9}
+    transport["answers"] = {"q2": 0.5, "n2": 0.9, "opt2_0": 0.9, "opt2_1": 0.9, "pm": 0.9}
     spec = next(b for b in jev.judge_ledger(_call(), _ledger()).bot_turns if b.idx == 2)
     assert (spec.question_fits_product, spec.fits_confirmed_product) == (None, None)
 
@@ -363,27 +405,28 @@ def test_spec_product_uses_only_its_own_segment():
     assert jev.spec_product(no_final, 2) is None and jev.spec_product(no_final, 0) == "drone camera"
     unchanged = led.model_copy(update={"product_changed_at_turn": None})
     assert jev.spec_product(unchanged, 2) == "drone camera"
-    led.bot_turns.insert(1, BotTurnLabel(idx=0, slot="spec"))
-    assert "q0" not in jev.build_questions(_call(), no_initial)
+    no_initial.bot_turns.insert(1, BotTurnLabel(idx=0, slot="spec"))
+    specs = [st for st, _ in jev.build_questions(_call(), no_initial) if "specification_asked" in st]
+    assert [st["product_the_buyer_wants"] for st in specs] == ["laptop"]  # the idx 0 turn has no product: no request
 
 
-def test_identical_replies_give_different_questions():
-    """Protects the questions: two identical buyer replies are named by idx, so their instructions differ.
+def test_identical_buyer_replies_each_get_their_own_request():
+    """Protects the buyer turns: two identical buyer replies make two requests, each with its own bot turn.
 
-    If it failed, Jev would get two identical questions and could not tell which turn each one is about.
+    If it failed, a repeated "Pump" would be judged once and the second turn would reuse the first one's answer.
     """
-    texts = ["Kya chahiye?", "Pump", "Kya chahiye?", "Pump"]
+    texts = ["Kya chahiye?", "Pump", "Kitna chahiye?", "Pump"]
     turns = [
         Turn(idx=i, speaker="bot" if i % 2 == 0 else "user", start_sec=i, end_sec=i + 1, text=t)
         for i, t in enumerate(texts)
     ]
     call = CallRecord(call_id="d", duration_sec=5.0, turns=turns)
     led = Ledger(call_id="d", scope="bl_collection", user_turns=[UserTurnLabel(idx=1), UserTurnLabel(idx=3)])
-    qs = jev.build_questions(call, led)
-    assert qs["f1"]["instructions"] != qs["f3"]["instructions"]
-    assert "idx 1" in qs["f1"]["instructions"] and "idx 0" in qs["f1"]["instructions"]
-    assert "idx 3" in qs["f3"]["instructions"] and "idx 2" in qs["f3"]["instructions"]
-    assert "sales bot turn with idx 2" in jev.build_questions(_call(), _ledger())["q2"]["instructions"]
+    states = [st for st, _ in jev.build_questions(call, led)]
+    assert states == [
+        {"bot_turn": "Kya chahiye?", "buyer_reply": "Pump"},
+        {"bot_turn": "Kitna chahiye?", "buyer_reply": "Pump"},
+    ]
 
 
 @pytest.mark.parametrize("bad", [2, -1, float("nan")])
@@ -396,7 +439,8 @@ def test_invalid_probability_is_rejected_and_never_cached(transport, monkeypatch
     transport["answers"] = {"pm": bad}
     with pytest.raises(RuntimeError):
         jev.judge_ledger(_call(), _ledger())
-    assert not llm.CACHE_DIR.exists() or not list(llm.CACHE_DIR.glob("*.json"))
+    cached = list(llm.CACHE_DIR.glob("*.json")) if llm.CACHE_DIR.exists() else []
+    assert not any("pm" in json.loads(f.read_text())["answers"] for f in cached)  # the other requests may be cached
 
 
 def test_invalid_cached_probability_is_refetched(transport):
@@ -405,12 +449,13 @@ def test_invalid_cached_probability_is_refetched(transport):
     If it failed, an old bad cache file would keep feeding 2 or NaN into the labels.
     """
     jev.judge_ledger(_call(), _ledger())
-    f = next(llm.CACHE_DIR.glob("*.json"))
-    d = json.loads(f.read_text())
-    d["answers"]["pm"] = 2
-    f.write_text(json.dumps(d))
+    for f in llm.CACHE_DIR.glob("*.json"):
+        d = json.loads(f.read_text())
+        if "pm" in d["answers"]:
+            d["answers"]["pm"] = 2
+            f.write_text(json.dumps(d))
     jev.judge_ledger(_call(), _ledger())
-    assert len(transport["bodies"]) == 2
+    assert len(transport["bodies"]) == 5  # only the product-match request is asked again
 
 
 def test_agreement_excludes_missing_frustrated():
@@ -463,12 +508,11 @@ def test_judge_skips_a_malformed_ledger_row_and_goes_on(transport, tmp_path):
     assert r == {"judged": 1, "skipped": 0, "errors": 1} and "bad_row" in errs.read_text()
 
 
-def test_question_alone_is_asked_about_the_spec_name_not_the_utterance():
-    """question_fits_product judges the question without its options, so Jev must get the spec name alone.
+def test_question_alone_is_asked_about_the_spec_name_and_each_option_apart():
+    """question_fits_product judges the spec name alone and each option gets its own question.
 
-    With the whole utterance ("Voltage, 60V or 48V?") Jev judged the options too: on 42 real turns where Gemini said
-    the question fits, Jev said it did not, and a pilot asking about the spec name alone agreed with Gemini on 35.
-    If this failed, wrong options would make category_isq Fatal instead of Non-fatal.
+    With the whole utterance ("Voltage, 60V or 48V?") Jev judged the options too (#113). If this failed, wrong
+    options would make category_isq Fatal instead of Non-fatal.
     """
     call = CallRecord(
         call_id="syn_spec",
@@ -483,44 +527,96 @@ def test_question_alone_is_asked_about_the_spec_name_not_the_utterance():
             "bot_turns": [{"idx": 0, "slot": "spec", "spec_name": "voltage", "options_offered": ["60V", "48V"]}],
         }
     )
-    q = jev.build_questions(call, led)
-    assert '"voltage"' in q["q0"]["instructions"] and "60V" not in q["q0"]["instructions"]
-    assert "60V" in q["o0"]["instructions"]  # the options stay in the question-with-options label
-    assert jev.JEV_VERSION == "3"
+    ((state, qs),) = jev.build_questions(call, led)
+    assert state["specification_asked"] == "voltage" and state["options_offered"] == ["60V", "48V"]
+    assert "options" in qs["q"]["instructions"] and "60V" not in qs["q"]["instructions"]
+    assert "options_offered[1]" in qs["opt1"]["instructions"]
+    assert jev.JEV_VERSION == "4"
 
 
-def test_spec_name_answer_counts_only_when_jev_confirms_the_turn_asks_it(transport):
-    """The question-alone label trusts Gemini's spec_name only when Jev confirms the turn asks about it.
+def test_spec_name_answer_counts_only_when_jev_confirms_the_turn_asks_it(transport, monkeypatch):
+    """The question-alone label trusts Gemini's spec_name only when the name check n is above 0.35.
 
     If this failed, a spec name Gemini mislabelled as something generic ("performance" for "flight time" on a dome
     camera) would make a wrong question pass (Codex review on #114).
     """
-    led = _ledger()
-    led = led.model_copy(
-        update={"bot_turns": [b.model_copy(update={"spec_name": "brand"}) if b.idx == 2 else b for b in led.bot_turns]}
-    )
-    transport["answers"].update({"q2": 0.9, "o2": 0.9, "n2": 0.1})
-    b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    transport["answers"].update({"q2": 0.9, "n2": 0.35, "opt2_0": 0.9, "opt2_1": 0.9})
+    b = next(b for b in jev.judge_ledger(_call(), _ledger()).bot_turns if b.idx == 2)
     assert b.question_fits_product is None and b.fits_confirmed_product is None
-    transport["answers"]["n2"] = 0.9
-    jev.JEV_VERSION, old = "3-confirmed", jev.JEV_VERSION  # a fresh cache key for the second answer set
-    try:
-        b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
-    finally:
-        jev.JEV_VERSION = old
+    transport["answers"]["n2"] = 0.36
+    monkeypatch.setenv("VANILOOP_CACHE", "refresh")  # the first answer set is cached
+    b = next(b for b in jev.judge_ledger(_call(), _ledger()).bot_turns if b.idx == 2)
     assert b.question_fits_product is True and b.fits_confirmed_product is True
 
 
 def test_spec_name_answer_without_its_check_is_not_used(transport, monkeypatch):
-    """A spec-name answer with no consistency answer at all must stay unjudged, not trusted.
+    """A spec-name answer with no name-check answer at all must stay unjudged, not trusted.
 
-    If this failed, a response that dropped the n<idx> answer would let a mislabelled spec name pass (Codex round 2
+    If this failed, a response that dropped the n answer would let a mislabelled spec name pass (Codex round 2
     on #114).
     """
-    led = _ledger()
-    led = led.model_copy(
-        update={"bot_turns": [b.model_copy(update={"spec_name": "brand"}) if b.idx == 2 else b for b in led.bot_turns]}
+    monkeypatch.setattr(
+        jev, "complete_jev", lambda state, questions, cache_tag="": {k: 0.9 for k in questions if k != "n"}
     )
-    monkeypatch.setattr(jev, "complete_jev", lambda state, questions, cache_tag="": {"q2": 0.9, "o2": 0.9})
-    b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    b = next(b for b in jev.judge_ledger(_call(), _ledger()).bot_turns if b.idx == 2)
     assert b.question_fits_product is None and b.fits_confirmed_product is None
+
+
+def test_per_label_thresholds():
+    """Protects the tuned thresholds: q is True at 0.55 and False at 0.20, an option is True at 0.50.
+
+    If it failed, the thresholds tuned on the Fable-reviewed set would drift back to the old 0.65 / 0.35.
+    """
+    f = jev._spec_labels
+    assert f(0, {"q": 0.56}, False)[0] is True
+    assert f(0, {"q": 0.21}, False)[0] is None
+    assert f(0, {"q": 0.19}, False)[0] is False
+    assert f(1, {"q": 0.9, "opt0": 0.5}, False) == (True, True)
+    assert f(1, {"q": 0.9, "opt0": 0.21}, False) == (True, None)
+    assert f(1, {"q": 0.9, "opt0": 0.2}, False) == (True, False)
+    assert f(0, {"q": 0.9, "n": 0.35}, True) == (None, None)  # name check: dropped at n <= 0.35
+    assert f(0, {"q": 0.9, "n": 0.36}, True)[0] is True
+    assert (jev.to_bool(0.65), jev.to_bool(0.64), jev.to_bool(0.35), jev.to_bool(0.36)) == (True, None, False, None)
+
+
+def test_combining_question_and_option_labels():
+    """Protects fits_confirmed_product: q False gives False, any False option gives False, any unsure gives None.
+
+    If it failed, a wrong option could pass a turn, or an unjudged option could count as fitting.
+    """
+    f = jev._spec_labels
+    assert f(2, {"q": 0.1, "opt0": 0.9, "opt1": 0.9}, False) == (False, False)  # q False: options False
+    assert f(2, {"q": 0.9, "opt0": 0.9, "opt1": 0.1}, False) == (True, False)  # one option False
+    assert f(2, {"q": 0.9, "opt0": 0.9, "opt1": 0.4}, False) == (True, None)  # one option unsure
+    assert f(2, {"q": 0.9, "opt0": 0.9}, False) == (True, None)  # one option missing
+    assert f(2, {"q": 0.9, "opt0": 0.9, "opt1": 0.9}, False) == (True, True)
+    assert f(0, {"q": 0.9}, False) == (True, True)  # no options: fits_confirmed_product = q
+    assert f(0, {"q": 0.1}, False) == (False, False)
+    assert f(2, {"q": 0.4, "opt0": 0.9, "opt1": 0.9}, False) == (None, None)  # q unsure: nothing judged
+
+
+def test_frustrated_is_the_probability_and_fingerprint_covers_every_request(transport):
+    """Protects two rules: frustrated is Jev's probability unchanged, and the fingerprint moves with any request.
+
+    If it failed, a rounded probability would shift the 0.6 irritation line, or a changed state would keep a stale row.
+    """
+    transport["answers"] = {"f1": 0.4321, "f3": 0.9}
+    out = jev.judge_ledger(_call(), _ledger())
+    assert [u.frustrated for u in out.user_turns] == [0.4321, 0.9]
+    base = jev.fingerprint(_call(), _ledger())
+    assert base == jev.fingerprint(_call(), _ledger())
+    other = _call().model_copy(
+        update={"turns": [t.model_copy(update={"text": t.text + "!"}) if t.idx == 3 else t for t in _call().turns]}
+    )
+    assert jev.fingerprint(other, _ledger()) != base  # only the buyer turn at idx 3 changed
+
+
+def test_product_match_is_asked_only_with_both_products(transport):
+    """Protects product match: no request and product_match None when the bot confirmed no product.
+
+    If it failed, Jev would be asked about a missing product and the handoff rule could not say Unknown.
+    """
+    led = _ledger().model_copy(update={"bot_confirmed": {"quantity": "5"}})
+    jev.judge_ledger(_call(), led)
+    assert not any("product_the_bot_confirmed" in b["state"] for b in transport["bodies"])
+    assert jev.judge_ledger(_call(), led).product_match is None
