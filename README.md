@@ -1,6 +1,8 @@
-# vaniloop
+# Take Two
 
-Audit, root-cause, fix and prove loop for VANI, IndiaMART's buyer-side voice bot.
+Every bad call gets a second take. **Take Two** is the audit, root-cause, fix and prove
+loop for VANI, IndiaMART's buyer-side voice bot. It is the demo name; the package, the
+console and the repo are `vaniloop`.
 Built for the IndiaMART Voice AI Hackathon 2.0 (9–10 Oct 2026), problem statement 1,
 "Quality Audit & Fix Loop".
 
