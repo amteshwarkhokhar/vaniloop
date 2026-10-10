@@ -253,11 +253,66 @@ def host_allowed(host: str | None) -> bool:
 
 
 def call_detail(d: Path, call_id: str) -> dict | None:
+    """One call and what each step did with it: its audit, the turn labels the rules graded, its causes, their
+    patches and its gate replays."""
     call = _calls(d).get(call_id)
     audit = next((a for a in _audits(d) if a["call_id"] == call_id), None)
     if call is None and audit is None:
         return None
-    return {"call": call, "audit": audit}
+    source, ledger = _ledger(d, call_id)
+    return {"call": call, "audit": audit, "ledger": ledger, "ledger_source": source, **_call_steps(d, call_id)}
+
+
+def _ledger(d: Path, call_id: str) -> tuple[str, dict | None]:
+    """The call's Jev ledger, else its Gemini ledger, with the judge that wrote it."""
+    for name, source in (("ledgers_jev.jsonl", "jev"), ("ledgers.jsonl", "gemini")):
+        row = next((r for r in read_jsonl(d / name) if isinstance(r, dict) and r.get("call_id") == call_id), None)
+        if row is not None:
+            return source, row
+    return "", None
+
+
+def _list(value) -> list:
+    """The value when it is a list, else an empty list, so a malformed file never crashes the call page."""
+    return value if isinstance(value, list) else []
+
+
+_ROLES = (("fatal", "fatal_calls"), ("nonfatal", "nonfatal_calls"), ("symptom", "symptom_calls"))
+_PATCH_KEYS = ("cause_id", "attempt", "old_text", "new_text", "rationale", "decision", "gate_decision")
+
+
+def _call_steps(d: Path, call_id: str) -> dict:
+    """The causes that hold the call (and how), the patches for those causes, and the call's replays in each gate."""
+    mine = []
+    for c in causes(d)["causes"]:
+        if not isinstance(c, dict):
+            continue
+        role = next((r for r, key in _ROLES if call_id in _list(c.get(key))), None)
+        if role:
+            mine.append({k: c.get(k) for k in ("cause_id", "name", "parameter", "type", "status")} | {"role": role})
+    ids = {c["cause_id"] for c in mine}
+    try:
+        raw = json.loads((d / "patches.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raw = {}
+    rows = [p for key in ("patches", "history") for p in _list(raw.get(key) if isinstance(raw, dict) else None)]
+    mine_rows = [p for p in rows if isinstance(p, dict) and p.get("cause_id") in ids]
+    patches = [{k: p.get(k) for k in _PATCH_KEYS if k in p} for p in mine_rows]
+    replays = [
+        {
+            "cause_id": g.get("cause_id"),
+            "attempt": g.get("attempt"),
+            "decision": g.get("decision"),
+            "k": pc.get("k"),
+            "old_fails": pc.get("old_fails"),
+            "new_fails": pc.get("new_fails"),
+        }
+        for g in gates(d)
+        if isinstance(g, dict)
+        for pc in _list(g.get("per_call"))
+        if isinstance(pc, dict) and pc.get("call_id") == call_id
+    ]
+    return {"causes": mine, "patches": patches, "gates": replays}
 
 
 def causes(d: Path) -> dict:

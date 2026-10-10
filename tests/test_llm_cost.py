@@ -157,6 +157,22 @@ def test_missing_cost_header_records_null_cost_row(cost_env):
     assert len(r) == 1 and r[0]["cost_usd"] is None and r[0]["prompt_tokens"] == 10
 
 
+def test_openrouter_call_without_header_costs_its_tokens(cost_env, monkeypatch):
+    """Through OpenRouter (no LiteLLM header) a call costs its tokens at the list price, so the cap still counts it.
+
+    The owner moved the Gemini route to OpenRouter on 10 Oct 2026. Without this every call would cost null, the
+    budget would never fill and a long run could overspend."""
+    monkeypatch.setenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    FakeClient.headers, FakeClient.tokens = {}, (1000, 100)
+    FakeClient.outputs = ['{"ok": true}']
+    llm.complete_json("s", "u", model="google/gemini-3-flash-preview", cache_tag="t")
+    r = rows(cost_env / "costs.jsonl")
+    assert len(r) == 1 and r[0]["cost_usd"] == pytest.approx(1000 * 0.0000005 + 100 * 0.000003)
+    FakeClient.outputs = ['{"ok": true}']
+    llm.complete_json("s", "u2", model="unpriced/model", cache_tag="t")
+    assert rows(cost_env / "costs.jsonl")[1]["cost_usd"] is None, "an unpriced model stays null, never a guess"
+
+
 def test_budget_reached_raises_before_provider_call(cost_env, monkeypatch):
     """Spend at the cap must raise BudgetExceeded and never reach the provider stub.
 
