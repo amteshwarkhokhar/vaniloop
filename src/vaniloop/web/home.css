@@ -1,0 +1,71 @@
+/* vaniloop home: the run button, the calls as squares, and the five steps. Tokens come from app.css. */
+.home-run{ display:flex; flex-wrap:wrap; align-items:center; gap:12px 18px; margin:0 0 24px; }
+.home-run .btn.lg{ gap:10px; padding:0 28px; box-shadow:0 6px 18px rgba(97,85,245,.28); }
+.home-run .btn.lg:disabled{ box-shadow:none; }
+.home-run .btn svg{ width:14px; height:14px; fill:currentColor; }
+.run-meta{ flex:1 1 280px; min-width:0; }
+.plan-line{ margin:0; color:var(--text-2); font-size:14px; }
+.plan{ margin-top:4px; font-size:14px; }
+.plan summary{ cursor:pointer; color:var(--accent-text); font-weight:500; padding:2px 0; }
+.plan ol{ margin:6px 0 0; padding-left:20px; } .plan li{ margin:2px 0; }
+.home-run .confirm,.home-run .note,.home-run .err{ flex-basis:100%; margin:0; }
+
+/* the calls: one square per call, worst first */
+.calls{ padding:20px 22px; margin:0 0 8px; }
+.calls-h{ display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 14px; }
+.calls-h h2{ margin:0; font:600 17px/1.2 var(--font); }
+.calls-h h2 b{ font:700 28px/1 var(--rounded); margin-right:4px; }
+.calls-h .btn{ margin-left:auto; }
+.legend{ display:flex; flex-wrap:wrap; gap:8px 16px; margin:12px 0 14px; }
+.lg{ display:inline-flex; align-items:center; gap:6px; } .lg b{ font:600 15px/1 var(--rounded); }
+.calls-grid{ position:relative; display:grid; grid-template-columns:repeat(auto-fill, 10px); gap:3px; padding:2px; overflow:hidden; border-radius:6px; }
+.cd{ width:10px; height:10px; border-radius:3px; background:var(--tone, var(--line-strong)); transition:transform .15s var(--ease); }
+.cd:hover{ transform:scale(1.7); }
+.calls-grid:not(.seen) .cd{ animation:pop .45s var(--ease) both; animation-delay:calc(var(--i) * 1ms); }
+@keyframes pop{ from{ opacity:0; transform:scale(.2); } to{ opacity:1; transform:none; } }
+.calls-grid.scan::after{ content:""; position:absolute; inset:0; pointer-events:none;
+  background:linear-gradient(90deg, transparent, rgba(97,85,245,.35), transparent) no-repeat; background-size:30% 100%; animation:sweep 1.3s linear infinite; }
+@keyframes sweep{ from{ background-position:-40% 0; } to{ background-position:140% 0; } }
+.calls-foot{ margin:12px 0 0; font-size:13px; }
+
+/* the five steps, joined by a line that turns indigo as each step ends */
+.steps{ list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(5, minmax(0, 1fr)); gap:16px; }
+.st{ position:relative; display:flex; flex-direction:column; gap:6px; min-width:0; padding:16px; background:var(--surface); border-radius:var(--r-group);
+  box-shadow:var(--edge); transition:box-shadow .3s var(--ease), transform .3s var(--ease), opacity .3s var(--ease); }
+.st + .st::before{ content:""; position:absolute; left:-16px; top:28px; width:16px; height:2px; background:var(--line); transition:background .4s var(--ease); }
+.st-done + .st::before{ background:var(--accent); }
+.st-h{ display:flex; align-items:center; gap:8px; }
+.st-h h3{ flex:1; margin:0; font:600 16px/1.2 var(--font); }
+.st-h .chip{ font-size:12px; padding:1px 8px; }
+.st-n{ flex:none; display:inline-grid; place-items:center; width:24px; height:24px; border-radius:50%; background:var(--fill); color:var(--text-2); font:600 13px/1 var(--rounded); }
+.st-n svg{ width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:16; stroke-dashoffset:16; animation:draw .4s var(--ease) .1s forwards; }
+@keyframes draw{ to{ stroke-dashoffset:0; } }
+.st-do{ margin:0; min-height:2.8em; color:var(--text-2); font-size:13px; line-height:1.4; }
+.st-res{ flex:1; }
+.st-big{ margin:2px 0 0; color:var(--text-2); font-size:14px; } .st-big b{ margin-right:2px; color:var(--text); font:700 26px/1.1 var(--rounded); }
+.st-line{ margin:4px 0 0; color:var(--text-2); font-size:13px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+.vbar.mini{ margin:8px 0 2px; }
+.st-more{ margin-top:6px; font-size:14px; font-weight:500; }
+.st-wait{ opacity:.5; }
+.st-run{ box-shadow:0 0 0 2px var(--accent), 0 10px 28px rgba(97,85,245,.18); transform:translateY(-3px); }
+.st-run .st-n{ background:var(--accent); color:var(--on-accent); animation:pulse 1.4s var(--ease) infinite; }
+@keyframes pulse{ 0%{ box-shadow:0 0 0 0 rgba(97,85,245,.45); } 70%{ box-shadow:0 0 0 9px rgba(97,85,245,0); } 100%{ box-shadow:0 0 0 0 rgba(97,85,245,0); } }
+.st-done .st-n{ background:var(--accent); color:var(--on-accent); }
+.st-done .st-res{ animation:rise .5s var(--ease) both; }
+@keyframes rise{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:none; } }
+.st-fail{ box-shadow:0 0 0 2px var(--fatal); } .st-fail .st-n{ background:var(--fatal-soft); color:var(--fatal-ink); }
+.st-bar{ height:4px; border-radius:2px; background:var(--fill); overflow:hidden; }
+.st-bar i{ display:block; height:100%; border-radius:2px; background:var(--accent); transition:width .25s var(--ease); }
+.st-bar.ind i{ width:40%; animation:slide 1.2s var(--ease) infinite; }
+@keyframes slide{ from{ transform:translateX(-100%); } to{ transform:translateX(260%); } }
+.done-box{ margin:20px 0 0; }
+.done-box h3{ margin:0 0 6px; font:600 17px/1.3 var(--font); } .done-box p{ margin:0 0 4px; }
+.home-wait{ margin:20px 0 0; color:var(--text-2); }
+
+@media (max-width:1180px){ .steps{ grid-template-columns:repeat(3, minmax(0, 1fr)); } .st + .st::before{ display:none; } }
+@media (max-width:640px){
+  .steps{ grid-template-columns:1fr; gap:12px; }
+  .home-run .btn.lg{ width:100%; }
+  .calls-h .btn{ margin-left:0; }
+  .st-do{ min-height:0; }
+}

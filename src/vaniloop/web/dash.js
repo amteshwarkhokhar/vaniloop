@@ -1,4 +1,4 @@
-// vaniloop dashboard: a sidebar (Run, Results, Configuration, Tools), a page head with one action, and one panel per page.
+// vaniloop dashboard: a sidebar (Home, Results, Configuration, Tools), a page head with one action, and one panel per page.
 // Every data string goes through esc().
 (() => {
   "use strict";
@@ -58,7 +58,7 @@
     calls: '<path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 8v8"/><path d="M20 11v2"/>',
   };
   const icon = (id) => `<span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24">${own(ICON, id) || ""}</svg></span>`;
-  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "ingest", filt: { kind: "all", verdict: "all", fatal: false } };
+  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "home", filt: { kind: "all", verdict: "all", fatal: false } };
   const famHead = (fam) => ITEMS.find((i) => i.fam === fam && i.side !== "tab");
 
   async function get(path) {
@@ -238,7 +238,7 @@
   };
 
   function show() {
-    const it = ITEMS.find((i) => i.id === S.now) || ITEMS.find((i) => i.id === "ingest");
+    const it = ITEMS.find((i) => i.id === S.now) || ITEMS.find((i) => i.id === "home") || ITEMS.find((i) => i.id === "ingest");
     S.now = it.id;
     const main = $("panel"), stub = (body) => head(it.name, "") + body; // a loading or failed page keeps its title and tabs
     let html;
@@ -350,6 +350,6 @@
     if (it && it.group === "operate") nav(); else show();
   }
   // The small surface console.js builds on.
-  window.VL = { S, P, ITEMS, esc, str, num, fmt, own, tone, chip, badge, head, sec, get, show, go, nav, refresh, NAMES };
+  window.VL = { S, P, ITEMS, esc, str, num, fmt, own, tone, chip, badge, head, sec, get, show, go, nav, refresh, NAMES, icon };
   boot();
 })();

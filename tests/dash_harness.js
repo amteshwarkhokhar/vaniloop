@@ -1,7 +1,7 @@
 // Runs src/vaniloop/web/dash.js against a tiny DOM stub and prints JSON. Usage: node dash_harness.js <scenario>
 const fs = require("fs"), path = require("path"), vm = require("vm");
 const web = (f) => fs.readFileSync(path.join(__dirname, "..", "src", "vaniloop", "web", f), "utf8");
-const src = web("dash.js"), consoleSrc = web("console.js");
+const src = web("dash.js"), consoleSrc = web("console.js"), homeSrc = web("home.js");
 
 function el(id) {
   const cls = new Set();
@@ -217,6 +217,48 @@ const SC = {
     out.posts = tp();
     return out;
   },
+  async "con-home"() {
+    const out = {};
+    routes["GET /api/calls"] = [200, [{ call_id: "c1", verdict: "Pass" }, { call_id: "c2<img src=x>", verdict: "Fatal" }, { call_id: "c3", verdict: null }]];
+    routes["GET /api/loop/plan"] = [200, { steps: [{ name: "audit", will_run: false, why: "no new calls", count: 0 }, { name: "test", will_run: true, why: "prove <b>2</b>", count: 2 }], causes: [], new_calls: 0, estimate_usd: 0.9 }];
+    await click({ go: "home" }); await tick();
+    out.idle = ids.panel.innerHTML; out.nav = ids.nav.innerHTML;
+    routes["POST /api/jobs"] = [[400, { error: "confirm", estimate_usd: 0.9 }], [202, { job: job("L1", "loop", "running") }]];
+    const loopLog = (from, st, lines, next) => (routes[`GET /api/jobs/L1/log?from=${from}`] = [200, { job: job("L1", "loop", st), lines, next }]);
+    loopLog(0, "running", ["LOOP_STEP 1/7 audit", "LOOP_STEP 2/7 judge"], 2);
+    loopLog(2, "done", ["LOOP_STEP 4/7 issues", "LOOP_STEP 5/7 fix", "LOOP_STEP 6/7 test", "LOOP_STEP 7/7 report",
+      'LOOP_SUMMARY {"ready_to_ship":["c3"],"tickets":["c4","c5"],"watch":[],"cost_usd":0.42}', "LOOP_DONE"], 8);
+    await click({ op: "home-run" });
+    out.confirm = ids.panel.innerHTML;
+    await click({ op: "home-go" });
+    out.mid = ids.panel.innerHTML;
+    await fire(); await tick();
+    out.done = ids.panel.innerHTML;
+    out.posts = posts();
+    return out;
+  },
+  async "con-home-job"() {
+    routes["GET /api/calls"] = [200, [{ call_id: "c1", verdict: "Fatal" }]];
+    routes["GET /api/loop/plan"] = [200, { steps: [], causes: [], new_calls: 0, estimate_usd: 0 }];
+    await click({ go: "home" }); await tick();
+    await click({ op: "home-replay" });
+    routes["POST /api/jobs"] = [202, { job: job("J1", "judge", "running") }];
+    logRoute("J1", 0, "running", ["working"], 1);
+    await click({ go: "run" }); await click({ op: "run", stage: "judge" });
+    await click({ go: "home" });
+    return { home: ids.panel.innerHTML };
+  },
+  async "con-home-ro"() {
+    routes["GET /api/calls"] = [200, [{ call_id: "c1", verdict: "Fatal" }]];
+    routes["GET /api/loop/plan"] = [200, { steps: [], causes: [], new_calls: 0, estimate_usd: null }];
+    await click({ go: "home" }); await tick();
+    const out = { ro: ids.panel.innerHTML };
+    await click({ op: "home-replay" });
+    out.replay = ids.panel.innerHTML;
+    for (let i = 0; i < 80; i++) await fire();
+    out.end = ids.panel.innerHTML; out.posts = posts();
+    return out;
+  },
   async "con-tabs"() {
     const out = {};
     await click({ go: "review" }); out.review = ids.panel.innerHTML; out.nav = ids.nav.innerHTML;
@@ -266,10 +308,11 @@ const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages
   const vctx = vm.createContext(sandbox);
   vm.runInContext(src, vctx);
   if (consoleOn) {
-    routes["GET /api/console"] = [200, { ...CON, read_only: scenario === "con-readonly" }];
+    routes["GET /api/console"] = [200, { ...CON, read_only: scenario === "con-readonly" || scenario === "con-home-ro" }];
     routes["GET /api/jobs"] = [200, { jobs: [] }];
     routes["GET /api/tracker"] = [200, TRK]; // the sidebar reads it at boot
     vm.runInContext(consoleSrc, vctx);
+    if (scenario.startsWith("con-home")) vm.runInContext(homeSrc, vctx);
     await tick();
     return console.log(JSON.stringify(await SC[scenario]()));
   }
