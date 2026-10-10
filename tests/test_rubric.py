@@ -264,7 +264,7 @@ def test_save_merges_and_null_deletes(tmp_path):
     row = {x["id"]: x for x in d["params"]}
     assert row["rules.DEAD_AIR_SEC"]["overridden"] is False and row["rules.DEAD_AIR_SEC"]["value"] == 5.0
     assert row["rules.HUMAN_P"]["overridden"] is True and row["rules.HUMAN_P"]["value"] == 0.7
-    assert sorted(x.name for x in tmp_path.iterdir()) == ["rubric.json"]
+    assert sorted(x.name for x in tmp_path.iterdir() if not x.name.endswith(".lock")) == ["rubric.json"]
     assert d["path_name"] == "rubric.json"
 
 
@@ -351,3 +351,65 @@ def test_pipeline_main_applies_the_rubric(tmp_path, monkeypatch):
     (tmp_path / "rubric.json").write_text("{broken")
     with pytest.raises(SystemExit, match="rubric"):
         pipeline.main(["regrade"])
+
+
+@pytest.mark.parametrize(
+    "body,field",
+    [({"params": False}, "params"), ({"params": []}, "params"), ({"questions": []}, "questions"),
+     ({"questions": "x"}, "questions"), ({"params": 0}, "params")],
+)  # fmt: skip
+def test_validate_refuses_malformed_sections(body, field):
+    """Protects the body shape: params and questions must be objects (absent or null means none).
+
+    If it failed, {"params": false} would pass as "no overrides" and a bad PUT would be saved silently.
+    """
+    with pytest.raises(rubric.RubricError) as e:
+        rubric.validate(body)
+    assert e.value.field == field
+    rubric.validate({"params": None, "questions": None})
+    rubric.validate({})
+
+
+def test_load_refuses_a_file_with_a_malformed_section(tmp_path):
+    """Protects the file: a stored {"params": false} raises RubricError instead of reading as no overrides.
+
+    If it failed, a hand-edited bad file would be ignored and the pipeline would grade with the defaults.
+    """
+    p = tmp_path / "rubric.json"
+    p.write_text('{"params": false}')
+    with pytest.raises(rubric.RubricError) as e:
+        rubric.load(p)
+    assert e.value.field == "params"
+
+
+def test_concurrent_saves_do_not_lose_or_mix_writes(tmp_path):
+    """Protects the file under parallel saves: every save succeeds, returns its own value, and none is lost.
+
+    If it failed, writers sharing one tmp name could return another writer's value or hit FileNotFoundError.
+    """
+    import threading
+
+    p = tmp_path / "rubric.json"
+    ids = [f"rules.SLOT_LIMITS.{k}" for k in ("product", "quantity", "spec", "name", "city")] + [
+        "rules.LOOP_MAX_ASKS",
+        "rules.LOOP_IRRITATION_TURNS",
+    ]
+    out, errs = {}, []
+
+    def go(i, pid):
+        try:
+            for n in range(20):
+                v = 1 + (n + i) % 9
+                d = rubric.save(p, {"params": {pid: v}})
+                out[(pid, n)] = (v, {x["id"]: x["value"] for x in d["params"]}[pid])
+        except Exception as e:  # collected for the assert
+            errs.append(repr(e))
+
+    ts = [threading.Thread(target=go, args=(i, pid)) for i, pid in enumerate(ids)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert errs == []
+    assert all(a == b for a, b in out.values())
+    last = rubric.load(p)["params"]
+    assert set(last) == set(ids)
+    assert sorted(x.name for x in tmp_path.iterdir() if not x.name.endswith(".lock")) == ["rubric.json"]

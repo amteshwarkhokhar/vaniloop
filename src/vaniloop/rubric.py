@@ -9,10 +9,13 @@ and `jev` modules, which read those names at call time. `describe` is what the c
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import json
 import math
 import os
+import tempfile
+import threading
 from pathlib import Path
 
 from . import jev, rules
@@ -305,6 +308,16 @@ def _effective_params(overrides: dict) -> dict:
     return {p["id"]: overrides.get("params", {}).get(p["id"], p["default"]) for p in PARAMS}
 
 
+def _section(body: dict, key: str) -> dict:
+    """body[key] as a dict. Absent or null means none; anything but an object raises RubricError(key)."""
+    v = body.get(key)
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise RubricError(key, "must be an object")
+    return v
+
+
 def validate(body: dict, current: dict | None = None) -> None:
     """Raise RubricError(field, msg) for a bad body. A None value is a deletion and is always allowed.
 
@@ -313,9 +326,7 @@ def validate(body: dict, current: dict | None = None) -> None:
     """
     if not isinstance(body, dict) or not set(body) <= {"params", "questions"}:
         raise RubricError("body", "must be an object with params and questions only")
-    params, questions = body.get("params") or {}, body.get("questions") or {}
-    if not isinstance(params, dict) or not isinstance(questions, dict):
-        raise RubricError("body", "params and questions must be objects")
+    params, questions = _section(body, "params"), _section(body, "questions")
     for pid, v in params.items():
         if pid not in _BY_ID:
             raise RubricError(str(pid), "unknown id")
@@ -348,8 +359,8 @@ def load(p: Path | str | None = None) -> dict:
     except (OSError, ValueError) as e:
         raise RubricError("file", f"cannot read {p.name}: {type(e).__name__}") from None
     validate(body)
-    return {"params": {k: _norm(k, v) for k, v in (body.get("params") or {}).items()},
-            "questions": dict(body.get("questions") or {})}  # fmt: skip
+    return {"params": {k: _norm(k, v) for k, v in _section(body, "params").items()},
+            "questions": dict(_section(body, "questions"))}  # fmt: skip
 
 
 def jev_suffix(overrides: dict) -> str:
@@ -362,22 +373,40 @@ def jev_suffix(overrides: dict) -> str:
     return "+" + hashlib.sha256(raw.encode()).hexdigest()[:8]
 
 
+_SAVE_LOCK = threading.Lock()
+
+
 def save(p: Path | str, body: dict) -> dict:
-    """Validate body, merge it into the file (None deletes an override) and write it atomically. Returns describe."""
+    """Validate body, merge it into the file (None deletes an override) and write it atomically. Returns describe.
+
+    Read, merge and write run under a thread lock and an flock on `<path>.lock`, so saves never lose each other's
+    edits. Each write uses its own tmp file in the same folder, then os.replace.
+    """
     p = Path(p)
-    cur = load(p)
-    validate(body, cur)
-    for key in ("params", "questions"):
-        for k, v in (body.get(key) or {}).items():
-            if v is None:
-                cur[key].pop(k, None)
-            else:
-                cur[key][k] = _norm(k, v) if key == "params" else copy.deepcopy(v)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, p)
-    return describe(p)
+    with _SAVE_LOCK, p.with_name(p.name + ".lock").open("a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            cur = load(p)
+            validate(body, cur)
+            for key in ("params", "questions"):
+                for k, v in _section(body, key).items():
+                    if v is None:
+                        cur[key].pop(k, None)
+                    else:
+                        cur[key][k] = _norm(k, v) if key == "params" else copy.deepcopy(v)
+            with tempfile.NamedTemporaryFile("w", dir=p.parent, prefix=p.name + ".", suffix=".tmp", delete=False,
+                                             encoding="utf-8") as tmp:  # fmt: skip
+                try:
+                    json.dump(cur, tmp, ensure_ascii=False, indent=1)
+                    tmp.flush()
+                    os.replace(tmp.name, p)
+                except BaseException:
+                    Path(tmp.name).unlink(missing_ok=True)
+                    raise
+            return describe(p)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def describe(p: Path | str | None = None) -> dict:
