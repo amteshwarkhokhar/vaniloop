@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import re
 
-
 from test_dash_js import run
-
 
 
 def test_paid_stage_asks_for_confirm_then_posts_with_confirm_and_the_dock_follows_the_job():
