@@ -39,9 +39,12 @@ main:focus,h1[tabindex="-1"]:focus{ outline:none; }
 
 /* shared */
 #view{ padding-top:64px; padding-bottom:128px; }
-.view-title{ margin:0 0 12px; font:400 40px/1.1 var(--display); letter-spacing:-.01em; }
+.view-title{ margin:0 0 12px; font:400 40px/1.1 var(--display); letter-spacing:-.01em; text-wrap:balance; }
+@media (max-width:720px){ .view-title{ font-size:32px; } }
+.view-title em{ font-style:normal; font-weight:500; font-variant-numeric:lining-nums tabular-nums; font-variation-settings:"opsz" 14; }
+.sep{ margin:0 12px; color:var(--seam); }
 .lede,.empty{ margin:0; color:var(--ash); max-width:62ch; }
-.chip{ display:inline-flex; align-items:center; gap:8px; padding:5px 10px; border:1px solid var(--seam); border-radius:2px;
+.chip{ display:inline-flex; align-items:center; gap:8px; padding:0; border:0;
   font:500 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em; white-space:nowrap; }
 .chip::before,.dot{ content:""; flex:none; width:6px; height:6px; border-radius:50%; background:var(--tone); }
 .t-fatal{ --tone:var(--fatal); } .t-nonfatal{ --tone:var(--nonfatal); }

@@ -9,7 +9,7 @@
 
   function tape(call, faults, dur) {
     const segs = call.turns.map((t) => {
-      const words = String(t.text || "").split(/\s+/).filter(Boolean).length;
+      const words = V.str(t.text).split(/\s+/).filter(Boolean).length;
       const h = Math.min(38, 8 + words * 1.6);
       const side = t.speaker === "bot" ? "bot" : "user";
       return `<span class="seg ${side}" data-turn="${esc(t.idx)}" style="left:${pct(t.start_sec, dur)};width:${pct(Math.max(0, t.end_sec - t.start_sec), dur)};height:${h}%"></span>`;
@@ -23,7 +23,7 @@
       return `<button class="notch t-${esc(V.tone(f.status))}" data-turn="${esc(t.idx)}" style="left:${pct(t.start_sec, dur)};--d:${i * 60}ms" aria-label="${esc(V.word(f.status))}: ${esc(V.name(f.parameter))} at ${esc(V.clock(t.start_sec))}. Go to the turn."></button>`;
     }).join("");
     const base = dur > 240 ? 60 : dur > 90 ? 30 : 10;
-    const step = Math.max(base, Math.ceil(dur / 200 / 60) * 60); // at most about 200 ticks, even for a bad duration
+    const step = Math.max(base, Math.ceil(dur / 200 / base) * base); // at most about 200 ticks, even for a bad duration
     let ticks = "";
     for (let s = 0; s <= dur; s += step) ticks += `<span style="left:${pct(s, dur)}">${V.clock(s)}</span>`;
     return `<div class="tape-wrap" role="region" aria-label="Call tape" tabindex="0">
@@ -48,9 +48,14 @@
     }).join("");
   }
 
+  // Worst first: Fatal, Non-fatal, Unknown or Needs review, Pass, then Not applicable.
+  const RANK = { Fatal: 0, NonFatal: 1, Unknown: 2, NeedsReview: 2, Pass: 3, NotApplicable: 4 };
+  const rank = (s) => V.own(RANK, s) ?? 2;
+
   function checks(findings) {
     if (!findings.length) return `<p class="empty">No checks were recorded for this call.</p>`;
-    return `<ul>${findings.map((f) => `<li>
+    const sorted = [...findings].sort((a, b) => rank(a.status) - rank(b.status));
+    return `<ul>${sorted.map((f) => `<li>
       <span class="dot t-${esc(V.tone(f.status))}"></span><span class="cname">${esc(V.name(f.parameter))}</span>
       <span class="cstat">${esc(V.word(f.status))}</span><p class="creason" title="${esc(f.reason)}">${esc(f.reason)}</p></li>`).join("")}</ul>`;
   }

@@ -1,9 +1,9 @@
 /* Calls view */
 .hero{ margin-bottom:56px; }
-.hero-line{ margin:0 0 20px; font:400 56px/1.1 var(--display); letter-spacing:-.01em; }
+.hero-line{ margin:0 0 20px; font:400 56px/1.1 var(--display); letter-spacing:-.01em; text-wrap:balance; }
 .hero-line span{ display:block; }
-.hero-line em{ font-style:normal; font-weight:500; font-variant-numeric:lining-nums tabular-nums; }
-.hero .sep{ margin:0 12px; color:var(--seam); }
+.hero-line em{ font-style:normal; font-weight:500; font-variant-numeric:lining-nums tabular-nums; font-variation-settings:"opsz" 14; }
+.nw{ white-space:nowrap; }
 
 /* the spectrum: one hairline per call */
 .spectrum{ position:relative; height:180px; margin:0; border-bottom:1px solid var(--seam); }
@@ -22,36 +22,39 @@
 .tip{ position:absolute; transform:translateX(-50%); padding:6px 10px; background:var(--slate); border:1px solid var(--seam);
   border-radius:2px; font:400 11px/1.3 var(--mono); white-space:pre; pointer-events:none; z-index:2; }
 
-.legend{ display:flex; flex-wrap:wrap; gap:12px 36px; list-style:none; margin:20px 0 48px; padding:0; }
-.legend li{ display:flex; align-items:center; gap:10px; }
-.legend .dot{ width:7px; height:7px; }
-.legend .num{ font-size:13px; }
-
-.filters{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:32px; }
-.f{ padding:9px 14px; border:1px solid var(--seam); border-radius:2px; color:var(--ash);
-  font:500 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em;
-  transition:color .2s var(--ease), border-color .2s var(--ease); }
+/* the filter tabs carry the legend: dot, word, count */
+.filters{ display:flex; flex-wrap:wrap; gap:8px 28px; margin:24px 0 40px; }
+.f{ display:inline-flex; align-items:center; gap:10px; padding:8px 0; border:0; border-bottom:1px solid transparent;
+  font-size:14px; color:var(--ash); transition:color .2s var(--ease), border-color .2s var(--ease); }
+.f .dot{ width:7px; height:7px; }
+.f .n{ font-size:12px; color:var(--ash); }
 .f:hover{ color:var(--ivory); }
-.f[aria-pressed="true"]{ color:var(--ivory); border-color:var(--champagne); }
-.more{ margin-top:32px; }
+.f[aria-pressed="true"]{ color:var(--ivory); border-bottom-color:var(--champagne); }
+.more{ margin-top:32px; padding:9px 14px; border:1px solid var(--seam); border-radius:2px; color:var(--ash);
+  font:500 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em; transition:color .2s var(--ease), border-color .2s var(--ease); }
+.more:hover{ color:var(--ivory); border-color:var(--ash); }
 
 .rows-head,.row{ display:grid; grid-template-columns:150px 56px 140px 140px minmax(0,1fr); gap:24px; align-items:center; }
-.rows-head{ padding:0 12px 12px; font-size:10px; }
+.rows-head{ padding:0 0 12px; font-size:10px; }
 .rows{ list-style:none; margin:0; padding:0; border-top:1px solid var(--seam); }
-.row{ padding:15px 12px; border-bottom:1px solid var(--seam); transition:background .2s var(--ease); }
+.rows > li{ border-bottom:1px solid var(--seam); }
+/* the row text lines up with the content above; the hover ground hangs 12px into the gutter */
+.row{ margin:0 -12px; padding:15px 12px; transition:background .2s var(--ease); }
 .row:hover{ background:var(--slate); }
 .row .dur{ font-size:13px; color:var(--ash); }
-.row .scope{ color:var(--ash); font-size:14px; }
+.row .scope{ color:var(--ash); font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .row .fault{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--ash); font-size:14px; }
 .row .fault b{ font-weight:500; color:var(--ivory); margin-right:12px; }
 .quiet{ color:var(--ash); opacity:.6; }
-.none{ padding:24px 12px; }
+.rows .none{ padding:24px 0; }
 
 @media (max-width:720px){
   .hero-line{ font-size:36px; }
+  .hero .label{ display:flex; flex-direction:column; gap:4px; }
+  .hero .label .sep,.hero .label wbr{ display:none; }
   .spectrum{ height:140px; }
   .rows-head{ display:none; }
-  .row{ grid-template-columns:minmax(0,1fr) auto auto; gap:6px 16px; padding:14px 4px; }
+  .row{ grid-template-columns:minmax(0,1fr) auto auto; gap:6px 16px; margin:0; padding:14px 4px; }
   .row .scope{ display:none; }
   .row .fault{ grid-column:1 / -1; }
 }
