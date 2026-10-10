@@ -141,3 +141,4 @@ def test_editing_only_a_question_enables_save_and_sends_only_that_question():
     (put,) = d["put"]
     assert put["params"] == {} and list(put["questions"]) == ["spec_fit"]
     assert put["questions"]["spec_fit"]["true"]["examples"] == ["one", "two"]
+    assert "value" not in put["questions"]["spec_fit"], "the PUT carries the question texts, not the API wrapper"

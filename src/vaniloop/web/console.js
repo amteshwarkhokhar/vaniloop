@@ -253,8 +253,10 @@
   const RB = { data: null, err: null, edits: {}, qedits: {}, errs: {}, msg: null, saved: false };
   const pval = (p) => (p.id in RB.edits ? RB.edits[p.id] : p.value);
   const pdirty = (p) => p.id in RB.edits && Number(RB.edits[p.id]) !== Number(p.value);
-  const qnorm = (q) => ({ instructions: q.instructions, true: { description: q.true.description, examples: q.true.examples || [] }, false: { description: q.false.description, examples: q.false.examples || [] } });
-  const qok = (q) => q && q.true && q.false;
+  // The API nests a question's current texts under value, with the defaults under default.
+  const qv = (q) => (q && (q.value || q)) || {};
+  const qnorm = (q) => { const v = qv(q); return { instructions: v.instructions, true: { description: v.true.description, examples: v.true.examples || [] }, false: { description: v.false.description, examples: v.false.examples || [] } }; };
+  const qok = (q) => !!(qv(q).true && qv(q).false);
   const qdirty = (q) => qok(q) && q.id in RB.qedits && JSON.stringify(RB.qedits[q.id]) !== JSON.stringify(qnorm(q));
   const anyDirty = () => !!RB.data && (RB.data.params.some(pdirty) || (RB.data.questions || []).some(qdirty));
   const errFor = (id) => Object.keys(RB.errs).filter((f) => f === id || f.startsWith(`${id}.`) || f.startsWith(`questions.${id}`)).map((f) => `<p class="err" role="alert">${esc(RB.errs[f])}</p>`).join("");

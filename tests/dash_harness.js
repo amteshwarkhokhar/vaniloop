@@ -212,7 +212,7 @@ const RUB = { path_name: "rubric.json", jev_version_effective: "4", checks: [
   { id: "looping", name: "No looping <img src=x onerror=alert(1)>", what: "Bot repeats itself.", fatal_when: "Three asks.", nonfatal_when: "Two asks.", prompt_ref: "L69", judged_by: "code", params: ["rules.FRUSTRATED_P", "rules.DEAD_AIR_SEC"] }],
   params: [prm("rules.FRUSTRATED_P", "Frustrated at", 0.5), prm("rules.DEAD_AIR_SEC", "Dead air seconds", 5, { type: "int", max: 30, step: 1 }), prm("jev.Q_TRUE_AT", "Q true", 0.55), prm("jev.Q_FALSE_AT", "Q false", 0.2),
     prm("jev.OPT_TRUE_AT", "Opt true", 0.6), prm("jev.OPT_FALSE_AT", "Opt false", 0.3), prm("jev.PM_TRUE_AT", "PM true", 0.65), prm("jev.PM_FALSE_AT", "PM false", 0.35), prm("jev.N_DROP_AT", "Name drop", 0.35)],
-  questions: [{ id: "spec_fit", label: "Spec fit", ...Q, default: Q, overridden: false }] };
+  questions: [{ id: "spec_fit", qid: "q", label: "Spec fit", value: Q, default: Q, overridden: false }] };
 const row = (label, split, right) => ({ label, split, n: 40, right, wrong: 40 - right - 5, unsure: 5, gemini_right: 28 });
 const TUNE = { labels: [row("question_fits", "dev", 31), row("question_fits", "test", 29)], current: [row("question_fits", "dev", 28), row("question_fits", "test", 29)], flips: { question_fits: 3 }, calls: 712 };
 const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages: [
