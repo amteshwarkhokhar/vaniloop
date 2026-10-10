@@ -14,6 +14,7 @@ import secrets
 import signal
 import subprocess
 import threading
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -234,8 +235,11 @@ def job_cost(start: datetime, end: datetime) -> float:
 class JobRunner:
     """Runs one job at a time under a lock and keeps job rows in <data>/console/jobs.jsonl."""
 
-    def __init__(self, data: Path):
+    def __init__(self, data: Path, read_only: bool = False):
         self.data = Path(data)
+        self.read_only = read_only
+        self.overlay: dict[str, dict] = {}  # in-memory rows: recovery results in a read-only folder
+        self.adopted: dict[str, int] = {}  # job id -> pgid of a job that survived a server restart
         self.dir = self.data / "console"
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
@@ -249,6 +253,7 @@ class JobRunner:
         for r in read_jsonl(self.dir / "jobs.jsonl"):
             if isinstance(r, dict) and isinstance(r.get("id"), str):
                 rows[r["id"]] = r
+        rows.update(self.overlay)
         return rows
 
     def _save(self, row: dict) -> None:
@@ -256,17 +261,32 @@ class JobRunner:
             append_jsonl(self.dir / "jobs.jsonl", [row])
 
     def _recover(self) -> None:
-        """A job still marked running whose process is gone was lost on restart: mark it failed."""
+        """A job still marked running after a restart: if its process lives, adopt it (busy and cancel cover it).
+        If the process is gone, mark it failed. In a read-only folder the change stays in memory."""
         for row in self._rows().values():
-            if row.get("status") == "running" and row["id"] not in self.procs and not _pid_alive(row.get("pid")):
-                self._save(
-                    {
-                        **row,
-                        "status": "failed",
-                        "ended_ist": now_ist(),
-                        "ended_utc": datetime.now(UTC).isoformat(),
-                    }
-                )
+            if row.get("status") != "running" or row["id"] in self.procs:
+                continue
+            if _pid_alive(row.get("pid")):
+                self.adopted[row["id"]] = row.get("pgid") or row["pid"]
+                threading.Thread(target=self._watch, args=(row,), daemon=True).start()
+            else:
+                self._finish(row, "failed", None)
+
+    def _finish(self, row: dict, status: str, code, cost=None) -> None:
+        ended = datetime.now(UTC)
+        done = {**row, "status": status, "exit_code": code, "ended_ist": now_ist(ended),
+                "ended_utc": ended.isoformat(), "cost_usd": cost}  # fmt: skip
+        if self.read_only:
+            self.overlay[row["id"]] = done
+        else:
+            self._save(done)
+
+    def _watch(self, row: dict) -> None:
+        """Wait for an adopted job's process to end. Its exit code is unknown."""
+        while _pid_alive(row["pid"]):
+            time.sleep(0.5)
+        self.adopted.pop(row["id"], None)
+        self._finish(row, "cancelled" if row["id"] in self.cancelled else "failed", None)
 
     def _log_path(self, job_id: str) -> Path:
         return self.dir / "jobs" / f"{job_id}.log"
@@ -293,6 +313,9 @@ class JobRunner:
         for job_id, proc in list(self.procs.items()):
             if proc.poll() is None:
                 return job_id
+        for job_id, pgid in list(self.adopted.items()):
+            if _pid_alive(pgid):
+                return job_id
         return None
 
     def start(self, stage: str, args: dict) -> dict:
@@ -306,23 +329,33 @@ class JobRunner:
             (self.dir / "jobs").mkdir(parents=True, exist_ok=True)
             env = {**os.environ, "VANILOOP_RUBRIC": str(self.data / "rubric.json")}
             started = datetime.now(UTC)
-            with open(self._log_path(job_id), "wb") as log:
-                proc = subprocess.Popen(  # noqa: S603 - argv list, never a shell
-                    argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                    start_new_session=True, env=env, cwd=Path(__file__).resolve().parents[2],
-                )  # fmt: skip
+            proc = subprocess.Popen(  # noqa: S603 - argv list, never a shell
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                start_new_session=True, env=env, cwd=Path(__file__).resolve().parents[2],
+            )  # fmt: skip
+            reader = threading.Thread(target=self._pump, args=(proc, self._log_path(job_id)), daemon=True)
+            reader.start()
             row = {
-                "id": job_id, "stage": stage, "args": args, "status": "running", "pid": proc.pid,
+                "id": job_id, "stage": stage, "args": args, "status": "running", "pid": proc.pid, "pgid": proc.pid,
                 "started_ist": now_ist(started), "started_utc": started.isoformat(),
                 "ended_ist": None, "exit_code": None, "cost_usd": None,
             }  # fmt: skip
             self.procs[job_id] = proc
             self._save(row)
-            threading.Thread(target=self._wait, args=(job_id, proc, row), daemon=True).start()
+            threading.Thread(target=self._wait, args=(job_id, proc, row, reader), daemon=True).start()
             return self.public(row)
 
-    def _wait(self, job_id: str, proc: subprocess.Popen, row: dict) -> None:
+    @staticmethod
+    def _pump(proc: subprocess.Popen, path: Path) -> None:
+        """Copy the child's output to the log, line by line, masked. The log never holds a secret."""
+        with open(path, "wb") as log:
+            for raw in proc.stdout:
+                log.write(mask(raw.decode("utf-8", errors="replace").rstrip("\r\n")).encode("utf-8") + b"\n")
+                log.flush()
+
+    def _wait(self, job_id: str, proc: subprocess.Popen, row: dict, reader: threading.Thread) -> None:
         code = proc.wait()
+        reader.join(timeout=10)
         ended = datetime.now(UTC)
         status = "cancelled" if job_id in self.cancelled else "done" if code == 0 else "failed"
         try:
@@ -355,11 +388,12 @@ class JobRunner:
         if row is None:
             return None
         proc = self.procs.get(job_id)
-        if row.get("status") != "running" or proc is None:
+        pgid = proc.pid if proc else self.adopted.get(job_id)
+        if row.get("status") != "running" or pgid is None:
             raise ConsoleError(409, {"error": "not running", "job_id": job_id})
         self.cancelled.add(job_id)
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            os.killpg(pgid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         return self.public(row)

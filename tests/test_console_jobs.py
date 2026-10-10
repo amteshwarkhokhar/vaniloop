@@ -271,3 +271,80 @@ def test_fix_and_prove_refuse_without_prompt_file(srv, monkeypatch, tmp_path):
     for body in ({"stage": "fix"}, {"stage": "prove", "args": {"cause": "C-01"}}):
         status, out = call(srv, "POST", "/api/jobs", {**body, "confirm": True})
         assert (status, out) == (400, {"error": "VANI prompt file missing", "field": "prompt"})
+
+
+def test_one_runner_per_server_even_with_racing_first_requests(data, monkeypatch):
+    """Protects the one-job rule: two first requests racing must share one JobRunner. Separate runners would
+    each allow a job and start two paid jobs at once."""
+    orig = console.JobRunner.__init__
+
+    def slow(self, *a, **k):
+        time.sleep(0.2)
+        orig(self, *a, **k)
+
+    handler = type("H", (web.Handler,), {"data": data, "runner": None})
+    monkeypatch.setattr(console.JobRunner, "__init__", slow)
+    got = []
+    h = object.__new__(handler)
+    threads = [threading.Thread(target=lambda: got.append(id(h._runner()))) for _ in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(set(got)) == 1
+    monkeypatch.undo()
+    assert web.make_server(0, data).RequestHandlerClass.runner is not None
+
+
+def _survivor(data):
+    """A live sleeping process in its own session, and a jobs.jsonl row that says it is running."""
+    import subprocess
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    (data / "console").mkdir(exist_ok=True)
+    row = {"id": "j0000000000aa", "stage": "issues", "args": {}, "status": "running", "pid": proc.pid,
+           "started_ist": "10:00:00 10 Oct", "started_utc": "2026-10-10T04:30:00+00:00"}  # fmt: skip
+    (data / "console" / "jobs.jsonl").write_text(json.dumps(row) + "\n")
+    return proc
+
+
+def test_job_that_survives_restart_blocks_and_can_be_cancelled(data):
+    """Protects the one-job rule across a server restart: a still-running job from before must count as busy,
+    and cancel must kill its process group. Otherwise a second paid job could start or the survivor be stuck."""
+    proc = _survivor(data)
+    try:
+        runner = console.JobRunner(data)
+        assert runner.busy_job_id() == "j0000000000aa"
+        with pytest.raises(console.ConsoleError) as e:
+            runner.start("issues", {})
+        assert e.value.status == 409
+        assert runner.cancel("j0000000000aa")["id"] == "j0000000000aa"
+        assert proc.wait(timeout=3) != 0
+        end = time.time() + 5
+        while time.time() < end and runner.get("j0000000000aa")["status"] == "running":
+            time.sleep(0.1)
+        assert runner.get("j0000000000aa")["status"] == "cancelled"
+    finally:
+        proc.kill()
+
+
+def test_log_file_never_holds_a_secret(srv, data, monkeypatch):
+    """Protects keys at rest: a secret a job prints must be masked before it is written, so the log file on
+    disk never holds it (not only the API output)."""
+    use_argv(monkeypatch, "print('token sk-synthetic123 end', flush=True)")
+    _, out = call(srv, "POST", "/api/jobs", {"stage": "issues"})
+    wait_status(srv, out["job"]["id"], {"done"})
+    raw = (data / "console" / "jobs" / f"{out['job']['id']}.log").read_text()
+    assert "sk-synthetic123" not in raw and "***" in raw
+
+
+def test_read_only_recovery_writes_nothing(data):
+    """Protects the frozen demo folder: starting or reading in read-only mode must not append to jobs.jsonl.
+    A lost job still shows as failed, in memory only."""
+    (data / "console").mkdir()
+    row = {"id": "j0000000000bb", "stage": "issues", "args": {}, "status": "running", "pid": 2**22 + 777,
+           "started_ist": "10:00:00 10 Oct", "started_utc": "2026-10-10T04:30:00+00:00"}  # fmt: skip
+    path = data / "console" / "jobs.jsonl"
+    path.write_text(json.dumps(row) + "\n")
+    before = path.read_bytes()
+    runner = console.JobRunner(data, read_only=True)
+    assert runner.list()[0]["status"] == "failed"
+    assert path.read_bytes() == before

@@ -14,6 +14,7 @@ import math
 import mimetypes
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,6 +48,7 @@ DATA_FILES = (
     "jev_review",
 )
 DATA_FILE_EXT = {"causes": "json", "patches": "json"}
+RUNNER_LOCK = threading.Lock()
 MAX_BODY = 30 * 1024 * 1024
 JOB_PATH = re.compile(r"^/api/jobs/([^/]+)/(log|cancel)$")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
@@ -590,8 +592,9 @@ class Handler(BaseHTTPRequestHandler):
     runner: console.JobRunner | None = None
 
     def _runner(self) -> console.JobRunner:
-        if self.runner is None:
-            type(self).runner = console.JobRunner(self.data)
+        with RUNNER_LOCK:
+            if self.runner is None:
+                type(self).runner = console.JobRunner(self.data, read_only(self.data))
         return self.runner
 
     def _host_ok(self) -> bool:
@@ -724,7 +727,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def make_server(port: int = DEFAULT_PORT, data: Path | str | None = None) -> ThreadingHTTPServer:
     """A server bound to 127.0.0.1 only. Port 0 picks a free port."""
-    handler = type("BoundHandler", (Handler,), {"data": Path(data) if data else data_dir(), "runner": None})
+    folder = Path(data) if data else data_dir()
+    runner = console.JobRunner(folder, read_only(folder))
+    handler = type("BoundHandler", (Handler,), {"data": folder, "runner": runner})
     return ThreadingHTTPServer((HOST, port), handler)
 
 
