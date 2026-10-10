@@ -296,6 +296,11 @@ def _versions(runs: Path) -> list[dict]:
         raise SystemExit(bad)
     if [x["version"] for x in rows] != [f"v{n}" for n in range(1, len(rows) + 1)]:
         raise SystemExit(bad)
+    for x in rows:  # every listed version must have its text, not only the last
+        if not (Path(runs) / "prompts" / f"{x['version']}.md").is_file():
+            raise SystemExit(
+                f"{Path(runs) / 'prompts' / (x['version'] + '.md')} is missing but versions.json names it: restore it"
+            )
     return rows
 
 
@@ -319,18 +324,17 @@ def current_prompt(prompt_path: Path, runs: Path) -> tuple[str, str]:
 def shipped_ranges(runs: Path) -> list[tuple[int, int]]:
     """Lines changed by every shipped patch, in the line numbers of the current version.
 
-    Each version records its patch as (start, end, new_lines) in its own base's numbering. Later patches move the
-    lines below them, so the earlier ranges are shifted forward through each later version.
+    Each version records its patch as start, end (the replaced span's last line in its base), new_end (the last
+    changed line after the edit) and delta (newlines in new_text minus newlines in old_text). A later patch moves
+    every line after its end by its delta, so the earlier ranges are shifted forward through each later version.
     """
     out: list[tuple[int, int]] = []
     for v in _versions(runs):
         p = v.get("patch") or {}
-        s, e, m = p.get("start"), p.get("end"), p.get("new_lines")
-        if not all(isinstance(x, int) for x in (s, e, m)):
+        if not all(isinstance(p.get(k), int) for k in ("start", "end", "new_end", "delta")):
             continue
-        delta = m - (e - s + 1)
-        out = [(a + delta, b + delta) if a > e else (a, b) for a, b in out]
-        out.append((s, s + m - 1))
+        out = [(a + p["delta"], b + p["delta"]) if a > p["end"] else (a, b) for a, b in out]
+        out.append((p["start"], p["new_end"]))
     return out
 
 
@@ -358,9 +362,19 @@ def _atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def span_lines(text: str) -> int:
-    """Lines in a replaced span. One trailing newline is not a line: "old\n" and "new\n" are one line each."""
-    return text.removesuffix("\n").count("\n") + 1
+def edit_span(text: str, old: str, new: str) -> dict:
+    """Where old (found once in text) is replaced by new, in line numbers: start; end = the last line of the replaced
+    span in text; new_end = the last line changed after the edit; delta = newlines in new minus newlines in old.
+
+    A span that ends in a newline ends on that newline's line. One that stops mid-line also touches the rest of
+    that line, so removing or adding a trailing newline counts that line and shifts the lines after it by delta.
+    """
+    off = text.index(old)
+    after = text.count("\n", 0, off + len(old) - 1 if old.endswith("\n") else off + len(old))
+    patched = text[:off] + new + text[off + len(old) :]
+    last = off + len(new) - 1 if old.endswith("\n") else off + len(new)
+    return {"start": text.count("\n", 0, off) + 1, "end": after + 1,
+            "new_end": patched.count("\n", 0, last) + 1, "delta": new.count("\n") - old.count("\n")}  # fmt: skip
 
 
 def ship(cause_id: str, runs: Path, prompt_path: Path | None = None, patches_path: Path | None = None) -> str:
@@ -415,12 +429,10 @@ def _ship(cause_id, runs, prompt_path, patches_path, PromptPatch, _count_overlap
     if _count_overlapping(text, patch.old_text) != 1:
         raise SystemExit(f"the patch for {cause_id} does not fit {cur}: old_text must occur exactly once")
     name = f"v{len(_versions(runs)) + 1}"
-    start = text.count("\n", 0, text.index(patch.old_text)) + 1  # from the exact offset, not the stored line numbers
-    old_n, new_n = span_lines(patch.old_text), span_lines(patch.new_text)
     _atomic(runs / "prompts" / f"{name}.md", apply_patch(text, patch))
     entry = {
         "version": name, "created_ist": now_ist(), "causes": [cause_id], "base": None if cur == BASE else cur,
-        "patch": {"cause_id": cause_id, "start": start, "end": start + old_n - 1, "new_lines": new_n},
+        "patch": {"cause_id": cause_id, **edit_span(text, patch.old_text, patch.new_text)},  # exact offsets
     }  # fmt: skip
     _atomic(runs / "prompts" / "versions.json", json.dumps({"versions": [*_versions(runs), entry]}, indent=1))
     if state(cause_id, runs) != "ready_to_ship":  # the log may be missing the gated event: the gate row is the proof

@@ -244,6 +244,14 @@ def select_guards(
 def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path, attempt: int = 1) -> tuple[str, str]:
     """(old, new) prompt text. Stop with SystemExit when the cause has no patch, the patch is not this attempt or
     its anchor does not fit."""
+    old, new, _ = _build_prompts(cause_id, prompt_path, patches_path, attempt)
+    return old, new
+
+
+def _build_prompts(
+    cause_id: str, prompt_path: Path, patches_path: Path, attempt: int = 1
+) -> tuple[str, str, PromptPatch]:
+    """build_prompts plus the patch it applied: run_prove fingerprints exactly these objects before any replay."""
     path = Path(patches_path)
     doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     rows = [x for x in doc.get("patches", []) if x.get("cause_id") == cause_id]
@@ -275,7 +283,7 @@ def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path, attempt:
     new = apply_patch(old, patch)
     if new == old:  # the old/new label in replays.jsonl comes from comparing the two texts
         raise SystemExit(f"the patch for {cause_id} leaves the prompt unchanged; a no-op patch cannot be tested")
-    return old, new
+    return old, new, patch
 
 
 def root_sets(cause_id: str, causes_path: Path) -> tuple[set[str] | None, set[str]]:
@@ -454,7 +462,11 @@ def run_prove(
         raise SystemExit(f"--workers must be at least 1, got {workers}")
     if not dry_run:  # a demoted, tool or data cause keeps its old patch but takes no gate run
         require_patchable(cause_id, causes_path or Path(patches_path).with_name("causes.json"))  # sits by patches.json
-    old, new = build_prompts(cause_id, prompt_path, patches_path, attempt)
+    old, new, patch = _build_prompts(cause_id, prompt_path, patches_path, attempt)
+    fingerprints = {
+        "patch_fp": tracker.patch_fingerprint(patch),
+        "base_fp": tracker.fingerprint(old),
+    }  # before any replay
     if not dry_run:  # both history checks read only rows, so they cost nothing and stop before any LLM call
         rows = [r for r in read_jsonl(gates_path) if r.get("cause_id") == cause_id]
         if any(r.get("attempt", 1) == attempt for r in rows):
@@ -640,9 +652,7 @@ def run_prove(
     gates_path = Path(gates_path)
     gates_path.parent.mkdir(parents=True, exist_ok=True)
     row = result.model_dump(mode="json", exclude_none=True)
-    patched = json.loads(Path(patches_path).read_text(encoding="utf-8")).get("patches", [])
-    patch = PromptPatch.model_validate(next(x for x in reversed(patched) if x.get("cause_id") == cause_id))
-    row["patch_fp"], row["base_fp"] = tracker.patch_fingerprint(patch), tracker.fingerprint(old)  # ship checks both
+    row.update(fingerprints)  # of the patch and prompt the replays used, taken before them; ship checks both
     counts = {r: len(ids) for r, ids in dropped.items() if ids}
     if counts:  # candidates each target rule dropped (first pass); no key when nothing was dropped
         row["dropped"] = counts
