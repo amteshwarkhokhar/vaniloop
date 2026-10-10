@@ -271,3 +271,156 @@ def test_frustration_question_asks_for_irritation_not_repetition():
     text = q["instructions"].lower()
     assert "irritated or annoyed" in text and "repeating themselves" not in text and "haan haan" in text
     assert jev.JEV_VERSION != "1"
+
+
+def test_unsure_question_fit_leaves_fits_confirmed_unjudged(transport):
+    """Protects category_isq: when the question-alone answer is unsure, fits_confirmed_product is None too.
+
+    If it failed, (None, True) would reach the rule and a spec turn nobody judged would Pass.
+    """
+    transport["answers"] = {"q2": 0.5, "o2": 0.9, "pm": 0.9}
+    spec = next(b for b in jev.judge_ledger(_call(), _ledger()).bot_turns if b.idx == 2)
+    assert (spec.question_fits_product, spec.fits_confirmed_product) == (None, None)
+
+
+def test_handoff_with_unjudged_product_match_is_unknown():
+    """Protects the handoff product_change rule: a confirmed product with product_match None is Unknown.
+
+    If it failed, a Jev that was unsure would turn a possibly wrong handoff product into a Pass.
+    """
+    led = _ledger().model_copy(
+        update={"scope": "seller_unavailable_handoff", "product_match": None, "bot_confirmed": {"product": "pump"}}
+    )
+    led.bot_turns.append(BotTurnLabel(idx=3, slot="handoff"))
+    f = next(f for f in audit_call(_call(), led).findings if f.parameter == "product_change")
+    assert (f.status, f.basis, f.reason) == ("Unknown", "spoken_proxy", "product match not judged")
+
+
+def test_key_never_appears_in_errors_or_cost_rows(monkeypatch, transport):
+    """Protects the secret: a failing request reports the error type and HTTP status only, never the key.
+
+    If it failed, a urllib or proxy message carrying the Authorization header would land in logs and costs.jsonl.
+    """
+    key = "sk-secret-abc123"
+    monkeypatch.setenv("TYPESAFE_API_KEY", key)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+
+    class Boom(Exception):
+        code = 500
+
+    def fail(url, api_key, body):
+        raise Boom(f"Authorization: Bearer {api_key} rejected")
+
+    monkeypatch.setattr(llm, "_jev_post", fail)
+    with pytest.raises(RuntimeError) as e:
+        jev.judge_ledger(_call(), _ledger())
+    assert key not in str(e.value) and "Boom HTTP 500" in str(e.value)
+    assert key not in llm.COSTS_PATH.read_text() and "Boom HTTP 500" in llm.COSTS_PATH.read_text()
+
+
+def test_malformed_key_stops_without_echoing_it(monkeypatch, transport):
+    """Protects the secret: a key with a newline inside exits with a fixed message and sends nothing.
+
+    If it failed, the HTTP library would raise an error that quotes the header value.
+    """
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-part1\nsk-part2")
+    transport["bodies"].clear()
+    with pytest.raises(SystemExit) as e:
+        jev.judge_ledger(_call(), _ledger())
+    assert str(e.value) == "TYPESAFE_API_KEY is malformed (whitespace inside)"
+    assert "sk-part" not in str(e.value) and transport["bodies"] == []
+
+
+def test_judge_resume_redoes_a_stale_row(transport, tmp_path, monkeypatch):
+    """Protects resume: a row is skipped only when its jev_fp matches, and VANILOOP_CACHE=refresh never skips.
+
+    If it failed, a changed question or JEV_VERSION would keep old judgements in ledgers_jev.jsonl.
+    """
+    calls, ledgers, out = tmp_path / "calls.jsonl", tmp_path / "ledgers.jsonl", tmp_path / "ledgers_jev.jsonl"
+    calls.write_text(json.dumps(_call().model_dump(mode="json")) + "\n")
+    ledgers.write_text(json.dumps(_ledger().model_dump(mode="json")) + "\n")
+    kw = dict(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=tmp_path / "e.jsonl", workers=1)
+    pipeline.run_judge(**kw)
+    assert json.loads(out.read_text())["jev_fp"]
+    assert pipeline.run_judge(**kw)["skipped"] == 1
+    monkeypatch.setattr(jev, "JEV_VERSION", "99")
+    assert pipeline.run_judge(**kw) == {"judged": 1, "skipped": 0, "errors": 0}
+    monkeypatch.setenv("VANILOOP_CACHE", "refresh")
+    assert pipeline.run_judge(**kw)["judged"] == 1
+
+
+def test_spec_product_uses_only_its_own_segment():
+    """Protects the product-change rule: before the change only initial_product counts, after it only final_product.
+
+    If it failed, a missing product would borrow the other segment's and judge a turn against the wrong product.
+    """
+    led = _ledger()
+    assert (jev.spec_product(led, 0), jev.spec_product(led, 2)) == ("drone camera", "laptop")
+    no_initial = led.model_copy(update={"initial_product": None})
+    assert jev.spec_product(no_initial, 0) is None and jev.spec_product(no_initial, 2) == "laptop"
+    no_final = led.model_copy(update={"final_product": None})
+    assert jev.spec_product(no_final, 2) is None and jev.spec_product(no_final, 0) == "drone camera"
+    unchanged = led.model_copy(update={"product_changed_at_turn": None})
+    assert jev.spec_product(unchanged, 2) == "drone camera"
+    led.bot_turns.insert(1, BotTurnLabel(idx=0, slot="spec"))
+    assert "q0" not in jev.build_questions(_call(), no_initial)
+
+
+def test_identical_replies_give_different_questions():
+    """Protects the questions: two identical buyer replies are named by idx, so their instructions differ.
+
+    If it failed, Jev would get two identical questions and could not tell which turn each one is about.
+    """
+    texts = ["Kya chahiye?", "Pump", "Kya chahiye?", "Pump"]
+    turns = [
+        Turn(idx=i, speaker="bot" if i % 2 == 0 else "user", start_sec=i, end_sec=i + 1, text=t)
+        for i, t in enumerate(texts)
+    ]
+    call = CallRecord(call_id="d", duration_sec=5.0, turns=turns)
+    led = Ledger(call_id="d", scope="bl_collection", user_turns=[UserTurnLabel(idx=1), UserTurnLabel(idx=3)])
+    qs = jev.build_questions(call, led)
+    assert qs["f1"]["instructions"] != qs["f3"]["instructions"]
+    assert "idx 1" in qs["f1"]["instructions"] and "idx 0" in qs["f1"]["instructions"]
+    assert "idx 3" in qs["f3"]["instructions"] and "idx 2" in qs["f3"]["instructions"]
+    assert "sales bot turn with idx 2" in jev.build_questions(_call(), _ledger())["q2"]["instructions"]
+
+
+@pytest.mark.parametrize("bad", [2, -1, float("nan")])
+def test_invalid_probability_is_rejected_and_never_cached(transport, monkeypatch, bad):
+    """Protects the labels: a noul outside [0, 1] or NaN raises, and is neither returned nor cached.
+
+    If it failed, 2 would count as True, -1 as False, and a bad answer would be replayed from the cache.
+    """
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    transport["answers"] = {"pm": bad}
+    with pytest.raises(RuntimeError):
+        jev.judge_ledger(_call(), _ledger())
+    assert not llm.CACHE_DIR.exists() or not list(llm.CACHE_DIR.glob("*.json"))
+
+
+def test_invalid_cached_probability_is_refetched(transport):
+    """Protects the cache: a cached answer outside [0, 1] counts as a miss and Jev is asked again.
+
+    If it failed, an old bad cache file would keep feeding 2 or NaN into the labels.
+    """
+    jev.judge_ledger(_call(), _ledger())
+    f = next(llm.CACHE_DIR.glob("*.json"))
+    d = json.loads(f.read_text())
+    d["answers"]["pm"] = 2
+    f.write_text(json.dumps(d))
+    jev.judge_ledger(_call(), _ledger())
+    assert len(transport["bodies"]) == 2
+
+
+def test_agreement_excludes_missing_frustrated():
+    """Protects the agreement table: a missing frustrated value is excluded from the pair, not counted as False.
+
+    If it failed, a ledger without the value would show false agreement or disagreement on frustration.
+    """
+    a, b = _ledger().model_dump(mode="json"), _ledger().model_dump(mode="json")
+    a["user_turns"][0]["frustrated"] = None
+    a["user_turns"][1]["frustrated"] = 0.9
+    b["user_turns"][0]["frustrated"] = 0.0
+    b["user_turns"][1]["frustrated"] = 0.9
+    row = next(r for r in jev.judge_agreement([a], [b]) if r["field"].startswith("frustrated"))
+    assert (row["n"], row["agree"], row["none_a"]) == (1, 1, 1)

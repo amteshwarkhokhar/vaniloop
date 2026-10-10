@@ -276,7 +276,7 @@ def test_handoff_with_confirmed_product_passes():
 
     A false fault here would mark valid seller-unavailable handoffs as broken calls.
     """
-    a = _handoff(bot_confirmed={"product": "pump"}, final_product="pump")
+    a = _handoff(bot_confirmed={"product": "pump"}, final_product="pump", product_match=True)
     assert by(a)["product_change"].status == "Pass" and a.verdict == "Pass"
 
 

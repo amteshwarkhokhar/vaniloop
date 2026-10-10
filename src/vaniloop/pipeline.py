@@ -27,7 +27,7 @@ from .golden import (
 from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
-from .jev import judge_agreement, judge_ledger
+from .jev import fingerprint, judge_agreement, judge_ledger
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord, Ledger
@@ -133,13 +133,21 @@ def run_judge(
     """
     calls = {r["call_id"]: r for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)}
     ledgers = dedupe_by_call_id(read_jsonl(ledgers_path), last_wins=True)
-    done = {r["call_id"] for r in read_jsonl(out_path) if "call_id" in r}
-    todo = [r for r in ledgers if r.get("call_id") in calls and r["call_id"] not in done]
+    stored = {r["call_id"]: r.get("jev_fp") for r in read_jsonl(out_path) if "call_id" in r}  # last row wins
+    refresh = os.environ.get("VANILOOP_CACHE") == "refresh"
+
+    def fp(r: dict) -> str:
+        return fingerprint(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
+
+    keep = [r for r in ledgers if r.get("call_id") in calls]
+    done = set() if refresh else {r["call_id"] for r in keep if stored.get(r["call_id"]) == fp(r)}  # same fingerprint
+    todo = [r for r in keep if r["call_id"] not in done]
     lock = threading.Lock()
     errors = 0
 
-    def work(r: dict) -> Ledger:
-        return judge_ledger(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
+    def work(r: dict) -> dict:
+        led = judge_ledger(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
+        return {**led.model_dump(mode="json"), "jev_fp": fp(r)}
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         futs = {ex.submit(work, r): r for r in todo}
@@ -154,7 +162,7 @@ def run_judge(
                     )
                 continue
             with lock:
-                append_jsonl(out_path, [led.model_dump(mode="json")])
+                append_jsonl(out_path, [led])
     return {"judged": len(todo) - errors, "skipped": len(done), "errors": errors}
 
 

@@ -16,6 +16,7 @@ import json
 import math
 import os
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -440,13 +441,23 @@ def _jev_post(url: str, api_key: str, body: dict) -> dict:
 
 
 def _jev_valid(ids: list[str]):
+    """Accept an answers dict only when every id holds a finite number in [0, 1]."""
+
+    def ok(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and 0 <= v <= 1
+
     def check(d: dict) -> bool:
         a = d.get("answers")
-        return isinstance(a, dict) and all(
-            isinstance(a.get(i), (int, float)) and not isinstance(a.get(i), bool) for i in ids
-        )
+        return isinstance(a, dict) and all(ok(a.get(i)) for i in ids)
 
     return check
+
+
+def _jev_err(exc: Exception, api_key: str) -> str:
+    """Error text with the exception type and HTTP status only, never the raw message. The key is redacted."""
+    code = getattr(exc, "code", None)
+    text = type(exc).__name__ + (f" HTTP {code}" if isinstance(code, int) else "")
+    return text.replace(api_key, "[redacted]")
 
 
 def complete_jev(state, questions: dict[str, dict], cache_tag: str = "") -> dict[str, float]:
@@ -454,7 +465,6 @@ def complete_jev(state, questions: dict[str, dict], cache_tag: str = "") -> dict
 
     One request carries every question. A cache hit makes no request and needs no key.
     """
-    import time
     from types import SimpleNamespace
 
     model = jev_model()
@@ -467,6 +477,8 @@ def complete_jev(state, questions: dict[str, dict], cache_tag: str = "") -> dict
     api_key = os.environ.get("TYPESAFE_API_KEY", "").strip()
     if not api_key:
         raise SystemExit("TYPESAFE_API_KEY must be set in .env (no cached Jev answer for this request)")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in api_key):
+        raise SystemExit("TYPESAFE_API_KEY is malformed (whitespace inside)")
     _budget()
     body = {"state": state, "model": model, "questions": questions}
     last_err: Exception | None = None
@@ -484,7 +496,7 @@ def complete_jev(state, questions: dict[str, dict], cache_tag: str = "") -> dict
             if not _jev_valid(ids)(data):
                 raise ValueError("Jev response lacks a numeric noul for every question")
         except Exception as exc:
-            status, error = "error", f"{type(exc).__name__}: {exc}"
+            status, error = "error", _jev_err(exc, api_key)
             last_err = exc
         finally:
             usage = getattr(resp, "usage", None)
@@ -501,4 +513,4 @@ def complete_jev(state, questions: dict[str, dict], cache_tag: str = "") -> dict
             break  # a 401 or 422 will not change on retry
         if attempt + 1 < JEV_RETRIES:
             time.sleep(2**attempt)
-    raise RuntimeError(f"Jev request failed: {last_err}")
+    raise RuntimeError(f"Jev request failed: {_jev_err(last_err, api_key)}")

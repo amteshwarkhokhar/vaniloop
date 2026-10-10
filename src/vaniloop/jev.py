@@ -7,7 +7,11 @@ batched. Question ids are not sent to the model, so each question states the pro
 
 from __future__ import annotations
 
-from .llm import complete_jev
+import hashlib
+import json
+import math
+
+from .llm import complete_jev, jev_model
 from .models import CallRecord, Ledger
 from .rules import FRUSTRATED_P
 
@@ -25,32 +29,35 @@ def _noul(instructions: str, yes: str, no: str) -> dict:
 
 
 def spec_product(led: Ledger, idx: int) -> str | None:
-    """The product the buyer has confirmed at bot turn idx: the final one after the change turn."""
+    """The product the buyer has confirmed at bot turn idx: the final one after the change turn, else the initial one.
+
+    No fallback to the other segment: a missing product means no question, and the labels stay None.
+    """
     changed = led.product_changed_at_turn
-    if changed is not None and idx > changed:
-        return led.final_product or led.initial_product
-    return led.initial_product or led.final_product
+    return led.final_product if changed is not None and idx > changed else led.initial_product
 
 
 def build_questions(call: CallRecord, led: Ledger) -> dict[str, dict]:
+    """One yes/no question per label. Each names its turns by idx, so identical replies still differ."""
     text = {t.idx: t.text for t in call.turns}
     questions: dict[str, dict] = {}
     for b in led.bot_turns:
         product = spec_product(led, b.idx)
         if b.slot != "spec" or not product or b.idx not in text:
             continue
-        ask = text[b.idx]
+        head = f'A buyer wants the product "{product}". In `call.turns`, the sales bot turn with idx {b.idx} asked: '
+        ask = f'"{text[b.idx]}".'
         questions[f"q{b.idx}"] = _noul(
-            f'A buyer wants the product "{product}". A sales bot asked: "{ask}". Is the specification '
-            f"the bot asks about (ignore any example options) one that makes sense for {product}?",
+            f"{head}{ask} Is the specification the bot asks about (ignore any example options) "
+            f"one that makes sense for {product}?",
             f"The specification belongs to {product}.",
             "The specification belongs to a different kind of product.",
         )
         if b.options_offered:
             opts = ", ".join(b.options_offered)
             questions[f"o{b.idx}"] = _noul(
-                f'A buyer wants the product "{product}". A sales bot asked: "{ask}". It offered these options: '
-                f"{opts}. Do the question and all its options make sense for {product}?",
+                f"{head}{ask} It offered these options: {opts}. "
+                f"Do the question and all its options make sense for {product}?",
                 f"The question and its options all fit {product}.",
                 "The question or an option belongs to a different kind of product.",
             )
@@ -62,16 +69,22 @@ def build_questions(call: CallRecord, led: Ledger) -> dict[str, dict]:
             "Same product.",
             "Different product.",
         )
-    last_bot = ""
+    asked = {u.idx for u in led.user_turns}
+    last_bot = None
     for t in call.turns:
         if t.speaker == "bot":
-            last_bot = t.text
-        elif any(u.idx == t.idx for u in led.user_turns):
+            last_bot = t
+        elif t.idx in asked:
+            who = f"In `call.turns`, the buyer turn with idx {t.idx} "
+            if last_bot:
+                who += f'replies to the sales bot turn with idx {last_bot.idx}. Bot: "{last_bot.text}". '
+            else:
+                who += "opens the call. "
             questions[f"f{t.idx}"] = _noul(
-                f'A sales bot said: "{last_bot}". The buyer replied: "{t.text}". In this reply, is the buyer '
-                "irritated or annoyed with the bot (for example complaining that it keeps asking, telling it to "
-                'stop, or speaking angrily)? Short agreement words repeated, such as "haan haan" or "ji ji", '
-                "and a plain answer are not irritation.",
+                f'{who}Buyer: "{t.text}". In this reply, is the buyer irritated or annoyed with the bot '
+                "(for example complaining that it keeps asking, telling it to stop, or speaking angrily)? "
+                'Short agreement words repeated, such as "haan haan" or "ji ji", and a plain answer are not '
+                "irritation.",
                 "The buyer is irritated or annoyed with the bot.",
                 "The buyer is calm: agreeing, answering or asking normally.",
             )
@@ -89,6 +102,8 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
             continue
         q = ans.get(f"q{b.idx}")
         o = ans.get(f"o{b.idx}", q)  # no options offered: the question alone is the whole turn
+        if q is None or to_bool(q) is None:
+            o = None  # unsure or missing whether the question fits: the turn is not judged, never (None, True)
         bots.append(
             b.model_copy(
                 update={
@@ -102,6 +117,14 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
     return led.model_copy(
         update={"bot_turns": bots, "user_turns": users, "product_match": None if pm is None else to_bool(pm)}
     )
+
+
+def fingerprint(call: CallRecord, led: Ledger) -> str:
+    """sha256 of what a Jev judgement depends on: the state, the questions, the model and JEV_VERSION."""
+    raw = json.dumps(
+        [_state(call), build_questions(call, led), jev_model(), JEV_VERSION], sort_keys=True, ensure_ascii=False
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _state(call: CallRecord) -> dict:
@@ -131,7 +154,9 @@ def _fields(led: dict) -> dict[tuple, bool | None]:
             if b.get("slot") == "spec":
                 out[(f, b["idx"])] = b.get(f)
     for u in led.get("user_turns", []):
-        out[("frustrated", u["idx"])] = (u.get("frustrated") or 0.0) >= FRUSTRATED_P
+        v = u.get("frustrated")
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        out[("frustrated", u["idx"])] = v >= FRUSTRATED_P if ok else None  # missing stays None, never False
     return out
 
 
