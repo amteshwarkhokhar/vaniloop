@@ -279,7 +279,14 @@ def main(argv: list[str] | None = None) -> None:
         kw = {"prompt_path": Path(args.prompt)} if args.prompt else {}
         if args.holdout:
             kw["holdout"] = True
-        r = run_fix(causes_path=CAUSES_PATH, out_path=PATCHES_PATH, top_n=args.top, dry_run=args.dry_run, **kw)
+        r = run_fix(
+            causes_path=CAUSES_PATH,
+            out_path=PATCHES_PATH,
+            top_n=args.top,
+            dry_run=args.dry_run,
+            calls_path=CALLS_PATH,
+            **kw,
+        )
         if args.dry_run:
             for x in r["plan"]:
                 print(f"  {x['action']:6} {x['cause_id']} [{x['status']}] type={x['type']} "
@@ -296,7 +303,9 @@ def main(argv: list[str] | None = None) -> None:
         for cid in r["watched"]:
             print(f"  watch {cid}")
     elif args.cmd == "refix":
-        r = run_refix(args.cause, Path(args.prompt), **({"holdout": True} if args.holdout else {}))
+        r = run_refix(
+            args.cause, Path(args.prompt), calls_path=CALLS_PATH, **({"holdout": True} if args.holdout else {})
+        )
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")

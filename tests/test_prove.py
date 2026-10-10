@@ -256,7 +256,9 @@ def test_pipeline_refix_subcommand_passes_its_options_and_prints(monkeypatch, ca
 
     monkeypatch.setattr(pipeline, "run_refix", fake)
     pipeline.main(["refix", "--cause", CAUSE, "--prompt", "p.md"])
-    assert seen == dict(cause=CAUSE, prompt="p.md")
+    assert seen == dict(
+        cause=CAUSE, prompt="p.md", calls_path=pipeline.CALLS_PATH
+    )  # calls: absence-fault examples (#109)
     assert "prove --attempt 2" in capsys.readouterr().out
 
 
@@ -1021,6 +1023,6 @@ def test_pipeline_passes_holdout_and_screen_flags(monkeypatch):
     pipeline.main(["prove", "--cause", CAUSE, "--prompt", "p.md"])
     assert "holdout" not in seen["prove"] and "screen" not in seen["prove"]
     pipeline.main(["refix", "--cause", CAUSE, "--prompt", "p.md", "--holdout"])
-    assert seen["refix"] == {"holdout": True}
+    assert seen["refix"] == {"holdout": True, "calls_path": pipeline.CALLS_PATH}
     pipeline.main(["fix", "--prompt", "p.md", "--holdout"])
     assert seen["fix"]["holdout"] is True

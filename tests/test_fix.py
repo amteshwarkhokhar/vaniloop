@@ -17,7 +17,7 @@ from vaniloop.fix import (
     run_refix,
 )
 from vaniloop.llm import complete_json
-from vaniloop.models import AuditRecord, Cause, Evidence, Finding
+from vaniloop.models import AuditRecord, CallRecord, Cause, Evidence, Finding, Turn
 from vaniloop.split import split_half
 
 PROMPT = "\n".join(f"line {i}: rule text {i}" for i in range(1, 31))
@@ -1191,3 +1191,117 @@ def test_run_fix_and_run_refix_holdout_send_only_fix_half_evidence(tmp_path):
     run_refix("cause_qty_probing", llm=llm, holdout=True, audits_path=ap, **kw)
     data = json.loads(seen[0][1].split("<data>\n")[1].split("\n</data>")[0])
     assert data["examples"] == ["FIX-QUOTE"] and data["previous_attempt"]["failing_replays"] == []
+
+
+def absence_call(call_id, last_bot="Aapko kaunsa product chahiye?"):
+    """A synthetic call whose last bot turn is `last_bot`, followed by a user turn."""
+    turns = [
+        Turn(idx=0, speaker="bot", start_sec=0, end_sec=1, text="Namaste, first bot line"),
+        Turn(idx=1, speaker="user", start_sec=1, end_sec=2, text="buyer one"),
+        Turn(idx=2, speaker="bot", start_sec=2, end_sec=3, text=last_bot),
+        Turn(idx=3, speaker="user", start_sec=3, end_sec=4, text="buyer two"),
+    ]
+    return CallRecord(call_id=call_id, duration_sec=4, turns=turns)
+
+
+def absence_audit(call_id):
+    """A qty_probing Fatal finding with a reason and no evidence: the bot never asked for quantity."""
+    f = Finding(parameter="qty_probing", status="Fatal", reason="Bot never asked for quantity", basis="observed")
+    return AuditRecord(call_id=call_id, verdict="Fatal", scope="bl_collection", findings=[f])
+
+
+def test_absence_cause_gets_a_patch_with_the_last_bot_turn_as_example(tmp_path):
+    """A qty_probing cause whose findings carry no evidence quote must route to `patch` when calls are passed, and
+    its example must hold the finding reason and the last bot turn. Without the fallback the top cause is watched
+    with "no usable evidence" and never gets a prompt fix (#109)."""
+    c = cause().model_copy(update={"fatal_calls": ["a1"]})
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode("utf-8"), [c], [absence_audit("a1")])
+    cl = tmp_path / "calls.jsonl"
+    cl.write_text(json.dumps(absence_call("a1", "Kitni quantity chahiye?").model_dump(mode="json")) + "\n")
+    plan = run_fix(cp, pp, op, llm=_boom, audits_path=ap, dry_run=True, calls_path=cl)["plan"]
+    assert [p["action"] for p in plan] == ["patch"]
+    audits = {"a1": absence_audit("a1")}
+    ex = evidence_examples(c, audits, calls={"a1": absence_call("a1", "Kitni quantity chahiye?")})
+    assert len(ex) == 1 and "Kitni quantity chahiye?" in ex[0] and "Bot never asked for quantity" in ex[0]
+    assert "first bot line" not in ex[0] and len(ex[0]) <= 160 and "\n" not in ex[0]
+    seen: list = []
+    r = run_fix(cp, pp, op, llm=patch_llm(seen), audits_path=ap, calls_path=cl)
+    assert len(r["patches"]) == 1 and "Kitni quantity chahiye?" in seen[0]
+
+
+def test_absence_example_is_the_reason_alone_without_the_call_record():
+    """With a calls mapping that lacks the member call, the example must be the finding reason alone, not a crash
+    and not a drop. Without it a missing call row would watch the cause again."""
+    c = cause().model_copy(update={"fatal_calls": ["a1"]})
+    assert evidence_examples(c, {"a1": absence_audit("a1")}, calls={}) == ["Bot never asked for quantity"]
+
+
+def test_holdout_half_member_never_gives_an_absence_example():
+    """With holdout=True a hold-out-half member must give no fallback example, and a fix-half member must give one.
+    Without the filter on the fallback the patch writer sees hold-out calls and the gate measures leakage."""
+    fix_ids, hold_ids = halves()
+    c = cause().model_copy(update={"fatal_calls": [hold_ids[0]], "nonfatal_calls": [fix_ids[0]]})
+    audits = {i: absence_audit(i) for i in (hold_ids[0], fix_ids[0])}
+    calls = {i: absence_call(i, f"bot last {i}") for i in audits}
+    ex = evidence_examples(c, audits, holdout=True, calls=calls)
+    assert len(ex) == 1 and fix_ids[0] in ex[0] and hold_ids[0] not in ex[0]
+    only_hold = c.model_copy(update={"nonfatal_calls": []})
+    assert evidence_examples(only_hold, audits, holdout=True, calls=calls) == []
+
+
+def test_quoted_finding_examples_do_not_change_when_calls_are_passed():
+    """A finding with a quote must give the same examples with or without calls. Without this the fallback would
+    replace or reorder real quotes."""
+    c = cause().model_copy(update={"fatal_calls": ["q1"]})
+    audits = {"q1": audit("q1", "qty_probing", ["real  quote"], status="Fatal")}
+    plain = evidence_examples(c, audits)
+    assert plain == ["real quote"]
+    assert evidence_examples(c, audits, calls={"q1": absence_call("q1")}) == plain
+
+
+def test_absence_example_keeps_the_last_bot_turn_under_a_long_reason():
+    """The real qty_probing reason is over 100 characters and is the same on every member, so the example must put the
+    last bot turn first. With the reason first the 160-character cut drops the turn, and every member gives the
+    same reason-only line: the patch writer gets one example and no call text."""
+    long_reason = (
+        "bot never asked for quantity and the buyer did not give one "
+        "(assumes quantity is a defined field for this category)"
+    )
+    a = absence_audit("a1")
+    a = a.model_copy(update={"findings": [f.model_copy(update={"reason": long_reason}) for f in a.findings]})
+    c = cause().model_copy(update={"fatal_calls": ["a1"]})
+    turn = "Theek hai, aapki requirement post kar di gayi hai, dhanyavaad"
+    ex = evidence_examples(c, {"a1": a}, calls={"a1": absence_call("a1", turn)})
+    assert len(ex) == 1 and turn in ex[0] and len(ex[0]) <= 160
+
+
+def test_refix_holdout_keeps_fix_half_absence_examples(tmp_path):
+    """refix --holdout drops the failing replay lines, so an absence cause must still send its fix-half fallback
+    examples, and no hold-out one. Without calls in refix the second patch is written from zero examples (#109)."""
+    fix_ids, hold_ids = halves()
+    c = cause().model_copy(update={"fatal_calls": [hold_ids[0], fix_ids[0]]})
+    _, _, ap, _ = write_run(tmp_path, PROMPT.encode(), [c], [absence_audit(i) for i in (hold_ids[0], fix_ids[0])])
+    cl = tmp_path / "calls.jsonl"
+    cl.write_text(
+        absence_call(hold_ids[0], "HOLDOUT-TURN").model_dump_json()
+        + "\n"
+        + absence_call(fix_ids[0], "FIX-TURN").model_dump_json()
+        + "\n"
+    )
+    (tmp_path / "r").mkdir()
+    kw = refix_files(tmp_path / "r")
+    kw["causes_path"].write_text(json.dumps({"causes": [c.model_dump()]}))
+    seen: list = []
+    llm = stub("line 3: rule text 3", "line 3: other rule", seen)
+    run_refix("cause_qty_probing", llm=llm, holdout=True, audits_path=ap, calls_path=cl, **kw)
+    data = json.loads(seen[0][1].split("<data>\n")[1].split("\n</data>")[0])
+    assert len(data["examples"]) == 1 and "FIX-TURN" in data["examples"][0]
+    assert "HOLDOUT-TURN" not in seen[0][1]
+
+
+def test_absence_example_keeps_the_reason_under_a_long_last_turn():
+    """A last bot turn longer than the example limit must not push the fault reason out of the example. Without the
+    split the patch writer sees only closing text and not what went wrong."""
+    c = cause().model_copy(update={"fatal_calls": ["a1"]})
+    ex = evidence_examples(c, {"a1": absence_audit("a1")}, calls={"a1": absence_call("a1", "lamba jawab " * 40)})
+    assert len(ex) == 1 and "Bot never asked for quantity" in ex[0] and "lamba jawab" in ex[0] and len(ex[0]) <= 160

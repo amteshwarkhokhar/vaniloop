@@ -18,7 +18,7 @@ from . import prompt
 from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits, require_fixable
 from .jsonl import read_jsonl
 from .llm import complete_json
-from .models import AuditRecord, Cause
+from .models import AuditRecord, CallRecord, Cause
 from .split import split_half
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,11 +140,19 @@ def _strip_new_text_numbers(text: str) -> str | None:
     return _strip_line_numbers(text) if numbered == len(lines) else None
 
 
-def evidence_examples(cause: Cause, audits: dict[str, AuditRecord], holdout: bool = False) -> list[str]:
+def evidence_examples(
+    cause: Cause,
+    audits: dict[str, AuditRecord],
+    holdout: bool = False,
+    calls: dict[str, CallRecord] | None = None,
+) -> list[str]:
     """Up to MAX_EXAMPLES one-line evidence quotes of the cause's parameter, one per member call.
 
     Fatal calls come first. Each quote is joined onto one line and cut to EXAMPLE_CHARS. With `holdout` only members
     in the fix half (see split_half) give a quote, so the hold-out half stays unseen by the patch writer.
+
+    With `calls` (call_id -> CallRecord), a member whose finding has no quote is an absence fault (the bot never did
+    it): its example is "Last bot turn: <text> (fault: <reason>)", or the reason alone when the call record is missing.
     """
     out: list[str] = []
     for call_id in [*cause.fatal_calls, *cause.nonfatal_calls]:
@@ -161,11 +169,35 @@ def evidence_examples(cause: Cause, audits: dict[str, AuditRecord], holdout: boo
             if e.quote
         )
         quote = next((q[:EXAMPLE_CHARS] for q in quotes if q), None)
+        if quote is None and calls is not None:
+            quote = _absence_example(audit, cause.parameter, calls.get(call_id))
         if quote is not None and quote not in out:
             out.append(quote)
         if len(out) == MAX_EXAMPLES:
             break
     return out
+
+
+def _absence_example(audit: AuditRecord, parameter: str, call: CallRecord | None) -> str | None:
+    """Fallback example for a failing finding with no quote: its reason plus the call's last bot turn."""
+    finding = next((f for f in audit.findings if f.parameter == parameter and f.status in ("Fatal", "NonFatal")), None)
+    if finding is None:
+        return None
+    reason = _one_line(finding.reason.strip().rstrip("."), EXAMPLE_CHARS * 3 // 8)  # the turn needs more room
+    last_bot = next((t.text for t in reversed(call.turns) if t.speaker == "bot"), None) if call else None
+    if last_bot:  # both parts survive the cut: the turn gets the room the reason leaves
+        tail = f" (fault: {reason})"
+        line = f"Last bot turn: {_one_line(last_bot, EXAMPLE_CHARS - len(tail) - len('Last bot turn: '))}{tail}"
+    else:
+        line = reason
+    return _one_line(line, EXAMPLE_CHARS) or None
+
+
+def _load_calls(calls_path: Path | None) -> dict[str, CallRecord] | None:
+    """call_id -> CallRecord from calls_path, or None without a path (then absence faults get no example)."""
+    if calls_path is None:
+        return None
+    return {r["call_id"]: CallRecord.model_validate(r) for r in read_jsonl(calls_path) if r.get("call_id")}
 
 
 def changed_lines(old: str, new: str) -> int:
@@ -377,10 +409,12 @@ def run_fix(
     category_of=None,
     dry_run: bool = False,
     holdout: bool = False,
+    calls_path: Path | None = None,
 ) -> dict:
     """Route each cause (see `route`): patch the first top_n patch causes, write a ticket per tool or data cause.
 
     A patch cause with no usable evidence (no member call has a failing quote in the audits) is watched instead.
+    With `calls_path`, a failing finding with no quote still counts: see evidence_examples (absence faults).
 
     A dry run only returns {"plan": [...]}: one row per cause with its action, no LLM call and no file written.
     Otherwise returns {"patches", "rejected", "tickets", "watched"} (the last two are lists of cause ids).
@@ -388,12 +422,13 @@ def run_fix(
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
     causes = [Cause.model_validate(c) for c in doc.get("causes", [])]
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
+    calls = _load_calls(calls_path)
     examples: dict[str, list[str]] = {}
     routed = []
     for c in causes:
         action, why = route(c)
         if action == "patch":
-            examples[c.cause_id] = evidence_examples(c, audits, holdout)
+            examples[c.cause_id] = evidence_examples(c, audits, holdout, calls)
             if not examples[c.cause_id]:  # no quote to anchor a prompt edit on: do not spend an LLM call on a guess
                 action, why = "watch", "no usable evidence: no member call has a failing quote in the audits"
         routed.append((c, action, why))
@@ -522,6 +557,7 @@ def run_refix(
     llm=complete_json,
     holdout: bool = False,
     audits_path: Path = AUDITS_PATH,
+    calls_path: Path | None = None,
 ) -> dict:
     """Write a second patch for a cause whose patch the gate rejected, from what the replays showed.
 
@@ -581,7 +617,8 @@ def run_refix(
     }
     examples: list[str] = []
     if holdout:
-        examples = evidence_examples(cause, {a.call_id: a for a in load_audits(Path(audits_path))}, holdout=True)
+        calls = _load_calls(calls_path)  # an absence fault has no quote: the fallback keeps its fix-half examples
+        examples = evidence_examples(cause, {a.call_id: a for a in load_audits(Path(audits_path))}, True, calls)
     prompt_text = prompt.load(prompt_path)
     rejected: list[dict] = []
     new = propose_patch(cause, examples, prompt_text, llm=llm, rejected=rejected, previous=previous)
