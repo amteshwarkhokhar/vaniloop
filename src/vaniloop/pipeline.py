@@ -279,7 +279,14 @@ def main(argv: list[str] | None = None) -> None:
         kw = {"prompt_path": Path(args.prompt)} if args.prompt else {}
         if args.holdout:
             kw["holdout"] = True
-        r = run_fix(causes_path=CAUSES_PATH, out_path=PATCHES_PATH, top_n=args.top, dry_run=args.dry_run, **kw)
+        r = run_fix(
+            causes_path=CAUSES_PATH,
+            out_path=PATCHES_PATH,
+            top_n=args.top,
+            dry_run=args.dry_run,
+            calls_path=CALLS_PATH,
+            **kw,
+        )
         if args.dry_run:
             for x in r["plan"]:
                 print(f"  {x['action']:6} {x['cause_id']} [{x['status']}] type={x['type']} "
