@@ -74,9 +74,9 @@
       return `<button class="node" type="button" data-go="${it.id}"${cur}><span class="nm">${esc(it.name)}</span><span class="hd${hd ? "" : " none"}">${esc(hd || "no data yet")}</span></button>`;
     };
     $("nav").innerHTML =
+      (ITEMS.some((i) => i.group === "operate") ? `<p class="label grp">Operate</p>${ITEMS.filter((i) => i.group === "operate").map(one).join("")}` : "") +
       `<p class="label grp">Configure</p>${ITEMS.filter((i) => i.group === "config").map(one).join("")}` +
-      `<p class="label grp">Pipeline</p><div class="rail">${ITEMS.filter((i) => i.group === "stage").map(one).join("")}</div>` +
-      (ITEMS.some((i) => i.group === "operate") ? `<p class="label grp">Operate</p>${ITEMS.filter((i) => i.group === "operate").map(one).join("")}` : "");
+      `<p class="label grp">Pipeline</p><div class="rail">${ITEMS.filter((i) => i.group === "stage").map(one).join("")}</div>`;
   }
 
   function judgeToggle() {

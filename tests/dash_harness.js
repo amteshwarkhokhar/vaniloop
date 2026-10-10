@@ -201,6 +201,7 @@ const SC = {
     routes["GET /api/jobs/j7/log?from=0"] = [200, { job: job("j7", "ship", "done"), lines: ["new prompt version v3"], next: 1 }];
     await click({ go: "tracker" });
     out.board = ids.panel.innerHTML;
+    out.nav = ids.nav.innerHTML;
     await click({ op: "t-sent", id: "c4" }); out.empty = ids.panel.innerHTML;
     await emit("input", { dataset: { op: "tref", id: "c4" }, value: " T-1 " });
     await click({ op: "t-sent", id: "c4" }); out.bad = ids.panel.innerHTML;
@@ -241,7 +242,7 @@ const RUB = { path_name: "rubric.json", jev_version_effective: "4", checks: [
   questions: [{ id: "spec_fit", qid: "q", label: "Spec fit", value: Q, default: Q, overridden: false }] };
 const row = (label, split, right) => ({ label, split, n: 40, right, wrong: 40 - right - 5, unsure: 5, gemini_right: 28 });
 const TUNE = { labels: [row("question_fits", "dev", 31), row("question_fits", "test", 29)], current: [row("question_fits", "dev", 28), row("question_fits", "test", 29)], flips: { question_fits: 3 }, calls: 712 };
-const cz = (id, state, extra = {}) => ({ cause_id: id, name: `Cause ${id}`, parameter: "qty_probing", type: "prompt", owner: "owner a", route: "patch", state, state_since_ist: "09:00 10 Oct", counts: { fatal: 2, nonfatal: 1, symptoms: 3 }, rubric_version: "4", events: [], ...extra });
+const cz = (id, state, extra = {}) => ({ cause_id: id, name: `Cause ${id}`, parameter: "qty_probing", type: "prompt", owner: "owner a", route: "patch", state, state_since_ist: "2026-10-10T09:00:00+05:30", counts: { fatal: 2, nonfatal: 1, symptoms: 3 }, rubric_version: "4", events: [], ...extra });
 const TRK = { current_prompt_version: "v2", prompt_versions: [{ version: "v2", created_ist: "11:00 10 Oct", causes: ["c3"], base: "v1" }], causes: [
   cz("c1", "open"), cz("c2", "in_fix"), cz("c3", "ready_to_ship", { events: [{ ts_ist: "10:00 10 Oct", kind: "gated", run_id: "r1", rubric_version: "4", detail: { p_value: 0.01, lift: 0.25, guard: "pass", note: "<img src=x onerror=alert(1)>" } }] }),
   cz("c4", "ticket_open", { type: "tool", route: "ticket" }), cz("c5", "ticket_sent", { type: "tool" }), cz("c6", "regressed", { name: "Back <img src=x onerror=alert(1)>" }), cz("c7", "shipped"), cz("c8", "watching"), cz("c9", "closed")] };
