@@ -56,6 +56,12 @@ def build_questions(call: CallRecord, led: Ledger) -> dict[str, dict]:
                 f'"{spec}" is a sensible property of {product}.',
                 f'"{spec}" belongs to a different kind of product, not {product}.',
             )
+            questions[f"n{b.idx}"] = _noul(  # spec_name is Gemini's: check it names what the turn really asks
+                f'In `call.turns`, the sales bot turn with idx {b.idx} said: "{text[b.idx]}". Leaving aside any '
+                f'example options, is this turn asking the buyer about "{spec}"?',
+                f'The turn asks about "{spec}".',
+                f'The turn asks about something other than "{spec}".',
+            )
         else:
             questions[f"q{b.idx}"] = _noul(
                 f"{head}{ask} Is the specification the bot asks about (ignore any example options) "
@@ -111,6 +117,8 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
             bots.append(b)
             continue
         q = ans.get(f"q{b.idx}")
+        if f"n{b.idx}" in ans and to_bool(ans[f"n{b.idx}"]) is not True:
+            q = None  # Jev does not confirm the spec name is what the turn asks: the spec-name answer is not usable
         o = ans.get(f"o{b.idx}", q)  # no options offered: the question alone is the whole turn
         if q is None or to_bool(q) is None:
             o = None  # unsure or missing whether the question fits: the turn is not judged, never (None, True)

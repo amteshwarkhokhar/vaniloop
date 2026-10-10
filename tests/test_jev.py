@@ -75,7 +75,7 @@ def test_jev_labels_replace_gemini_and_structure_is_kept(transport):
 
     If it failed, Gemini's labels would still decide Fatals, or Jev would overwrite slots, values, declined or scope.
     """
-    transport["answers"] = {"q2": 0.1, "o2": 0.2, "pm": 0.9, "f1": 0.3, "f3": 0.8}
+    transport["answers"] = {"q2": 0.1, "o2": 0.2, "n2": 0.9, "pm": 0.9, "f1": 0.3, "f3": 0.8}
     led, out = _ledger(), jev.judge_ledger(_call(), _ledger())
     spec = next(b for b in out.bot_turns if b.idx == 2)
     assert (spec.question_fits_product, spec.fits_confirmed_product) == (False, False)
@@ -128,7 +128,7 @@ def test_every_question_is_complete_on_its_own(transport):
     If it failed, Jev would answer a question about "it" with no product or no turn to read.
     """
     qs = jev.build_questions(_call(), _ledger())
-    assert set(qs) == {"q2", "o2", "pm", "f1", "f3"}
+    assert set(qs) == {"q2", "n2", "o2", "pm", "f1", "f3"}
     for qid, q in qs.items():
         assert q["type"] == "noul" and q["criteria"]["true"] and q["criteria"]["false"]
         assert qid not in q["instructions"]
@@ -487,3 +487,25 @@ def test_question_alone_is_asked_about_the_spec_name_not_the_utterance():
     assert '"voltage"' in q["q0"]["instructions"] and "60V" not in q["q0"]["instructions"]
     assert "60V" in q["o0"]["instructions"]  # the options stay in the question-with-options label
     assert jev.JEV_VERSION == "3"
+
+
+def test_spec_name_answer_counts_only_when_jev_confirms_the_turn_asks_it(transport):
+    """The question-alone label trusts Gemini's spec_name only when Jev confirms the turn asks about it.
+
+    If this failed, a spec name Gemini mislabelled as something generic ("performance" for "flight time" on a dome
+    camera) would make a wrong question pass (Codex review on #114).
+    """
+    led = _ledger()
+    led = led.model_copy(
+        update={"bot_turns": [b.model_copy(update={"spec_name": "brand"}) if b.idx == 2 else b for b in led.bot_turns]}
+    )
+    transport["answers"].update({"q2": 0.9, "o2": 0.9, "n2": 0.1})
+    b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    assert b.question_fits_product is None and b.fits_confirmed_product is None
+    transport["answers"]["n2"] = 0.9
+    jev.JEV_VERSION, old = "3-confirmed", jev.JEV_VERSION  # a fresh cache key for the second answer set
+    try:
+        b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    finally:
+        jev.JEV_VERSION = old
+    assert b.question_fits_product is True and b.fits_confirmed_product is True
