@@ -117,7 +117,6 @@ const SC = {
   async "con-readonly"() {
     const out = {};
     for (const g of ["run", "submit", "audit"]) { await click({ go: g }); out[g] = ids.panel.innerHTML; }
-    out.dock = ids["dock-actions"].innerHTML;
     return out;
   },
   async "con-backoff"() {

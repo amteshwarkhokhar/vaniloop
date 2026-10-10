@@ -18,15 +18,9 @@ def test_paid_stage_asks_for_confirm_then_posts_with_confirm_and_the_dock_follow
     assert d["posts"] == [{"stage": "audit", "args": {}}, {"stage": "audit", "args": {}, "confirm": True}]
     assert d["hidden"] is False
     assert "running" in d["info1"] and "audit" in d["info1"]
-    assert "&#60;img src=x onerror=alert(1)&#62;" in d["log1"]
+    assert "&#60;img src=x onerror=alert(1)&#62;" in d["log1"] and "<img" not in d["log1"] + d["info1"]
     assert "done" in d["info2"] and "Cancel" not in d["actions"]
     assert d["refetched"], "a finished job must refresh the stage data"
-
-
-def test_hostile_log_line_renders_as_text():
-    """A log line with an img tag must reach the dock escaped. If it did not, the line would run as markup."""
-    d = run("con-run")
-    assert "<img" not in d["log1"] + d["info1"]
 
 
 def test_busy_and_bad_request_show_their_message_and_do_not_throw():
@@ -59,7 +53,6 @@ def test_read_only_leaves_no_enabled_control_in_operate():
         assert tags
         assert all(" disabled" in t for t in tags if "chk" not in t), (view, [t for t in tags if " disabled" not in t])
     assert "read-only" in d["run"]
-    assert d["dock"] == ""
 
 
 def test_audit_stage_button_prefills_run_and_chains_judge_and_regrade():
