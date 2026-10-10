@@ -130,3 +130,14 @@ def test_tune_debounces_three_moves_into_one_post_and_renders_dev_and_test():
     assert "Labels that would flip over all 712 calls" in d["res"]
     assert d["put"] == [{"params": {"jev.Q_TRUE_AT": 0.65}, "questions": {}}]
     assert "no raw Jev answers: run judge" in d["noraw"] and "Run judge" in d["noraw"]
+
+
+def test_editing_only_a_question_enables_save_and_sends_only_that_question():
+    """A Jev question edit with no number edit must turn Save on, and the PUT carries just that question.
+
+    Before the fix only number edits updated the dirty state, so a question-only edit left Save disabled."""
+    d = run("con-rubric-q")
+    assert d["afterEdit"] is False
+    (put,) = d["put"]
+    assert put["params"] == {} and list(put["questions"]) == ["spec_fit"]
+    assert put["questions"]["spec_fit"]["true"]["examples"] == ["one", "two"]

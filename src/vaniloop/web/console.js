@@ -425,7 +425,11 @@
       const p = sp(d.id), save = $("rb-save");
       if (save && !ro()) save.disabled = !anyDirty();
       if (document.querySelectorAll && p) document.querySelectorAll(`[data-chg="${d.id}"]`).forEach((m) => (m.hidden = Number(t.value) === Number(p.default)));
-    } else if (d.op === "q") qedit(d.q, d.f, t.value);
+    } else if (d.op === "q") {
+      qedit(d.q, d.f, t.value);
+      const save = $("rb-save");
+      if (save && !ro()) save.disabled = !anyDirty();
+    }
     else if (d.op === "tune") {
       T.vals[d.key] = Number(t.value);
       const o = $(`o-${d.key}`);

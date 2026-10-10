@@ -117,7 +117,8 @@ const SC = {
   },
   async "con-readonly"() {
     const out = {};
-    for (const g of ["run", "submit", "audit"]) { await click({ go: g }); out[g] = ids.panel.innerHTML; }
+    routes["GET /api/rubric"] = [200, RUB]; routes["POST /api/tune"] = [200, TUNE];
+    for (const g of ["run", "submit", "audit", "rubric", "tune"]) { await click({ go: g }); out[g] = ids.panel.innerHTML; }
     return out;
   },
   async "con-backoff"() {
@@ -162,6 +163,16 @@ const SC = {
     await click({ op: "rejudge" });
     out.posts = posts(); out.chain = sandbox.window.VL.console.C.chain;
     return out;
+  },
+  async "con-rubric-q"() {
+    routes["GET /api/rubric"] = [200, RUB];
+    routes["PUT /api/rubric"] = [200, RUB];
+    await click({ go: "rubric" });
+    ids["rb-save"].disabled = true;
+    await emit("input", { dataset: { op: "q", q: "spec_fit", f: "true.examples" }, value: "one\ntwo" });
+    const afterEdit = ids["rb-save"].disabled;
+    await click({ op: "save-rubric" });
+    return { afterEdit, put: calls.filter((c) => c.method === "PUT").map((c) => c.body) };
   },
   async "con-tune"() {
     const out = {};
