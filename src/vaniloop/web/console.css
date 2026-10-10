@@ -65,3 +65,15 @@ output.mono{ color:var(--champagne); margin-left:8px; }
 @media (max-width:860px){ .savebar{ top:56px; } .prm .addrow .inp{ max-width:none; } }
 .fld .src,.card .why{ font:400 13px/1.5 var(--body); color:var(--ash); margin:0; }
 .card .why b{ color:var(--ivory); font-weight:500; }
+
+/* tracker */
+.board{ display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:0 20px; align-items:start; }
+.col h2.sec{ margin-top:8px; }
+.tcard{ padding:18px; margin:0 0 14px; }
+.tcard h3{ font-size:20px; overflow-wrap:anywhere; }
+.tcard .meta{ display:flex; flex-wrap:wrap; gap:6px 8px; margin:8px 0 10px; align-items:center; }
+.tcard .pc{ margin:0 0 4px; } .tcard .src{ margin:0 0 12px; font:400 11px/1.4 var(--mono); }
+.tcard details{ margin-top:12px; font-size:13px; } .tcard summary{ cursor:pointer; color:var(--champagne); font:500 11px/1.4 var(--mono); text-transform:uppercase; letter-spacing:.14em; }
+.tcard summary:focus-visible{ outline:2px solid var(--champagne); outline-offset:2px; }
+.tl{ list-style:none; margin:10px 0 0; padding:0; } .tl li{ padding:8px 0; border-top:1px solid var(--seam); overflow-wrap:anywhere; } .tl .gate-f{ margin:2px 0 0; }
+.tcard .addrow{ margin-bottom:8px; flex-direction:column; }
