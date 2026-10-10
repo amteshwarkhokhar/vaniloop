@@ -245,3 +245,29 @@ def test_real_audit_fn_uses_jev_only_when_asked(transport, monkeypatch):
     monkeypatch.setenv("VANILOOP_JUDGE", "jev")
     prove.real_audit_fn(_call())
     assert len(transport["bodies"]) == 1
+
+
+def test_frustration_question_asks_for_irritation_not_repetition():
+    """The irritation test (matrix: Fatal when the buyer gets irritated) must ask about irritation with the bot and
+    say that repeated agreement words are not irritation. With "repeating themselves" in the question, Jev scored a
+    plain "Haan, haan. Haan." at 0.73 on a real call, which would make most loops and calls Fatal or flagged."""
+    call = CallRecord(
+        call_id="syn_irritation",
+        duration_sec=4,
+        turns=[
+            Turn(idx=0, speaker="bot", start_sec=0, end_sec=1, text="Aapko packing machine chahiye na?"),
+            Turn(idx=1, speaker="user", start_sec=1, end_sec=2, text="Haan, haan. Haan."),
+        ],
+    )
+    led = Ledger.model_validate(
+        {
+            "call_id": "syn_irritation",
+            "scope": "bl_collection",
+            "user_turns": [{"idx": 1}],
+            "bot_turns": [{"idx": 0, "slot": "confirm"}],
+        }
+    )
+    q = jev.build_questions(call, led)["f1"]
+    text = q["instructions"].lower()
+    assert "irritated or annoyed" in text and "repeating themselves" not in text and "haan haan" in text
+    assert jev.JEV_VERSION != "1"

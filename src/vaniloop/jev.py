@@ -11,7 +11,7 @@ from .llm import complete_jev
 from .models import CallRecord, Ledger
 from .rules import FRUSTRATED_P
 
-JEV_VERSION = "1"  # bump whenever the questions or the thresholds change; part of the cache key
+JEV_VERSION = "2"  # bump whenever the questions or the thresholds change; part of the cache key
 TRUE_AT, FALSE_AT = 0.65, 0.35
 
 
@@ -68,10 +68,12 @@ def build_questions(call: CallRecord, led: Ledger) -> dict[str, dict]:
             last_bot = t.text
         elif any(u.idx == t.idx for u in led.user_turns):
             questions[f"f{t.idx}"] = _noul(
-                f'A sales bot said: "{last_bot}". The buyer replied: "{t.text}". Is the buyer irritated, '
-                "confused or repeating themselves?",
-                "The buyer is irritated, confused or repeating themselves.",
-                "The buyer is calm and answers normally.",
+                f'A sales bot said: "{last_bot}". The buyer replied: "{t.text}". In this reply, is the buyer '
+                "irritated or annoyed with the bot (for example complaining that it keeps asking, telling it to "
+                'stop, or speaking angrily)? Short agreement words repeated, such as "haan haan" or "ji ji", '
+                "and a plain answer are not irritation.",
+                "The buyer is irritated or annoyed with the bot.",
+                "The buyer is calm: agreeing, answering or asking normally.",
             )
     return questions
 
@@ -102,8 +104,14 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
     )
 
 
-def _state(call: CallRecord) -> str:
-    return "\n".join(f"[{t.idx}] {t.speaker}: {t.text}" for t in call.turns)
+def _state(call: CallRecord) -> dict:
+    """The call as named JSON turns (TypeSafe docs, State: an object keeps each part named and related)."""
+    who = {"bot": "sales bot", "user": "buyer"}
+    return {
+        "call": {
+            "turns": [{"idx": t.idx, "speaker": who.get(t.speaker, t.speaker), "text": t.text} for t in call.turns]
+        }
+    }
 
 
 def _kappa(pairs: list[tuple[bool, bool]]) -> float | None:
