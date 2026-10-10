@@ -192,6 +192,16 @@ const SC = {
     await click({ op: "save-rubric" });
     return { afterEdit, banner, put: calls.filter((c) => c.method === "PUT").map((c) => c.body).slice(-1) };
   },
+  async "con-enter"() {
+    routes["GET /api/rubric"] = [200, RUB];
+    const on = () => ids.panel.classList.contains("enter");
+    await click({ go: "audit" });
+    const nav1 = on();
+    await click({ calls: "Pass" }); // a filter redraws the page without a navigation
+    const redraw = on();
+    await click({ go: "rubric" }); // a console.js page enters on the redraw that shows its data
+    return [nav1, redraw, on()];
+  },
   async "con-tune"() {
     const out = {};
     routes["GET /api/rubric"] = [200, RUB];

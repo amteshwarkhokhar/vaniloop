@@ -14,23 +14,56 @@
   --rounded:ui-rounded, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono:ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --r-group:12px; --r-ctl:8px; --ease:cubic-bezier(.25,.1,.25,1); --gutter:40px;
+  /* motion: ease-out for entrances and lifts, a small spring for presses and icons. No animation runs past 600 ms. */
+  --ease-out:cubic-bezier(.22,.8,.22,1); --ease-spring:cubic-bezier(.3,1.3,.5,1); --d1:.16s; --d2:.28s; --d3:.55s;
+  --edge-hover:0 0 0 .5px rgba(0,0,0,.10), 0 6px 20px rgba(29,29,31,.07);
   /* old names, kept so views/*.css keep working */
   --night:var(--bg); --slate:var(--surface); --seam:var(--line); --ivory:var(--text); --ash:var(--text-2); --champagne:var(--accent-text);
   --body:var(--font);
 }
 @media (max-width:720px){ :root{ --gutter:16px; } }
 
+/* the page entrance: plays once per navigation (dash.js sets #panel.enter), never on a redraw. Total stagger 400 ms. */
+@keyframes reveal{ from{ opacity:0; transform:translateY(10px); } }
+@keyframes title{ from{ opacity:0; transform:translateY(8px); filter:blur(6px); } }
+@keyframes grow{ from{ transform:scaleX(0); } }
+@keyframes num{ from{ opacity:0; transform:translateY(6px); filter:blur(3px); } }
+@keyframes sq{ from{ opacity:0; transform:scale(.3); } }
+@keyframes dockin{ from{ opacity:0; transform:translateY(-10px) scale(.97); } }
+#panel.enter > *{ animation:reveal var(--d3) var(--ease-out) both; }
+#panel.enter > :nth-child(2){ animation-delay:50ms; } #panel.enter > :nth-child(3){ animation-delay:100ms; }
+#panel.enter > :nth-child(4){ animation-delay:150ms; } #panel.enter > :nth-child(5){ animation-delay:200ms; }
+#panel.enter > :nth-child(6){ animation-delay:250ms; } #panel.enter > :nth-child(7){ animation-delay:300ms; }
+#panel.enter > :nth-child(8){ animation-delay:350ms; } #panel.enter > :nth-child(n+9){ animation-delay:400ms; }
+#panel.enter .ptitle{ animation:title var(--d3) var(--ease-out) both; }
+/* bars grow from the left; a running (indeterminate) bar keeps its own slide */
+#panel.enter .vbar span,#panel.enter .rate .tr i,#panel.enter .pair span,#panel.enter .st-bar:not(.ind) i{
+  transform-origin:left; animation:grow var(--d3) var(--ease-out) both; animation-delay:150ms; }
+#panel.enter .bn .n,#panel.enter .st-big b,#panel.enter .calls-h h2 b{ animation:num var(--d3) var(--ease-out) both; animation-delay:100ms; }
+#panel.enter .trial i{ animation:sq var(--d2) var(--ease-spring) both; }
+#panel.enter .trial i:nth-child(2){ animation-delay:20ms; } #panel.enter .trial i:nth-child(3){ animation-delay:40ms; }
+#panel.enter .trial i:nth-child(4){ animation-delay:60ms; } #panel.enter .trial i:nth-child(5){ animation-delay:80ms; }
+#panel.enter .trial i:nth-child(6){ animation-delay:100ms; } #panel.enter .trial i:nth-child(7){ animation-delay:120ms; }
+#panel.enter .trial i:nth-child(8){ animation-delay:140ms; } #panel.enter .trial i:nth-child(9){ animation-delay:160ms; }
+#panel.enter .trial i:nth-child(10){ animation-delay:180ms; } #panel.enter .trial i:nth-child(11){ animation-delay:200ms; }
+#panel.enter .trial i:nth-child(12){ animation-delay:220ms; } #panel.enter .trial i:nth-child(n+13){ animation-delay:240ms; }
+.dock:not([hidden]) .dock-bar{ animation:dockin var(--d3) var(--ease-spring) both; }
+details > :not(summary){ animation:reveal var(--d2) var(--ease-out) both; } /* plays when a disclosure opens */
+
 *,*::before,*::after{ box-sizing:border-box; }
 [hidden]{ display:none !important; }
 html{ background:var(--bg); color-scheme:light; }
 body{ margin:0; background:var(--bg); color:var(--text); font:400 15px/1.47 var(--font);
-  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; overflow-x:hidden; }
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; overflow-x:hidden; isolation:isolate; }
+/* ambient light: two faint washes behind the page (isolation keeps them above the body fill). The opaque sidebar covers its part. */
+body::before{ content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:radial-gradient(1200px 600px at 20% -20%, rgba(97,85,245,.045), transparent 60%), radial-gradient(900px 500px at 110% 0, rgba(0,126,174,.025), transparent 60%); }
 a{ color:var(--accent-text); text-decoration:none; }
 a:hover{ text-decoration:underline; }
 button{ font:inherit; color:inherit; background:none; border:0; padding:0; cursor:pointer; }
 code,.mono{ font-family:var(--mono); font-size:.93em; font-variant-numeric:tabular-nums; }
 code{ background:var(--surface-2); border-radius:6px; padding:1px 6px; }
-:focus-visible{ outline:3px solid var(--accent); outline-offset:2px; }
+:focus-visible{ outline:3px solid var(--accent); outline-offset:2px; transition:outline-offset var(--d1) var(--ease-out); }
 main:focus,h1[tabindex="-1"]:focus{ outline:none; }
 .label{ margin:0; font:500 14px/1.4 var(--font); color:var(--text-2); }
 .lede,.empty{ margin:0; color:var(--text-2); max-width:68ch; }
@@ -48,7 +81,7 @@ main:focus,h1[tabindex="-1"]:focus{ outline:none; }
 .t-review{ --tone:var(--review); --ink:var(--review-ink); --tone-soft:var(--review-soft); }
 .t-pass{ --tone:var(--pass); --ink:var(--pass-ink); --tone-soft:var(--pass-soft); }
 .chip{ display:inline-flex; align-items:center; gap:5px; padding:2px 10px; border-radius:999px; white-space:nowrap;
-  font:500 13px/1.5 var(--font); color:var(--ink, var(--text-2)); background:var(--tone-soft, var(--surface-2)); }
+  font:500 13px/1.5 var(--font); color:var(--ink, var(--text-2)); background:var(--tone-soft, var(--surface-2)); transition:transform var(--d1) var(--ease-out); }
 .dot{ flex:none; width:7px; height:7px; border-radius:50%; background:var(--tone, var(--line-strong)); }
 
 /* calls view header (/) */

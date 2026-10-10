@@ -308,6 +308,10 @@
       html = stub(failed(err));
     }
     main.innerHTML = html;
+    // The page entrance plays once per navigation (go, boot); a redraw clears it so filters and polls do not replay it.
+    const p = $("panel");
+    if (p && p.classList) p.classList.toggle("enter", !!S.fresh);
+    S.fresh = false;
     nav();
     $("menu-now").textContent = `Menu: ${it.name}`;
     if ($("tb-title")) $("tb-title").textContent = it.name;
@@ -317,8 +321,11 @@
     S.now = id;
     if (push && location.hash !== `#/${id}`) history.replaceState(null, "", `#/${id}`);
     closeMenu();
+    // A page that loads its own data (home, the console pages) enters once, on the redraw that shows that data.
+    const hook = window.VL && window.VL.enter && window.VL.enter[id];
+    S.fresh = !hook;
     show();
-    if (window.VL && window.VL.enter && window.VL.enter[id]) window.VL.enter[id]();
+    if (hook) { S.fresh = true; hook(); }
     $("panel").focus({ preventScroll: true });
     window.scrollTo(0, 0);
   }
@@ -398,8 +405,10 @@
     } else S.cfgErr = cfg.e;
     const id = location.hash.replace(/^#\/?/, "");
     if (ITEMS.some((i) => i.id === id)) S.now = id;
+    const hook = window.VL && window.VL.enter && window.VL.enter[S.now];
+    S.fresh = !hook;
     show();
-    if (window.VL && window.VL.enter && window.VL.enter[S.now]) window.VL.enter[S.now]();
+    if (hook) { S.fresh = true; hook(); }
   }
   // Reload the stage data after a job ends. An Operate panel keeps its own state, so only the sidebar is redrawn there.
   async function refresh() {

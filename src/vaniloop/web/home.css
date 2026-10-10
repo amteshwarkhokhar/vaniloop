@@ -1,6 +1,7 @@
 /* vaniloop home: the run button, the calls as squares, and the five steps. Tokens come from app.css. */
 .home-run{ display:flex; flex-wrap:wrap; align-items:center; gap:12px 18px; margin:0 0 24px; }
 .home-run .btn.lg{ gap:10px; padding:0 28px; box-shadow:0 6px 18px rgba(97,85,245,.28); }
+.home-run .btn.lg:hover:not(:disabled){ box-shadow:0 10px 26px rgba(97,85,245,.34); }
 .home-run .btn.lg:disabled{ box-shadow:none; }
 .home-run .btn svg{ width:14px; height:14px; fill:currentColor; }
 .run-meta{ flex:1 1 280px; min-width:0; }
@@ -19,7 +20,7 @@
 .legend{ display:flex; flex-wrap:wrap; gap:8px 16px; margin:12px 0 14px; }
 .lg{ display:inline-flex; align-items:center; gap:6px; } .lg b{ font:600 15px/1 var(--rounded); }
 .calls-grid{ position:relative; display:grid; grid-template-columns:repeat(auto-fill, 10px); gap:3px; padding:2px; overflow:hidden; border-radius:6px; }
-.cd{ width:10px; height:10px; border-radius:3px; background:var(--tone, var(--line-strong)); transition:transform .15s var(--ease); }
+.cd{ width:10px; height:10px; border-radius:3px; background:var(--tone, var(--line-strong)); transition:transform var(--d1) var(--ease-spring); }
 .cd:hover{ transform:scale(1.7); }
 .calls-grid:not(.seen) .cd{ animation:pop .45s var(--ease) both; animation-delay:calc(var(--i) * 1ms); }
 @keyframes pop{ from{ opacity:0; transform:scale(.2); } to{ opacity:1; transform:none; } }
