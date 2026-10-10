@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from . import prompt
+from . import prompt, tracker
 from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits, require_fixable
 from .jsonl import read_jsonl
 from .llm import complete_json
@@ -455,7 +455,11 @@ def run_fix(
         category_of = category_of or _default_category_of(Path(causes_path).parent)
         gate_rows = read_jsonl(Path(gates_path))
         for c in tickets:
-            _write_text(Path(tickets_dir) / f"{c.cause_id}.md", ticket_text(c, audits, gate_rows, category_of))
+            _write_text(
+                Path(tickets_dir) / f"{c.cause_id}.md",
+                tracker.ticket_header("ticket_open") + ticket_text(c, audits, gate_rows, category_of),
+            )
+    runs = out.parent
     prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
     rejected: list[dict] = []
     patches = []
@@ -479,6 +483,16 @@ def run_fix(
             _write_doc(out, result)
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+    for c, action, why in routed:  # tracker events come last and are best-effort: the stage's own files are saved
+        tracker.emit_routed(runs, c.cause_id, action, why)
+    for c in tickets:
+        tracker.emit("ticket_written", c.cause_id, {"path": f"tickets/{c.cause_id}.md"}, runs=runs)
+    for p in patches:
+        if p.cause_id not in have:
+            tracker.emit(
+                "patch_written", p.cause_id,
+                {"attempt": p.attempt, "changed_lines": changed_lines(p.old_text, p.new_text)}, runs=runs,
+            )  # fmt: skip
     return {
         "patches": result["patches"],
         "rejected": rejected,
@@ -619,6 +633,7 @@ def run_refix(
     if holdout:
         calls = _load_calls(calls_path)  # an absence fault has no quote: the fallback keeps its fix-half examples
         examples = evidence_examples(cause, {a.call_id: a for a in load_audits(Path(audits_path))}, True, calls)
+    runs = patches_path.parent
     prompt_text = prompt.load(prompt_path)
     rejected: list[dict] = []
     new = propose_patch(cause, examples, prompt_text, llm=llm, rejected=rejected, previous=previous)
@@ -639,4 +654,8 @@ def run_refix(
             _write_doc(patches_path, {**fresh, "patches": rows, "history": history})
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+    tracker.emit(
+        "patch_written", cause_id,
+        {"attempt": new.attempt, "changed_lines": changed_lines(new.old_text, new.new_text)}, runs=runs,
+    )  # fmt: skip
     return {"patches": [new.model_dump()], "rejected": []}
