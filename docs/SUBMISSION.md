@@ -29,7 +29,7 @@ Quality Audit & Fix Loop
 
 **The loop, stage by stage.**
 
-1. **Ingest.** Gemini transcribes each mp3 and flags per turn: tone, overlap, unclear audio, bot misheard. These flags later separate bad audio from bad prompting.
+1. **Ingest.** An LLM transcribes each mp3 and flags per turn: tone, overlap, unclear audio, bot misheard. These flags later separate bad audio from bad prompting.
 2. **Audit.** The LLM only labels (slot asked, value given, declined, misheard). Python rules grade 9 parameters of the official VANI quality matrix: intent, category ISQ, product change, quantity probing, quantity missed, quantity accuracy, unit, looping, dead air. Four judgement labels (does this spec question fit the product, do the options fit, is this the same product, is the buyer irritated) come from Jev (TypeSafe), tuned on a 756-item reviewed set. Every finding has a basis: `observed`, `spoken_proxy` or `unavailable`. Missing evidence gives `NeedsReview`, never `Pass`. Risk flags: wrong requirement, frustration, loops, low confidence, human request, dead-air review.
 3. **Issue.** In each call the earliest failing finding is the root, later ones are symptoms. A root whose onset sits on unclear audio becomes a bad-audio cause (speech owner), never a prompt patch. A cause is a pattern only with 3+ calls across 2+ product categories. Priority = frequency × severity with Wilson bounds, shown in the open. Each cause names its owner: prompt, bad audio, or unresolved (tool or data, needs traces).
 4. **Fix.** Each cause gets one route: a prompt patch (a diff against the real Sarvam VANI prompt, with anchor lines and rationale), an evidence ticket when the owner is unresolved, or watch. Patches are written from the fix half of the calls only.
@@ -37,7 +37,7 @@ Quality Audit & Fix Loop
 6. **Ship.** Prompt versions with lineage, an overlap guard between patches, a release check of all shipped patches together, and an append-only tracker (detected → routed → gated → ready to ship → shipped or regressed). The owner approves every ship.
 7. **Console.** One local page: Run the loop (shows the plan first), every call as a square, Audit, Issues, Fix and Test with per-call rows and transcript links, paired old/new replay strips per call, a rubric editor with live threshold scoring, and the tracker.
 
-**Sarvam.** A draft replica of VANI was built in IndiaMART's Sarvam workspace through the Sarvam Voice Agents MCP, with the real prompt, 38 variables and stand-in tools, and exercised with the Tests API. The proof replays run the real Sarvam prompt with a Gemini-played bot, because the replica cannot take per-call variables mid-call. The demo voiceover is Sarvam Bulbul TTS. The audio-replica design for the next step is documented in the repo.
+**Sarvam.** A draft replica of VANI was built in IndiaMART's Sarvam workspace through the Sarvam Voice Agents MCP, with the real prompt, 38 variables and stand-in tools, and exercised with the Tests API. The proof replays run the real Sarvam prompt with an LLM-played bot, because the replica cannot take per-call variables mid-call. The demo voiceover is Sarvam Bulbul TTS. The audio-replica design for the next step is documented in the repo.
 
 **What we refuse to claim.** No patch cleared the gate on the hackathon data. The gate refused to ship fixes it could not prove. Not proven, nothing ships. That is the point of the gate.
 
