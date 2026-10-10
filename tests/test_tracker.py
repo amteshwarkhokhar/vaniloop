@@ -324,3 +324,16 @@ def test_board_marks_an_event_that_skipped_its_prerequisite_as_ignored(tmp_path)
     tracker.record("shipped", "cause_x", runs=tmp_path)
     c = tracker.board(tmp_path)["causes"][0]
     assert c["state"] == "open" and [e.get("ignored") for e in c["events"]] == [None, True]
+
+
+def test_an_ignored_event_is_never_a_count_baseline(tmp_path):
+    """An invalid regressed event (no ship yet) carries counts but is ignored: it must not hide a later real regression.
+
+    detect at 1, a stray regressed at 5, ship, then 3 faults: the baseline is 1, so 3 is regressed. With the stray
+    event as baseline, 3 < 5 gave a quiet count_changed and the regression was missed.
+    """
+    tracker.sync_causes([cause_row(fatal=1, nonfatal=0)], tmp_path)
+    tracker.record("regressed", "cause_looping", {"counts": {"fatal": 5, "nonfatal": 0, "symptoms": 0}}, runs=tmp_path)
+    ship(tmp_path)
+    tracker.sync_causes([cause_row(fatal=3, nonfatal=0)], tmp_path)
+    assert tracker.state("cause_looping", tmp_path) == "regressed"

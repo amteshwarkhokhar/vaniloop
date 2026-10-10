@@ -216,7 +216,17 @@ def _sync(causes: list[dict], runs: Path, run_id: str | None) -> None:
         st = fold(evs)[0]
         if c is None and st not in ("shipped", "regressed"):
             continue  # a vanished cause only matters after a ship
-        base = next(e for e in reversed(evs) if e["kind"] in BASELINE)
+        accepted = [e for e, (_, ok) in zip(evs, walk(evs), strict=True) if ok]  # an ignored event is no baseline
+        base = next((e for e in reversed(accepted) if e["kind"] in BASELINE), None)
+        if base is None:  # only ignored events so far: the cause counts as new
+            record(
+                "detected",
+                cid,
+                {"counts": new, "name": c and c.get("name"), "parameter": c and c.get("parameter")},
+                run_id,
+                runs,
+            )
+            continue
         old = (base.get("detail") or {}).get("counts") or {}
         d = {"old": old, "new": new, "counts": new}
         if base.get("rubric_version") != rv:
@@ -235,7 +245,7 @@ def _sync(causes: list[dict], runs: Path, run_id: str | None) -> None:
             continue
         if (old.get("fatal"), old.get("nonfatal")) == (new["fatal"], new["nonfatal"]):
             continue
-        anchor = next((e for e in reversed(evs) if e["kind"] in ("shipped", "regressed")), {})
+        anchor = next((e for e in reversed(accepted) if e["kind"] in ("shipped", "regressed")), {})
         if st in ("shipped", "regressed") and not total:
             if anchor.get("rubric_version") == rv:
                 record("closed", cid, d, run_id, runs)
