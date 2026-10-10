@@ -1,6 +1,6 @@
 /* Calls view */
 .hero{ margin-bottom:56px; }
-.hero-line{ margin:0 0 20px; font:400 56px/1.1 var(--display); letter-spacing:-.01em; text-wrap:balance; }
+.hero-line{ margin:0 0 20px; font:600 40px/1.15 var(--body); letter-spacing:-.01em; text-wrap:balance; }
 .hero-line span{ display:block; }
 .hero-line em{ font-style:normal; font-weight:500; font-variant-numeric:lining-nums tabular-nums; font-variation-settings:"opsz" 14; }
 .nw{ white-space:nowrap; }
@@ -31,7 +31,7 @@
 .f:hover{ color:var(--ivory); }
 .f[aria-pressed="true"]{ color:var(--ivory); border-bottom-color:var(--champagne); }
 .more{ margin-top:32px; padding:9px 14px; border:1px solid var(--seam); border-radius:2px; color:var(--ash);
-  font:500 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em; transition:color .2s var(--ease), border-color .2s var(--ease); }
+  font:600 16px/1 var(--body); transition:color .2s var(--ease), border-color .2s var(--ease); }
 .more:hover{ color:var(--ivory); border-color:var(--ash); }
 
 .rows-head,.row{ display:grid; grid-template-columns:150px 56px 140px 140px minmax(0,1fr); gap:24px; align-items:center; }

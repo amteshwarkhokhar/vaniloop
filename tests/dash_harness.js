@@ -13,7 +13,7 @@ function el(id) {
   return e;
 }
 const ids = {}, doc = { activeElement: null, listeners: {} };
-for (const id of ["panel", "side", "nav", "judge", "judge-wrap", "menu-now", "dock", "dock-info", "dock-actions", "dock-log", "tune-res", "rb-save"]) ids[id] = el(id);
+for (const id of ["panel", "side", "nav", "side-foot", "menu-now", "dock", "dock-info", "dock-actions", "dock-log", "tune-res", "rb-save"]) ids[id] = el(id);
 const menu = el("menu"), mark = el("mark"), a1 = el("a1"), a2 = el("a2");
 ids.side.kids = [a1, a2];
 doc.getElementById = (id) => ids[id];
@@ -145,7 +145,7 @@ const SC = {
     const out = {}, put = () => calls.filter((c) => c.method === "PUT").map((c) => c.body);
     routes["GET /api/rubric"] = [200, RUB];
     await click({ go: "rubric" });
-    out.panel = ids.panel.innerHTML;
+    out.panel = ids.panel.innerHTML; out.nav = ids.nav.innerHTML;
     await emit("input", { dataset: { op: "param", id: "rules.FRUSTRATED_P" }, value: "0.9" });
     await emit("input", { dataset: { op: "q", q: "spec_fit", f: "instructions" }, value: "New text" });
     routes["PUT /api/rubric"] = [[400, { error: "must be at most 0.8", field: "rules.FRUSTRATED_P" }], [200, { ...RUB, params: [prm("rules.FRUSTRATED_P", "Frustrated at", 0.5, { value: 0.7, overridden: true }), ...RUB.params.slice(1)] }]];
@@ -199,9 +199,9 @@ const SC = {
     routes["POST /api/tracker/c4/ticket"] = [[400, { error: "ref is required" }], [200, { cause: cz("c4", "ticket_sent") }]];
     routes["POST /api/tracker/c3/ship"] = [[409, { error: "gate no longer ships" }], [202, { job: job("j7", "ship", "running") }]];
     routes["GET /api/jobs/j7/log?from=0"] = [200, { job: job("j7", "ship", "done"), lines: ["new prompt version v3"], next: 1 }];
+    out.nav = ids.nav.innerHTML; // before any visit: the sidebar count comes from the boot read
     await click({ go: "tracker" });
     out.board = ids.panel.innerHTML;
-    out.nav = ids.nav.innerHTML;
     await click({ op: "t-sent", id: "c4" }); out.empty = ids.panel.innerHTML;
     await emit("input", { dataset: { op: "tref", id: "c4" }, value: " T-1 " });
     await click({ op: "t-sent", id: "c4" }); out.bad = ids.panel.innerHTML;
@@ -262,6 +262,7 @@ const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages
   if (consoleOn) {
     routes["GET /api/console"] = [200, { ...CON, read_only: scenario === "con-readonly" }];
     routes["GET /api/jobs"] = [200, { jobs: [] }];
+    routes["GET /api/tracker"] = [200, TRK]; // the sidebar reads it at boot
     vm.runInContext(consoleSrc, vctx);
     await tick();
     return console.log(JSON.stringify(await SC[scenario]()));
@@ -273,7 +274,7 @@ const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages
     await click({ judge: "jev" });
     pending["/api/stage/audit?judge=jev"](); await tick();
     pending["/api/stage/audit?judge=gemini"](); await tick();
-    out.panel = ids.panel.innerHTML; out.toggle = ids.judge.innerHTML;
+    out.panel = ids.panel.innerHTML;
   } else if (scenario === "panels") {
     for (const id of ["issues", "fix", "review"]) { await click({ go: id }); out[id] = ids.panel.innerHTML; }
   } else if (scenario === "judge") {
