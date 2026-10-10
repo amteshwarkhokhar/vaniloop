@@ -13,7 +13,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import rubric
+from . import rubric, tune
 from .categorize import CATEGORIES_PATH, run_categorize
 from .fix import GATES_PATH, PATCHES_PATH, REPLAYS_PATH, TICKETS_DIR, run_fix, run_refix
 from .golden import (
@@ -30,7 +30,7 @@ from .grading import grade_sample
 from .ingest import OUT_PATH as CALLS_PATH
 from .ingest import detect_silences, load_transcript
 from .issue import AUDITS_PATH, CAUSES_PATH, load_audits, run_issues
-from .jev import fingerprint, judge_agreement, judge_ledger
+from .jev import ask, fingerprint, judge_agreement, labels
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
 from .models import CallRecord, Ledger
@@ -153,8 +153,13 @@ def run_judge(
     workers: int = 4,
     calls_only: set[str] | None = None,
     on_done=None,
+    raw_path=None,
 ) -> dict:
     """Replace the judgement labels of every saved ledger with Jev's. Writes ledgers_jev.jsonl; resumes by call id.
+
+    Also writes jev_raw.jsonl next to it (raw_path): the raw Jev answers of each call, so the console can re-score
+    thresholds with no request. A call is skipped only when both its ledger row and its raw row match the fingerprint,
+    so a run backfills raw rows of calls judged before the file existed (Jev cache hits, no request).
 
     Several focused Jev requests per call. If any fails, the call goes to the errors file and the run goes on. A missing
     TYPESAFE_API_KEY stops the run.
@@ -163,7 +168,9 @@ def run_judge(
     ledgers = dedupe_by_call_id(read_jsonl(ledgers_path), last_wins=True)
     if calls_only is not None:
         ledgers = [r for r in ledgers if r["call_id"] in calls_only]
+    raw_path = Path(raw_path) if raw_path else Path(out_path).parent / "jev_raw.jsonl"
     stored = {r["call_id"]: r.get("jev_fp") for r in read_jsonl(out_path) if "call_id" in r}  # last row wins
+    stored_raw = {r["call_id"]: r.get("jev_fp") for r in read_jsonl(raw_path) if "call_id" in r}
     refresh = os.environ.get("VANILOOP_CACHE") == "refresh"
 
     def fp(r: dict) -> str:
@@ -175,16 +182,23 @@ def run_judge(
     todo = []
     for r in (r for r in ledgers if r.get("call_id") in calls):
         try:  # a malformed row goes to the errors file; it must not stop the run
-            same = not refresh and stored.get(r["call_id"]) == fp(r)
+            want = fp(r)
+            same = not refresh and stored.get(r["call_id"]) == want and stored_raw.get(r["call_id"]) == want
         except Exception as e:
             invalid += 1
             append_jsonl(errors_path, [{"call_id": r["call_id"], "error": f"jev invalid row {type(e).__name__}"}])
             continue
         (done.add(r["call_id"]) if same else todo.append(r))
 
-    def work(r: dict) -> dict:
-        led = judge_ledger(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
-        return {**led.model_dump(mode="json"), "jev_fp": fp(r)}
+    def work(r: dict) -> tuple[dict, dict]:
+        call, src = CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r)
+        raw = ask(call, src)
+        key = fp(r)
+        return {**labels(raw, src).model_dump(mode="json"), "jev_fp": key}, {
+            "call_id": r["call_id"],
+            "jev_fp": key,
+            "requests": raw,
+        }
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         futs = {ex.submit(work, r): r for r in todo}
@@ -192,7 +206,7 @@ def run_judge(
             if on_done:
                 on_done(futs[fut]["call_id"])
             try:
-                led = fut.result()
+                led, raw_row = fut.result()
             except Exception as e:  # one bad call must not stop the run
                 errors += 1
                 with lock:
@@ -200,8 +214,9 @@ def run_judge(
                         errors_path, [{"call_id": futs[fut]["call_id"], "error": f"jev {type(e).__name__}: {e}"}]
                     )
                 continue
-            with lock:
+            with lock:  # one step: the ledger row and the raw row of a call go together
                 append_jsonl(out_path, [led])
+                append_jsonl(raw_path, [raw_row])
     return {"judged": len(todo) - errors, "skipped": len(done), "errors": errors + invalid}
 
 
@@ -478,6 +493,10 @@ def main(argv: list[str] | None = None) -> None:
     jd = sub.add_parser("judge", help="Jev makes the judgement labels: ledgers.jsonl -> ledgers_jev.jsonl")
     jd.add_argument("--workers", type=int, default=4)
     jd.add_argument("--calls", default=None, help="id1,id2: judge only these calls")
+    tn = sub.add_parser("tune", help="score Jev thresholds against the reviewed truth; prints JSON")
+    tn.add_argument(
+        "--thresholds", default="{}", help="JSON in the shape of POST /api/tune; missing keys keep the current"
+    )
     ja = sub.add_parser("judge-agreement", help="Gemini vs Jev agreement and kappa per field")
     ja.add_argument("--a", default=None)
     ja.add_argument("--b", default=None)
@@ -558,6 +577,11 @@ def main(argv: list[str] | None = None) -> None:
             workers=args.workers, calls_only=set(ids) if ids else None,
         )  # fmt: skip
         print(f"judged={s['judged']} skipped={s['skipped']} errors={s['errors']}")
+    elif args.cmd == "tune":
+        try:
+            print(json.dumps(tune.score(Path(args.runs) if args.runs else RUNS, json.loads(args.thresholds)), ensure_ascii=False))
+        except (tune.NoRaw, ValueError) as e:
+            raise SystemExit(f"tune: {e}") from None
     elif args.cmd == "judge-agreement":
         print(
             describe_agreement(

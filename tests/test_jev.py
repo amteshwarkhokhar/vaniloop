@@ -657,3 +657,47 @@ def test_failed_request_fails_the_call(monkeypatch):
     monkeypatch.setattr(jev, "complete_jev", boom)
     with pytest.raises(RuntimeError):
         jev.judge_ledger(_call(), _ledger())
+
+
+def test_judge_writes_raw_rows_that_reproduce_the_labels(transport, tmp_path):
+    """Protects jev_raw.jsonl: each judged call gets one raw row, and labels(raw) rebuilds the ledger row.
+
+    If it failed, the console would tune thresholds on raw answers that do not match the labels the judge wrote.
+    """
+    transport["answers"] = {"q2": 0.6, "n2": 0.9, "opt2_0": 0.9, "opt2_1": 0.9, "pm": 0.9, "f1": 0.3, "f3": 0.8}
+    calls, ledgers, out = tmp_path / "calls.jsonl", tmp_path / "ledgers.jsonl", tmp_path / "ledgers_jev.jsonl"
+    calls.write_text(json.dumps(_call().model_dump(mode="json")) + "\n")
+    ledgers.write_text(json.dumps(_ledger().model_dump(mode="json")) + "\n")
+    kw = dict(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=tmp_path / "e.jsonl", workers=1)
+    pipeline.run_judge(**kw)
+    (raw_row,) = [json.loads(ln) for ln in (tmp_path / "jev_raw.jsonl").read_text().splitlines()]
+    (led_row,) = [json.loads(ln) for ln in out.read_text().splitlines()]
+    assert raw_row["call_id"] == "c1" and raw_row["jev_fp"] == led_row["jev_fp"] == jev.fingerprint(_call(), _ledger())
+    assert [(r["kind"], r["idx"], r["options"], r["named"]) for r in raw_row["requests"]] == [
+        ("spec", 2, 2, True),
+        ("buyer", 1, 0, False),
+        ("buyer", 3, 0, False),
+        ("pm", None, 0, False),
+    ]
+    assert raw_row["requests"][0]["answers"] == {"q": 0.6, "n": 0.9, "opt0": 0.9, "opt1": 0.9}
+    assert jev.labels(raw_row["requests"], _ledger()) == jev.judge_ledger(_call(), _ledger())
+    assert jev.labels(raw_row["requests"], _ledger()).model_dump(mode="json") == {
+        k: v for k, v in led_row.items() if k != "jev_fp"
+    }
+
+
+def test_judge_backfills_a_missing_raw_row_without_a_request(transport, tmp_path):
+    """Protects old data: a call judged before jev_raw.jsonl existed is judged again, from the cache, to add its row.
+
+    If it failed, the console would have no raw answers for calls judged earlier and tuning would stay empty.
+    """
+    calls, ledgers, out = tmp_path / "calls.jsonl", tmp_path / "ledgers.jsonl", tmp_path / "ledgers_jev.jsonl"
+    calls.write_text(json.dumps(_call().model_dump(mode="json")) + "\n")
+    ledgers.write_text(json.dumps(_ledger().model_dump(mode="json")) + "\n")
+    kw = dict(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=tmp_path / "e.jsonl", workers=1)
+    pipeline.run_judge(**kw)
+    sent = len(transport["bodies"])
+    (tmp_path / "jev_raw.jsonl").unlink()
+    assert pipeline.run_judge(**kw) == {"judged": 1, "skipped": 0, "errors": 0}
+    assert len(transport["bodies"]) == sent and (tmp_path / "jev_raw.jsonl").exists()
+    assert pipeline.run_judge(**kw)["skipped"] == 1
