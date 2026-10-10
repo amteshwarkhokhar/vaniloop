@@ -355,7 +355,7 @@ def test_test_page_shows_paired_replays_per_call_and_hides_statistics():
     )
     for label in ("3 of 3 replays failed", "1 of 3 replays failed", "0 of 3 replays failed", "2 of 3 replays failed"):
         assert f'prompt: {label}"' in p, "the strip label names the prompt and the count"
-    assert p.count('class="pairs"') == 1 and p.count("<li>") == 2
+    assert p.count('class="pairs"') == 1 and p.count("<li>") == 3
     assert "better</span>" in p and "worse</span>" in p
     assert "<img" not in p and "g&#60;img src=x onerror=1&#62;" in p
     assert 'href="/#/call/g%3Cimg%20src%3Dx%20onerror%3D1%3E"' in p
