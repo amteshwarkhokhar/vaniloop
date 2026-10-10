@@ -217,6 +217,12 @@ const SC = {
     out.posts = tp();
     return out;
   },
+  async "con-tabs"() {
+    const out = {};
+    await click({ go: "review" }); out.review = ids.panel.innerHTML; out.nav = ids.nav.innerHTML;
+    await click({ go: "thresholds" }); out.thresholds = ids.panel.innerHTML;
+    return out;
+  },
   async "con-chain"() {
     const out = {};
     await click({ go: "audit" });

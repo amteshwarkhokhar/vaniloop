@@ -10,14 +10,14 @@ from test_dash_js import run
 def test_paid_stage_asks_for_confirm_then_posts_with_confirm_and_the_dock_follows_the_job():
     """Run on audit shows the confirm with the estimate, and only Confirm sends confirm true.
 
-    Then the dock shows the running job and its log. Without this, a paid stage could start with one click,
-    or the dock would stay empty."""
+    Then the dock shows the running job by its plain name ("Grade calls") and its log. Without this, a paid stage
+    could start with one click, or the dock would stay empty."""
     d = run("con-run")
     assert "This calls Gemini and spends money." in d["confirm"]
     assert "Estimate $1.50." in d["confirm"]
     assert d["posts"] == [{"stage": "audit", "args": {}}, {"stage": "audit", "args": {}, "confirm": True}]
     assert d["hidden"] is False
-    assert "Running" in d["info1"] and "audit" in d["info1"]
+    assert "Running" in d["info1"] and "Grade calls" in d["info1"]
     assert "&#60;img src=x onerror=alert(1)&#62;" in d["log1"] and "<img" not in d["log1"] + d["info1"]
     assert "Done" in d["info2"] and "Cancel" not in d["actions"]
     assert d["refetched"], "a finished job must refresh the stage data"
@@ -172,7 +172,7 @@ def test_tracker_actions_post_the_contract_bodies_and_show_errors():
     for part in ("p value <b>0.01</b>", "lift <b>0.25</b>", "guard <b>pass</b>"):
         assert part in d["confirm"]
     assert "gate no longer ships" in d["conflict"]
-    assert "ship" in d["dock"] and "Done" in d["dock"], "the 202 job must reach the dock"
+    assert "Ship a passed patch" in d["dock"] and "Done" in d["dock"], "the 202 job must reach the dock"
     assert d["rereads"] >= 1 and "from v2" in d["after"], "a finished ship must reload the board and prompt versions"
     assert d["posts"] == [
         ["/api/tracker/c4/ticket", {"action": "sent", "ref": "T-1"}],
@@ -182,28 +182,36 @@ def test_tracker_actions_post_the_contract_bodies_and_show_errors():
     ]
 
 
-def test_sidebar_lists_steps_then_needs_you_then_tools_and_tracker_times_read_as_ist():
-    """The sidebar reads Steps, Needs you, Tools, and Tracker shows "2 waiting" (a ready-to-ship cause plus a ticket).
+def test_sidebar_lists_tracker_then_results_configuration_and_tools_and_tracker_times_read_as_ist():
+    """The sidebar shows Tracker with "2 waiting" first, then Results (the five steps in order), then Configuration
+    (Rubric and Scoring criteria among them), then Tools.
 
     The count comes from GET /api/tracker at boot, before the Tracker page is opened. Tracker times show as
-    "09:00 10 Oct", not raw ISO. If the order broke, Run and the waiting count would be hard to find."""
+    "09:00 10 Oct", not raw ISO. If the order broke, the waiting count, the rubric and Run would be hard to find."""
     d = run("con-tracker")
     nav = d["nav"]
-    assert nav.index("Steps") < nav.index("Needs you") < nav.index("Tools")
-    assert nav.index("Ingest") < nav.index("Audit") < nav.index("Issues") < nav.index("Fix") < nav.index("Test")
-    assert "2 waiting" in nav and "Run one step" in nav[nav.index("Tools") :]
+    assert nav.index("Tracker") < nav.index("Results") < nav.index("Configuration") < nav.index("Tools")
+    steps = [nav.index(n) for n in ("Ingest", "Audit", "Issues", "Fix", "Test", "Configuration")]
+    assert steps == sorted(steps)
+    conf = nav[nav.index("Configuration") : nav.index("Tools")]
+    assert "Rubric" in conf and "Scoring criteria" in conf and "Judges" in conf
+    assert "2 waiting" in nav[: nav.index("Results")] and "Run one step" in nav[nav.index("Tools") :]
     assert "since 09:00 10 Oct" in d["board"] and "2026-10-10T" not in d["board"]
     assert "10:00 10 Oct" in d["board"], "a time that is not ISO passes through unchanged"
 
 
-def test_tab_marks_its_page_and_its_step_row():
-    """On #/rubric the page says "Step 2 of 5", the Rubric tab has aria-current page and the Audit row is current.
+def test_tab_marks_its_page_and_its_family_row():
+    """On #/review (a tab of Audit) the page says "Step 2 of 5", the Judge accuracy tab has aria-current page and the
+    Audit row is current. On #/thresholds (a tab of Scoring criteria) the kicker says Configuration.
 
-    Without it a tab page would not show which step it belongs to, and the owner could not find the way back.
-    The Rubric tab is not a sidebar row, so the step rows stay five."""
-    d = run("con-rubric")
-    assert "Step 2 of 5" in d["panel"]
-    assert '<a href="#/rubric" aria-current="page">Rubric</a>' in d["panel"]
-    assert '<a href="#/audit">Results</a>' in d["panel"] and 'aria-current="page">Results' not in d["panel"]
+    Without it a tab page would not show where it belongs, and the owner could not find the way back. A tab is not a
+    sidebar row, so the sidebar stays short."""
+    d = run("con-tabs")
+    assert "Step 2 of 5" in d["review"]
+    assert '<a href="#/review" aria-current="page">Judge accuracy</a>' in d["review"]
+    assert '<a href="#/audit">Results</a>' in d["review"] and 'aria-current="page">Results' not in d["review"]
     assert re.search(r'data-go="audit" aria-current="step"', d["nav"])
-    assert 'data-go="rubric"' not in d["nav"]
+    assert 'data-go="review"' not in d["nav"] and 'data-go="thresholds"' not in d["nav"]
+    assert '<p class="kicker">Configuration</p>' in d["thresholds"]
+    assert '<a href="#/tune">Tune</a>' in d["thresholds"]
+    assert '<a href="#/thresholds" aria-current="page">All constants</a>' in d["thresholds"]
