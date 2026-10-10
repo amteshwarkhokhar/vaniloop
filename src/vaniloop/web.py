@@ -272,6 +272,11 @@ def _ledger(d: Path, call_id: str) -> tuple[str, dict | None]:
     return "", None
 
 
+def _list(value) -> list:
+    """The value when it is a list, else an empty list, so a malformed file never crashes the call page."""
+    return value if isinstance(value, list) else []
+
+
 _ROLES = (("fatal", "fatal_calls"), ("nonfatal", "nonfatal_calls"), ("symptom", "symptom_calls"))
 _PATCH_KEYS = ("cause_id", "attempt", "old_text", "new_text", "rationale", "decision", "gate_decision")
 
@@ -282,7 +287,7 @@ def _call_steps(d: Path, call_id: str) -> dict:
     for c in causes(d)["causes"]:
         if not isinstance(c, dict):
             continue
-        role = next((r for r, key in _ROLES if call_id in (c.get(key) or [])), None)
+        role = next((r for r, key in _ROLES if call_id in _list(c.get(key))), None)
         if role:
             mine.append({k: c.get(k) for k in ("cause_id", "name", "parameter", "type", "status")} | {"role": role})
     ids = {c["cause_id"] for c in mine}
@@ -290,14 +295,14 @@ def _call_steps(d: Path, call_id: str) -> dict:
         raw = json.loads((d / "patches.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raw = {}
-    rows = [p for key in ("patches", "history") for p in ((raw.get(key) if isinstance(raw, dict) else None) or [])]
+    rows = [p for key in ("patches", "history") for p in _list(raw.get(key) if isinstance(raw, dict) else None)]
     mine_rows = [p for p in rows if isinstance(p, dict) and p.get("cause_id") in ids]
     patches = [{k: p.get(k) for k in _PATCH_KEYS if k in p} for p in mine_rows]
     replays = [
         {"cause_id": g.get("cause_id"), "attempt": g.get("attempt"), "decision": g.get("decision"), "k": pc.get("k"),
          "old_fails": pc.get("old_fails"), "new_fails": pc.get("new_fails")}
         for g in gates(d) if isinstance(g, dict)
-        for pc in (g.get("per_call") or []) if isinstance(pc, dict) and pc.get("call_id") == call_id
+        for pc in _list(g.get("per_call")) if isinstance(pc, dict) and pc.get("call_id") == call_id
     ]
     return {"causes": mine, "patches": patches, "gates": replays}
 

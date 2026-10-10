@@ -361,6 +361,16 @@ def test_call_detail_adds_each_step_output_for_the_call(server):
     assert {p["cause_id"] for p in other["patches"]} == {"C-02"} and other["ledger"] is None
 
 
+def test_call_steps_survive_malformed_files(tmp_path):
+    """A gate whose per_call is not a list, or a patches file whose lists are not lists, gives empty steps, no crash.
+
+    Codex found a TypeError here. A crash would turn the whole call page into an error for one bad row."""
+    (tmp_path / "causes.json").write_text(json.dumps({"causes": [{"cause_id": "C-9", "fatal_calls": "x1"}, 7]}))
+    (tmp_path / "patches.json").write_text(json.dumps({"patches": 1, "history": True}))
+    (tmp_path / "gates.jsonl").write_text(json.dumps({"cause_id": "C-9", "per_call": 1}) + "\n" + "[]\n")
+    assert web._call_steps(tmp_path, "x1") == {"causes": [], "patches": [], "gates": []}
+
+
 def test_unknown_call_returns_404_json(server):
     """An unknown call id gives a 404 with a JSON error body, so the UI shows a message and not a blank page."""
     status, body = get_json(server, "/api/call/nope")
