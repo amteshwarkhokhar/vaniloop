@@ -6,6 +6,7 @@ known ids first. Then `build_argv` makes an argv list from those values only.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -408,3 +409,95 @@ class JobRunner:
         except ProcessLookupError:
             pass
         return self.public(row)
+
+
+FILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}\.(mp3|json)$")
+MAX_FILES = 20
+MAX_FILE_BYTES = 25 * 1024 * 1024
+
+
+def create_submission(d: Path, body: dict) -> dict:
+    """POST /api/submit: check every file and call id, then write the files to console/submissions/<sid>/inbox."""
+    files, ids = body.get("files") or [], body.get("call_ids") or []
+    if not isinstance(files, list) or not isinstance(ids, list):
+        raise _bad("files", "files and call_ids must be lists")
+    if not files and not ids:
+        raise _bad("files", "send at least one file or call id")
+    if len(files) > MAX_FILES:
+        raise _bad("files", f"at most {MAX_FILES} files")
+    known = _call_ids(d)
+    for cid in ids:
+        if not isinstance(cid, str) or cid not in known:
+            raise _bad("call_ids", "unknown call id")
+    decoded, seen = [], set()
+    for f in files:
+        name = f.get("name") if isinstance(f, dict) else None
+        if not isinstance(name, str) or not FILE_RE.match(name) or name.startswith(".") or name in seen:
+            raise _bad("files", "bad or repeated file name")
+        try:
+            raw = base64.b64decode(f.get("data_b64"), validate=True)
+        except (TypeError, ValueError):
+            raise _bad("files", "data_b64 is not base64") from None
+        if not raw or len(raw) > MAX_FILE_BYTES:
+            raise _bad("files", "file is empty or over 25 MB")
+        seen.add(name)
+        decoded.append((name, raw))
+    sid = "s" + secrets.token_hex(6)
+    inbox = d / "console" / "submissions" / sid / "inbox"
+    inbox.mkdir(parents=True)
+    for name, raw in decoded:
+        (inbox / name).write_bytes(raw)
+    out = [{"name": n, "kind": "mp3" if n.endswith(".mp3") else "transcript"} for n, _ in decoded]
+    meta = {"submission_id": sid, "created_ist": now_ist(), "created_utc": datetime.now(UTC).isoformat()}
+    (inbox.parent / "meta.json").write_text(json.dumps({**meta, "files": out, "call_ids": ids}), encoding="utf-8")
+    return {"submission_id": sid, "files": out, "call_ids": ids}
+
+
+def _submission_meta(d: Path, sid: str) -> dict | None:
+    if not isinstance(sid, str) or not SID_RE.match(sid):
+        return None
+    try:
+        return json.loads((d / "console" / "submissions" / sid / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def submissions(d: Path) -> dict:
+    """GET /api/submit: every submission, newest first."""
+    rows = []
+    for p in (d / "console" / "submissions").glob("*/meta.json"):
+        meta = _submission_meta(d, p.parent.name)
+        if meta:
+            n = len(meta.get("files", [])) + len(meta.get("call_ids", []))
+            rows.append({"submission_id": meta["submission_id"], "created_ist": meta.get("created_ist"), "calls": n,
+                         "_t": meta.get("created_utc", "")})  # fmt: skip
+    rows.sort(key=lambda r: r["_t"], reverse=True)
+    return {"submissions": [{k: v for k, v in r.items() if k != "_t"} for r in rows]}
+
+
+def submission(d: Path, sid: str, runner: JobRunner) -> dict | None:
+    """GET /api/submit/<sid>: per-call results from audits.jsonl and errors.jsonl, or None for an unknown id."""
+    meta = _submission_meta(d, sid)
+    if meta is None:
+        return None
+    base = d / "console" / "submissions" / sid
+    uploaded = {Path(f["name"]).stem for f in meta.get("files", [])}
+    calls = []
+    for a in read_jsonl(base / "audits.jsonl"):
+        if isinstance(a, dict) and isinstance(a.get("call_id"), str):
+            findings = [
+                {k: f.get(k) for k in ("parameter", "status", "reason", "onset_turn")}
+                for f in a.get("findings") or []
+                if isinstance(f, dict)
+            ]
+            calls.append({"call_id": a["call_id"], "source": "upload" if a["call_id"] in uploaded else "existing",
+                          "verdict": a.get("verdict"), "scope": a.get("scope"), "findings": findings,
+                          "flags": a.get("flags") or [], "error": None})  # fmt: skip
+    for e in read_jsonl(base / "errors.jsonl"):
+        if isinstance(e, dict) and isinstance(e.get("call_id"), str):
+            calls.append({"call_id": e["call_id"], "source": "upload" if e["call_id"] in uploaded else "existing",
+                          "verdict": None, "scope": None, "findings": [], "flags": [],
+                          "error": str(e.get("error", "error"))[:300]})  # fmt: skip
+    busy = runner.get(runner.busy_job_id() or "")
+    running = bool(busy and busy.get("stage") == "submit" and busy.get("args", {}).get("submission_id") == sid)
+    return {"submission_id": sid, "status": "running" if running else "done" if calls else "pending", "calls": calls}
