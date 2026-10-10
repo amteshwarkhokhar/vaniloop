@@ -282,10 +282,11 @@
     const area = (f, label, v) => `<div class="fld"><label class="label" for="q-${esc(q.id)}-${f}">${label}</label><textarea class="inp" id="q-${esc(q.id)}-${f}" rows="${f === "instructions" ? 5 : 3}" ${on(f)}${dis()}>${esc(v)}</textarea></div>`;
     const ex = (x) => (x.examples || []).join("\n");
     const changed = q.overridden || qdirty(q);
-    return `<div class="card op-card rv"><h3>${esc(q.label || q.id)}</h3><p class="label"><span class="mono">${esc(q.id)}</span> <span class="chg"${changed ? "" : " hidden"}>changed</span></p><div class="flds">` +
+    return row(q.label || q.id, e.instructions, "Jev", "5 texts", changed, qdirty(q) || !!errFor(q.id),
+      `<p class="label"><span class="mono">${esc(q.id)}</span></p><div class="flds">` +
       area("instructions", "Instructions", e.instructions) + area("true.description", "True means", e.true.description) + area("true.examples", "True examples, one per line", ex(e.true)) +
       area("false.description", "False means", e.false.description) + area("false.examples", "False examples, one per line", ex(e.false)) + `</div>${errFor(q.id)}` +
-      `<button type="button" class="btn sm" data-op="reset-q" data-q="${esc(q.id)}"${q.overridden || qdirty(q) ? dis() : " disabled"}>Reset</button></div>`;
+      `<button type="button" class="btn sm" data-op="reset-q" data-q="${esc(q.id)}"${q.overridden || qdirty(q) ? dis() : " disabled"}>Reset</button>`);
   };
   P.rubric = () => {
     if (!C.con) return V.head("Rubric", "") + unavailable();
@@ -295,15 +296,23 @@
     const check = (c) => {
       const ps = (c.params || []).map((id) => byId[id]).filter(Boolean);
       ps.forEach((p) => used.add(p.id));
-      return `<div class="card op-card rv"><h3>${esc(c.name || c.id)}</h3><p class="label"><span class="mono">${esc(c.id)}</span> · ${esc(c.judged_by)}${c.prompt_ref ? ` · ${esc(c.prompt_ref)}` : ""}</p>` +
-        `<p class="lede">${esc(c.what)}</p><p class="why"><b>Fatal when</b> ${esc(c.fatal_when)}</p><p class="why"><b>Non-fatal when</b> ${esc(c.nonfatal_when)}</p><div class="flds">${ps.map((p) => paramField(p, c.id)).join("")}</div></div>`;
+      // One row per check. The row shows the name, what it checks and who judges it; the numbers sit in a closed disclosure.
+      const nums = ps.length ? `${ps.length} number${ps.length === 1 ? "" : "s"}` : "no numbers", changed = ps.some((p) => pdirty(p) || Number(pval(p)) !== Number(p.default));
+      return row(c.name || c.id, c.what, `${esc(c.judged_by)}`, nums, changed, ps.some((p) => pdirty(p) || errFor(p.id)),
+        `<p class="label"><span class="mono">${esc(c.id)}</span>${c.prompt_ref ? ` · ${esc(c.prompt_ref)}` : ""}</p><p class="why"><b>Fatal when</b> ${esc(c.fatal_when)}</p><p class="why"><b>Non-fatal when</b> ${esc(c.nonfatal_when)}</p>` +
+        (ps.length ? `<div class="flds rr-flds">${ps.map((p) => paramField(p, c.id)).join("")}</div>` : ""));
     };
-    const cards = d.checks.map(check).join(""), rest = d.params.filter((p) => !used.has(p.id));
-    return V.head("Rubric", "The checks each call is graded on, and the numbers each check uses. A change counts only after Jev labels again and the calls are regraded.") + banner() + savedBanner() +
+    const rows = d.checks.map(check).join(""), rest = d.params.filter((p) => !used.has(p.id));
+    const other = rest.length ? row("Other numbers", "Limits that no single check owns.", "code", `${rest.length} number${rest.length === 1 ? "" : "s"}`, rest.some((p) => pdirty(p) || Number(pval(p)) !== Number(p.default)), rest.some((p) => pdirty(p) || errFor(p.id)),
+      `<div class="flds rr-flds">${rest.map((p) => paramField(p, "other")).join("")}</div>`) : "";
+    return V.head("Rubric", "The checks each call is graded on, and the numbers each check uses. Open a row to change a number or a question. A change counts only after Jev labels again and the calls are regraded.") + banner() + savedBanner() +
       `<div class="savebar"><button type="button" class="btn pri" id="rb-save" data-op="save-rubric"${anyDirty() ? dis() : " disabled"}>Save rubric</button> <span class="src">Save turns on after you change a number or a question.</span></div>` +
-      V.sec("Checks") + `<div class="cards">${cards}${rest.length ? `<div class="card op-card rv"><h3>Other numbers</h3><div class="flds">${rest.map((p) => paramField(p, "other")).join("")}</div></div>` : ""}</div>` +
-      V.sec("Jev questions") + `<div class="cards">${(d.questions || []).map(qCard).join("")}</div>`;
+      V.sec("Checks") + `<div class="rlist rv">${rows}${other}</div>` +
+      V.sec("Jev questions") + `<div class="rlist rv">${(d.questions || []).map(qCard).join("") || '<p class="empty">No Jev questions in this rubric.</p>'}</div>`;
   };
+  // A rubric row: a closed disclosure. The summary is one line (name, what, judged by, count). Open when an edit or an error is inside.
+  const row = (name, what, by, count, changed, open, body) =>
+    `<details class="rrow"${open ? " open" : ""}><summary><span class="rr-main"><b>${esc(name)}</b><span class="rr-what">${esc(what)}</span></span><span class="rr-side"><span class="rr-by">${by}</span><span class="rr-n">${esc(count)}</span>${changed ? '<span class="chg">changed</span>' : ""}</span></summary><div class="rr-body">${body}</div></details>`;
   const putRubric = async (body) => {
     const r = await call("PUT", "/api/rubric", body);
     if (r.ok && Array.isArray(r.data.params)) { RB.data = r.data; RB.edits = {}; RB.qedits = {}; RB.errs = {}; RB.msg = null; RB.saved = true; }
