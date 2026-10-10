@@ -80,8 +80,14 @@ def test_config_has_every_key_equal_to_the_live_constant(server):
         "max_attempts", "alpha", "alpha_per_attempt", "screen_seeds", "screen_min_fails", "min_calls", "last_run"
     }  # fmt: skip
     got = {p: leaf["value"] for p, leaf in leaves(cfg)}
-    assert got["judge.thresholds.true_at"] == jev.TRUE_AT
-    assert got["judge.thresholds.false_at"] == jev.FALSE_AT
+    for label, (t_at, f_at) in {
+        "question_fits": (jev.Q_TRUE_AT, jev.Q_FALSE_AT),
+        "option_fits": (jev.OPT_TRUE_AT, jev.OPT_FALSE_AT),
+        "product_match": (jev.PM_TRUE_AT, jev.PM_FALSE_AT),
+    }.items():
+        assert got[f"judge.thresholds.{label}.true_at"] == t_at
+        assert got[f"judge.thresholds.{label}.false_at"] == f_at
+    assert got["judge.thresholds.name_check_drop_at"] == jev.N_DROP_AT
     assert got["judge.jev_version"] == jev.JEV_VERSION
     assert got["judge.jev_model"] == llm.jev_model()
     assert got["judge.structure_model"] == llm.model_name()

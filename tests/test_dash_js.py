@@ -54,3 +54,14 @@ def test_phone_drawer_traps_focus_and_closes_on_escape():
     assert d["wrapFwd"] == "menu"
     assert d["wrapBack"] == "a2"
     assert d["closed"] == {"open": False, "inert": False, "focus": "menu", "expanded": "false"}
+
+
+def test_judge_panel_draws_one_band_per_label():
+    """Protects the Judge panel after the per-label thresholds (#122): each label in the config gets its own band
+    with its own marks. If this fails, the panel shows a wrong band or 'could not load'."""
+    d = run("judge")
+    assert "could not load" not in d["judge"]
+    assert d["judge"].count('class="band"') == 2
+    assert "Question fits the product: false below 0.2" in d["judge"]
+    assert "Same product: false below 0.35" in d["judge"]
+    assert 'at or below <span class="mono">0.35</span>' in d["judge"]

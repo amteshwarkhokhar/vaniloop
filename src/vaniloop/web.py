@@ -333,8 +333,19 @@ def config(d: Path) -> dict:
             "jev_version": _leaf(jev.JEV_VERSION, "jev.JEV_VERSION"),
             "structure_model": _leaf(_safe_model(llm.model_name()), "llm.model_name"),
             "thresholds": {
-                "true_at": _leaf(jev.TRUE_AT, "jev.TRUE_AT"),
-                "false_at": _leaf(jev.FALSE_AT, "jev.FALSE_AT"),
+                "question_fits": {
+                    "true_at": _leaf(jev.Q_TRUE_AT, "jev.Q_TRUE_AT"),
+                    "false_at": _leaf(jev.Q_FALSE_AT, "jev.Q_FALSE_AT"),
+                },
+                "option_fits": {
+                    "true_at": _leaf(jev.OPT_TRUE_AT, "jev.OPT_TRUE_AT"),
+                    "false_at": _leaf(jev.OPT_FALSE_AT, "jev.OPT_FALSE_AT"),
+                },
+                "product_match": {
+                    "true_at": _leaf(jev.PM_TRUE_AT, "jev.PM_TRUE_AT"),
+                    "false_at": _leaf(jev.PM_FALSE_AT, "jev.PM_FALSE_AT"),
+                },
+                "name_check_drop_at": _leaf(jev.N_DROP_AT, "jev.N_DROP_AT"),
             },
         },
         "audit": {
