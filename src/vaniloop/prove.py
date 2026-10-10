@@ -379,6 +379,8 @@ def run_prove(
     """Check, pick calls, then (unless dry_run) replay, decide and record. Every stop comes before the first replay.
 
     A run writes one gates row and one replays row per replay. A dry run makes no LLM call and writes no file.
+    Every attempt of a cause must reuse the first attempt's --screen/--holdout flags: a different setting would gate
+    a baseline the screen's cached replays picked (or lose the screen), so it stops before any LLM call.
     With workers > 1 the first-round replays are computed in a thread pool before the gate starts (see warm_cache);
     the gate and the rows stay the same, only the wall time shrinks. With VANILOOP_CACHE=refresh the gate cannot read
     the cache, so the warm-up is skipped. Attempts above MAX_ATTEMPTS stop here, and each attempt's gate runs at
@@ -389,6 +391,8 @@ def run_prove(
     0..2 for each candidate in the seeded order and keeps a call when OLD fails the parameter on at least 2 of the 3
     (see select_targets), until n are kept. The gate then runs on fresh seeds 3..3+k-1, guards included. The screen
     replays go to replays_path with stage "screen", and their cost is part of the run cost. A dry run never screens.
+    A screen that keeps fewer than gate.MIN_CALLS calls stops with SystemExit after appending one row to
+    screens.jsonl beside gates.jsonl, so the paid screen spend stays on record.
     """
     if not cause_id.startswith("cause_"):
         raise SystemExit(f"cause id '{cause_id}' does not look like cause_<parameter>")
@@ -402,10 +406,19 @@ def run_prove(
     if not dry_run:  # a demoted, tool or data cause keeps its old patch but takes no gate run
         require_patchable(cause_id, causes_path or Path(patches_path).with_name("causes.json"))  # sits by patches.json
     old, new = build_prompts(cause_id, prompt_path, patches_path, attempt)
-    if not dry_run and any(
-        r.get("cause_id") == cause_id and r.get("attempt", 1) == attempt for r in read_jsonl(gates_path)
-    ):  # one look per (cause, attempt): a rerun is an extra look at the same calls and breaks the alpha split
-        raise SystemExit(f"attempt {attempt} of {cause_id} was already gated; a new look needs a new attempt")
+    if not dry_run:  # both history checks read only rows, so they cost nothing and stop before any LLM call
+        rows = [r for r in read_jsonl(gates_path) if r.get("cause_id") == cause_id]
+        if any(r.get("attempt", 1) == attempt for r in rows):
+            # one look per (cause, attempt): a rerun is an extra look at the same calls and breaks the alpha split
+            raise SystemExit(f"attempt {attempt} of {cause_id} was already gated; a new look needs a new attempt")
+        for r in rows:  # the screen picks targets from cached OLD replays: a different --screen/--holdout setting on
+            # a later attempt would gate a baseline that those same replays picked (or silently lose the screen)
+            if ("screened" in r) == screen and (r.get("holdout") is True) == holdout:
+                continue
+            raise SystemExit(
+                f"attempt {attempt} of {cause_id} must use the same --screen/--holdout setting as earlier "
+                f"attempts (earlier: screen={'screened' in r}, holdout={r.get('holdout') is True})"
+            )
     calls = {
         r["call_id"]: CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)
     }
@@ -501,6 +514,21 @@ def run_prove(
             f"({', '.join(sorted(dropped_screen.get('not reproduced', []))) or '-'}), screen cost ${screen_cost:.4f}"
         )
         if len(kept_items) < gate.MIN_CALLS:
+            # a durable record of the stop: the screen spend is paid, but no gates row will ever be written
+            append_jsonl(
+                Path(gates_path).with_name("screens.jsonl"),
+                [
+                    {
+                        "cause_id": cause_id,
+                        "attempt": attempt,
+                        "screened": len(screened_items),
+                        "kept": len(kept_items),
+                        "not_reproduced": sorted(dropped_screen.get("not reproduced", [])),
+                        "screen_cost_usd": screen_cost,
+                        "stopped": True,
+                    }
+                ],
+            )
             raise SystemExit(
                 f"only {len(kept_items)} target call(s) reproduce the fault on OLD (at least {SCREEN_MIN_FAILS} of "
                 f"{SCREEN_SEEDS} screen seeds fail '{parameter}'); the gate needs {gate.MIN_CALLS}"
@@ -531,16 +559,18 @@ def run_prove(
         alpha=gate.DEFAULT_ALPHA / MAX_ATTEMPTS,
         seed_base=plan.seed_base,
     )
+    cost = _run_cost(costs_before, replace(plan, targets=screened_items or plan.targets))  # a dropped candidate's
+    # screen cost counts too; computed before the gates row is written so the row can carry it
     if holdout or screen:  # new fields only behind the flags: a run without them writes the same row as before
         result.holdout = holdout
+        result.cost_usd = cost  # the run's total spend, on the row so a screens audit needs no COSTS_PATH join
     if screen:
         result.screened, result.kept = len(screened_items), len(plan.targets)
         result.not_reproduced, result.seed_base = sorted(dropped_screen.get("not reproduced", [])), plan.seed_base
     gates_path = Path(gates_path)
     gates_path.parent.mkdir(parents=True, exist_ok=True)
     append_jsonl(gates_path, [result.model_dump(mode="json", exclude_none=True)])
-    cost_plan = replace(plan, targets=screened_items or plan.targets)  # a dropped candidate's screen cost counts too
-    out = Outcome(plan, result, written, _run_cost(costs_before, cost_plan))
+    out = Outcome(plan, result, written, cost)
     if screen:
         out.screened, out.kept = result.screened, result.kept
         out.not_reproduced, out.screen_cost_usd = result.not_reproduced or [], screen_cost

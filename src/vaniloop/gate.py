@@ -89,6 +89,7 @@ class GateResult(BaseModel):
     kept: int | None = None  # candidates the screen kept as targets
     not_reproduced: list[str] | None = None  # screened candidates dropped because OLD failed on fewer than 2 of 3 seeds
     seed_base: int | None = None  # the gate replayed seeds seed_base..seed_base+K-1
+    cost_usd: float | None = None  # the run's total replay spend; set only with --holdout / --screen (#106)
 
 
 def min_achievable_p(n: int, k: int) -> float:
