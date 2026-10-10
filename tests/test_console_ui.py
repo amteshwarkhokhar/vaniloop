@@ -178,3 +178,14 @@ def test_tracker_actions_post_the_contract_bodies_and_show_errors():
         ["/api/tracker/c3/ship", {"confirm": True}],
         ["/api/tracker/c3/ship", {"confirm": True}],
     ]
+
+
+def test_operate_comes_first_and_tracker_times_read_as_ist():
+    """The Operate group heads the sidebar, and tracker times show as "09:00 10 Oct", not raw ISO.
+
+    Below the fold at a 900 px window, Run and Submit were hard to find. Raw ISO stamps were hard to read."""
+    d = run("con-tracker")
+    nav = d["nav"]
+    assert nav.index("Operate") < nav.index("Configure") < nav.index("Pipeline")
+    assert "since 09:00 10 Oct" in d["board"] and "2026-10-10T" not in d["board"]
+    assert "10:00 10 Oct" in d["board"], "a time that is not ISO passes through unchanged"

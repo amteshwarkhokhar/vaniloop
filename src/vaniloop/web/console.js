@@ -385,6 +385,11 @@
     const r = await call("GET", "/api/tracker");
     if (r.ok && Array.isArray(r.data.causes)) { TR.data = r.data; TR.err = null; } else TR.err = errText(r);
   }
+  // An ISO time stamped in IST (+05:30) reads as "14:42 10 Oct"; anything else passes through unchanged.
+  const when = (v) => {
+    const m = /^\d{4}-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?\+05:30$/.exec(str(v));
+    return m ? `${m[3]}:${m[4]} ${+m[2]} ${MON[+m[1] - 1]}` : str(v);
+  };
   const scalars = (d) => Object.entries(d && typeof d === "object" ? d : {}).filter(([, v]) => v == null || typeof v !== "object").map(([k, v]) => `<span>${esc(k.replace(/_/g, " "))} <b>${esc(v)}</b></span>`).join("");
   const gated = (c) => [...(c.events || [])].reverse().find((e) => e && e.kind === "gated");
   const tact = (c) => {
@@ -399,8 +404,8 @@
   const tcard = (c) => {
     const ev = Array.isArray(c.events) ? c.events : [], k = c.counts || {};
     return `<article class="card tcard rv"><h3>${esc(c.name)}</h3><p class="meta">${schip(c.state)}<span class="pill">${esc(c.type)}</span><span class="pill">owner ${esc(c.owner || "unassigned")}</span></p>` +
-      `<p class="pc"><b>${esc(k.fatal)}</b> fatal · <b>${esc(k.nonfatal)}</b> non-fatal · <b>${esc(k.symptoms)}</b> symptoms</p><p class="src">${esc(c.cause_id)} · ${esc(c.route)} · since ${esc(c.state_since_ist)}</p>${tact(c)}` +
-      `<details><summary>Timeline (${esc(ev.length)})</summary><ol class="tl">${ev.map((e) => `<li><span class="mono">${esc(e.ts_ist)}</span> <b>${esc(str(e.kind).replace(/_/g, " "))}</b>${e.run_id ? ` <span class="src">${esc(e.run_id)}</span>` : ""}<br><span class="gate-f">${scalars(e.detail)}</span></li>`).join("") || '<li class="src">No events.</li>'}</ol></details></article>`;
+      `<p class="pc"><b>${esc(k.fatal)}</b> fatal · <b>${esc(k.nonfatal)}</b> non-fatal · <b>${esc(k.symptoms)}</b> symptoms</p><p class="src">${esc(c.cause_id)} · ${esc(c.route)} · since ${esc(when(c.state_since_ist))}</p>${tact(c)}` +
+      `<details><summary>Timeline (${esc(ev.length)})</summary><ol class="tl">${ev.map((e) => `<li><span class="mono">${esc(when(e.ts_ist))}</span> <b>${esc(str(e.kind).replace(/_/g, " "))}</b>${e.run_id ? ` <span class="src">${esc(e.run_id)}</span>` : ""}<br><span class="gate-f">${scalars(e.detail)}</span></li>`).join("") || '<li class="src">No events.</li>'}</ol></details></article>`;
   };
   P.tracker = () => {
     const d = TR.data;
