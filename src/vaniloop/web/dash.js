@@ -234,13 +234,35 @@
     const screen = (id) => d.screens.find((s) => s.cause_id === id);
     const shipped = d.gates.filter((g) => g.decision === "ship").length;
     const rate = (l, v, t) => `<div class="rate"><span>${l}</span><span class="tr"><i class="t-${t}" style="width:${Math.max(1, (v || 0) * 100)}%"></i></span><b>${pct(v)}</b></div>`;
+    // per_call comes from a file: keep only rows with a non-empty string id, clamp k to 1..40 and fails to 0..k.
+    const pairs = (g) => (Array.isArray(g.per_call) ? g.per_call : []).filter((c) => c && typeof c === "object" && typeof c.call_id === "string" && c.call_id).map((c) => {
+      const k = Math.min(40, Math.max(1, Math.round(num(c.k) || 1))), f = (v) => Math.min(k, Math.max(0, Math.round(num(v) || 0)));
+      return { id: c.call_id, k, o: f(c.old_fails), n: f(c.new_fails) };
+    });
+    const strip = (f, k, l) => `<span class="trial" role="img" data-l="${l}" aria-label="${l} prompt: ${f} of ${k} replays failed">${Array.from({ length: k }, (_, i) => `<i class="${i < f ? "bad" : "good"}"></i>`).join("")}</span>`;
+    const calls = (n) => `${n} ${n === 1 ? "call" : "calls"}`;
+    const verdict = (g, ps) => {
+      const better = ps.filter((p) => p.n < p.o).length, worse = ps.filter((p) => p.n > p.o).length;
+      return `<p class="verdict">Old prompt failed ${pct(g.old_fail_rate)} of replays, new prompt ${pct(g.new_fail_rate)}.${ps.length ? ` ${calls(better)} got better, ${worse} got worse.` : ""}</p>`;
+    };
+    const table = (ps) => !ps.length ? "" :
+      `<div class="pairs-h label"><span>Call</span><span>Old prompt</span><span>New prompt</span><span></span></div><ul class="pairs">${ps.map((p) => {
+        const [t, w] = p.n < p.o ? ["pass", "better"] : p.n > p.o ? ["fatal", "worse"] : ["review", "same"];
+        return `<li><a class="cid" href="/#/call/${esc(encodeURIComponent(p.id))}">${esc(p.id)}</a>${strip(p.o, p.k, "Old")}${strip(p.n, p.k, "New")}${badge(t, w)}</li>`;
+      }).join("")}</ul>`;
+    const stats = (g, s) => {
+      const cost = num(g.cost_usd) != null ? g.cost_usd : s ? s.cost_usd : null, list = (v) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
+      return `<details class="gate-d"><summary>How this was decided</summary><div class="gate-f"><span>lift <b>${esc(num(g.lift) == null ? "–" : (g.lift > 0 ? "+" : "") + Math.round(g.lift * 100) + " pts")}</b></span><span>p <b>${esc(g.p_value == null ? "–" : g.p_value)}</b> / α <b>${esc(g.alpha)}</b></span><span>${esc(g.n_calls)} calls × ${esc(g.k_seeds)} seeds</span>` +
+        (s ? `<span>screened <b>${esc(s.screened)}</b> → kept <b>${esc(s.kept)}</b></span>` : "") + (num(cost) != null ? `<span>cost <b>$${esc(fmt(cost, 2))}</b></span>` : "") +
+        (typeof g.holdout === "boolean" ? `<span>hold-out calls <b>${g.holdout ? "yes" : "no"}</b></span>` : "") +
+        `<span>guard breaks <b>${esc(list(g.guard_breaks).join(", ") || "none")}</b></span>` + (list(g.guard_flaky).length ? `<span>flaky guards <b>${esc(list(g.guard_flaky).join(", "))}</b></span>` : "") + `</div></details>`;
+    };
     return (
       head("Test", "Each patch is replayed on the same calls as the old prompt. It passes only if it clearly does better.") +
-      (shipped ? "" : `<p class="note"><b>Nothing has passed.</b> No patch has cleared its test yet.</p>`) +
-      d.gates.map((g) => { const s = screen(g.cause_id); return `<div class="gate rv"><div class="gate-h"><h3>${esc(g.cause_id)}</h3>${dchip(g.decision)}<span class="label">attempt ${esc(g.attempt)}</span></div><p class="label" style="margin:-10px 0 18px">${esc(name(g.cause_id))}</p>` +
-        rate("Old", g.old_fail_rate, "fatal") + rate("New", g.new_fail_rate, "pass") +
-        `<div class="gate-f"><span>lift <b>${esc(num(g.lift) == null ? "–" : (g.lift > 0 ? "+" : "") + Math.round(g.lift * 100) + " pts")}</b></span><span>p <b>${esc(g.p_value == null ? "–" : g.p_value)}</b> / α <b>${esc(g.alpha)}</b></span><span>${esc(g.n_calls)} calls × ${esc(g.k_seeds)} seeds</span>` +
-        (s ? `<span>screened <b>${esc(s.screened)}</b> → kept <b>${esc(s.kept)}</b></span><span>cost <b>$${esc(fmt(s.cost_usd, 2))}</b></span>` : "") + `</div><p class="why">${esc(g.reason)}</p></div>`; }).join("")
+      `<p class="gate-sum">${esc(shipped)} of ${esc(d.gates.length)} tests passed.</p>` +
+      d.gates.map((g) => { const ps = pairs(g); return `<div class="gate rv"><div class="gate-h"><h3>${esc(name(g.cause_id) || g.cause_id)}</h3>${dchip(g.decision)}<span class="label">attempt ${esc(g.attempt)}</span></div>` +
+        verdict(g, ps) + rate("Old", g.old_fail_rate, "fatal") + rate("New", g.new_fail_rate, "pass") + table(ps) +
+        `<p class="why">${esc(g.reason)}</p>${stats(g, screen(g.cause_id))}</div>`; }).join("")
     );
   };
   const KINDS = { spec: "Spec questions", irritation: "Irritation", intent: "Intent", quantity: "Quantity" };

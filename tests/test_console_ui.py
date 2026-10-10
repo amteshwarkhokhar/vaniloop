@@ -336,3 +336,27 @@ def test_issues_cause_lists_its_own_calls_and_a_failed_read_stays_in_its_section
     assert "could not load" not in d["auditCausesFail"] and len(CALL_LINK.findall(d["auditCausesFail"])) == 31
     assert "<details" not in d["issuesCausesFail"] and "Cause two" in d["issuesCausesFail"]
     assert "could not load" not in d["issuesCausesFail"]
+
+
+def test_test_page_shows_paired_replays_per_call_and_hides_statistics():
+    """The Test page shows a verdict sentence, a paired-replay row per call and the statistics in a closed disclosure.
+
+    It protects the one-glance approval view: the better/worse counts, one old and one new strip per call, the escaped
+    call id, and a single "N of M tests passed." line in place of the repeated "Nothing has passed" banner. Malformed
+    per_call rows (empty id, null, a number id) must be dropped. If it failed, a reviewer would again have to read
+    p-values to approve a fix, or a hostile call id could inject markup."""
+    p = run("con-gate")["panel"]
+    assert "1 call got better, 1 got worse." in p
+    assert p.count('class="trial"') == 4
+    assert p.count('class="trial" role="img" data-l="Old"') == 2, "a strip is an image with a text label on phones"
+    for label in ("3 of 3 replays failed", "1 of 3 replays failed", "0 of 3 replays failed", "2 of 3 replays failed"):
+        assert f'prompt: {label}"' in p, "the strip label names the prompt and the count"
+    assert p.count('class="pairs"') == 1 and p.count("<li>") == 2
+    assert "better</span>" in p and "worse</span>" in p
+    assert "<img" not in p and "g&#60;img src=x onerror=1&#62;" in p
+    assert 'href="/#/call/g%3Cimg%20src%3Dx%20onerror%3D1%3E"' in p
+    assert '<details class="gate-d">' in p and '<details class="gate-d" open' not in p
+    assert "0 of 2 tests passed." in p and "1 of 2 tests passed." not in p
+    assert "Nothing has passed" not in p
+    assert "Cause one" in p and "C-09" in p
+    assert p.count('class="verdict"') == 2
