@@ -378,3 +378,31 @@ def test_config_hides_a_model_value_that_looks_like_a_url(tmp_path, monkeypatch,
 def test_safe_model_hides_unsafe_ids(name):
     """Protects _safe_model: ids with =, @, ?, spaces, an empty string or over 80 characters must be hidden."""
     assert web._safe_model(name) == "(hidden)"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "/Users/BuyerA/private/model",
+        "./models/local",
+        "~/models/x",
+        "a/b/c/d",
+        "models/../secret",
+        "sk-syntheticCredential123",
+        "ghp_syntheticToken",
+        "AIza-syntheticKey",
+        "vendor/" + "x" * 32,
+    ],
+)
+def test_safe_model_hides_paths_and_credentials(name):
+    """Protects the secret rule: a filesystem path or a credential-shaped value in LLM_MODEL or JEV_MODEL
+    must show as (hidden). If this fails, /api/config leaks a local path or an API key to the browser."""
+    assert web._safe_model(name) == "(hidden)"
+
+
+@pytest.mark.parametrize(
+    "name", ["gemini-2.5-flash", "openrouter/google/gemini-2.5-flash", "jev", "vendor/model-name_1.5:free"]
+)
+def test_safe_model_keeps_real_model_ids(name):
+    """Protects the config view: ordinary model ids, including two-level provider paths, must still show."""
+    assert web._safe_model(name) == name

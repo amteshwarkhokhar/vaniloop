@@ -257,13 +257,18 @@ def gates(d: Path) -> list[dict]:
 
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9._/:-]{1,80}$")
+_SECRET_PREFIX = re.compile(r"^(sk|pk|rk|ghp|gho|github_pat|xox[abp]|AIza|ya29|Bearer|key|token)[-_.]", re.IGNORECASE)
 
 
 def _safe_model(name: str) -> str:
-    """A model id for the config view. Anything that looks like a URL, a token or a credential is hidden."""
-    if _MODEL_ID.match(name) and not any(bad in name for bad in ("://", "?", "=", "@")):
-        return name
-    return "(hidden)"
+    """A model id for the config view. Anything that looks like a URL, a path, a token or a credential is hidden."""
+    if not _MODEL_ID.match(name) or any(bad in name for bad in ("://", "?", "=", "@", "..", "//")):
+        return "(hidden)"
+    if name[0] in "/.~" or name.count("/") > 2 or _SECRET_PREFIX.match(name):
+        return "(hidden)"
+    if any(len(part) >= 32 for part in re.split(r"[/:]", name)):
+        return "(hidden)"
+    return name
 
 
 def _leaf(value, source: str) -> dict:
