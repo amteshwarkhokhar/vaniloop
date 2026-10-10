@@ -1,7 +1,7 @@
 // Runs src/vaniloop/web/dash.js against a tiny DOM stub and prints JSON. Usage: node dash_harness.js <scenario>
 const fs = require("fs"), path = require("path"), vm = require("vm");
 const web = (f) => fs.readFileSync(path.join(__dirname, "..", "src", "vaniloop", "web", f), "utf8");
-const src = web("dash.js"), consoleSrc = web("console.js"), homeSrc = web("home.js");
+const src = web("dash.js"), consoleSrc = web("console.js"), homeSrc = web("home.js"), flowSrc = web("flow.js");
 
 function el(id) {
   const cls = new Set();
@@ -268,6 +268,25 @@ const SC = {
     await click({ go: "home" });
     return { home: ids.panel.innerHTML };
   },
+  async "con-flow"() {
+    routes["GET /api/calls"] = [200, [{ call_id: "c1<b>", verdict: "Fatal" }, { call_id: "c2", verdict: "Pass" }]];
+    const turn = (idx, speaker, text) => ({ idx, speaker, start_sec: idx * 5, end_sec: idx * 5 + 4, text });
+    routes["GET /api/call/c1%3Cb%3E"] = [200, {
+      call: { call_id: "c1<b>", duration_sec: 65, language: "hi", audio_path: "/x/y/c1.mp3", silences: [], turns: [turn(0, "bot", "Namaste, BuyerA ji"), turn(1, "user", "I need steel pipe"), turn(2, "bot", "Which colour <img src=x> do you want?")] },
+      audit: { verdict: "Fatal", scope: "bl_collection", flags: ["wrong_requirement"], findings: [
+        { parameter: "category_isq", status: "Fatal", reason: "asked colour for a pipe", basis: "spoken_proxy", onset_turn: 2, evidence: [{ turn_idx: 2, quote: "Which colour" }, { turn_idx: 2, quote: "39;" }, { turn_idx: 2, quote: "colour" }] },
+        { parameter: "intent", status: "Pass", reason: "ok", basis: "observed", onset_turn: null, evidence: [] }] },
+      ledger: { initial_product: "steel pipe", final_product: "steel pipe", bot_turns: [{ idx: 2, slot: "spec", spec_name: "colour", question_fits_product: false }], user_turns: [] }, ledger_source: "jev",
+      causes: [{ cause_id: "C-02", name: "Wrong spec question", type: "prompt", status: "open", role: "fatal" }],
+      patches: [{ cause_id: "C-02", attempt: 1, old_text: "ask colour", new_text: "ask grade", rationale: "pipes have grades" }],
+      gates: [{ cause_id: "C-02", attempt: 1, decision: "inconclusive", k: 3, old_fails: 3, new_fails: 1 }] }];
+    await click({ go: "flow" }); await tick();
+    const out = { all: ids.panel.innerHTML };
+    (doc.listeners.click || []).forEach((f) => f({ target: { closest: (q) => (q === "[data-pick]" ? { dataset: { pick: "c1<b>" } } : null) } }));
+    await tick(); await tick();
+    out.call = ids.panel.innerHTML;
+    return out;
+  },
   async "con-home-ro"() {
     routes["GET /api/calls"] = [200, [{ call_id: "c1", verdict: "Fatal" }]];
     routes["GET /api/loop/plan"] = [200, { steps: [], causes: [], new_calls: 0, estimate_usd: null }];
@@ -347,7 +366,8 @@ const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages
     routes["GET /api/jobs"] = [200, { jobs: [] }];
     routes["GET /api/tracker"] = [200, TRK]; // the sidebar reads it at boot
     vm.runInContext(consoleSrc, vctx);
-    if (scenario.startsWith("con-home")) vm.runInContext(homeSrc, vctx);
+    if (scenario.startsWith("con-home") || scenario.startsWith("con-flow")) vm.runInContext(homeSrc, vctx);
+    if (scenario.startsWith("con-flow")) vm.runInContext(flowSrc, vctx);
     await tick();
     return console.log(JSON.stringify(await SC[scenario]()));
   }
