@@ -154,11 +154,11 @@
     );
   };
   P.issues = (d) => {
-    const max = Math.max(1, ...d.causes.map((c) => c.fatal + c.nonfatal));
+    const fa = (c) => num(c.fatal) || 0, nf = (c) => num(c.nonfatal) || 0, max = Math.max(1, ...d.causes.map((c) => fa(c) + nf(c)));
     return (
       head("Stage 3 · Issues", "Causes, <em>ranked</em>", "Faults grouped by why they happen.") +
-      `<ol class="ranked rv">${d.causes.map((c) => `<li><div><h3>${esc(c.name)}</h3><p class="meta"><span>${esc(c.cause_id)}</span><span>${esc(own(NAMES, c.parameter) || c.parameter)}</span><span>${esc(str(c.type).replace(/_/g, " "))}</span><span>${esc(c.status.replace(/_/g, " "))}</span><span>owner ${esc(c.owner || "unassigned")}</span></p></div>` +
-        `<div><div class="pair"><span class="a" style="width:${(100 * c.fatal) / max}%"></span><span class="b" style="width:${(100 * c.nonfatal) / max}%"></span></div><p class="pc"><b>${esc(c.fatal)}</b> fatal · <b>${esc(c.nonfatal)}</b> non-fatal</p></div></li>`).join("")}</ol>`
+      `<ol class="ranked rv">${d.causes.map((c) => `<li><div><h3>${esc(c.name)}</h3><p class="meta"><span>${esc(c.cause_id)}</span><span>${esc(own(NAMES, c.parameter) || c.parameter)}</span><span>${esc(str(c.type).replace(/_/g, " "))}</span><span>${esc(str(c.status).replace(/_/g, " "))}</span><span>owner ${esc(c.owner || "unassigned")}</span></p></div>` +
+        `<div><div class="pair"><span class="a" style="width:${(100 * fa(c)) / max}%"></span><span class="b" style="width:${(100 * nf(c)) / max}%"></span></div><p class="pc"><b>${esc(c.fatal)}</b> fatal · <b>${esc(c.nonfatal)}</b> non-fatal</p></div></li>`).join("")}</ol>`
     );
   };
   const diff = (p, extra = "") =>
@@ -166,7 +166,7 @@
   P.fix = (d) =>
     head("Stage 4 · Fix", "Prompt <em>patches</em>", "Old text against new text, with the reason.") +
     (d.patches.length ? d.patches.map((p) => diff(p)).join("") : `<p class="note rv"><b>No patches yet.</b> Prompt-side causes get a patch once the fix stage runs.</p>`) +
-    (d.tickets.length ? sec("Evidence tickets") + d.tickets.map((t) => `<div class="card rv"><h3>${esc(t.cause_id)}</h3><p class="lede">${esc(t.summary || t.name || "")}</p></div>`).join("") : "") +
+    (d.tickets.length ? sec("Evidence tickets") + d.tickets.map((t) => (t && typeof t === "object" ? t : { cause_id: t })).map((t) => `<div class="card rv"><h3>${esc(t.cause_id)}</h3><p class="lede">${esc(t.summary || t.name || "")}</p></div>`).join("") : "") +
     (d.history.length ? sec("Earlier attempts") + d.history.map((p) => diff(p)).join("") : "");
   P.gate = (d) => {
     const name = (id) => { const c = S.stage.issues && S.stage.issues.v && S.stage.issues.v.causes.find((x) => x.cause_id === id); return c ? c.name : ""; };
@@ -185,7 +185,8 @@
   const KINDS = { spec: "Spec questions", irritation: "Irritation", intent: "Intent", quantity: "Quantity" };
   P.review = (d) => {
     const f = S.filt, kinds = Object.keys(d.totals);
-    const right = (it, k) => it.labels.length > 0 && it.labels.every((l) => l[k]);
+    const labs = (it) => (Array.isArray(it.labels) ? it.labels : []).map((l) => (l && typeof l === "object" ? l : {}));
+    const right = (it, k) => labs(it).length > 0 && labs(it).every((l) => l[k]);
     const cls = (it) => (right(it, "jev_ok") && right(it, "gemini_ok") ? "both" : right(it, "jev_ok") ? "jev" : right(it, "gemini_ok") ? "gem" : "none");
     const vis = d.items.filter((it) => (f.kind === "all" || it.kind === f.kind) && (f.verdict === "all" || cls(it) === f.verdict) && (!f.fatal || it.decides_fatal));
     const accCard = (k) => {
@@ -200,8 +201,8 @@
       `<div class="filters rv">${opts("kind", [["all", "All kinds"]].concat(kinds.map((k) => [k, own(KINDS, k) || k])))}${opts("verdict", [["all", "Any"], ["jev", "Jev right"], ["gem", "Gemini right"], ["both", "Both right"], ["none", "Both wrong"]])}` +
       `<div class="seg"><button type="button" data-fatal="1" aria-pressed="${f.fatal}">Decides Fatal</button></div></div>` +
       `<p class="label rv" style="margin-bottom:6px">${esc(vis.length)} of ${esc(d.items.length)}</p>` +
-      `<ul class="items rv">${vis.map((it) => `<li><div class="who"><a href="/#/call/${esc(encodeURIComponent(it.call_id))}">${esc(it.call_id)}</a>${it.idx != null ? ` · turn ${esc(it.idx)}` : ""}<br>${esc(it.reviewer)}${it.control ? ' · control' : ""}${it.decides_fatal ? '<span class="tag">Fatal</span>' : ""}</div><div>` +
-        `<div class="lb">${it.labels.map((l) => `<span>${esc(str(l.label).replace(/_/g, " "))}: Jev <span class="${l.jev_ok ? "ok" : "no"}">${esc(l.jev)}</span> · Gemini <span class="${l.gemini_ok ? "ok" : "no"}">${esc(l.gemini)}</span> · truth <b>${esc(l.truth)}</b></span>`).join("")}</div><p>${esc(it.reason)}</p></div></li>`).join("") || '<li class="empty">No items match.</li>'}</ul>`
+      `<ul class="items rv">${vis.map((it) => `<li><div class="who"><a href="/#/call/${esc(encodeURIComponent(str(it.call_id)))}">${esc(it.call_id)}</a>${it.idx != null ? ` · turn ${esc(it.idx)}` : ""}<br>${esc(it.reviewer)}${it.control ? ' · control' : ""}${it.decides_fatal ? '<span class="tag">Fatal</span>' : ""}</div><div>` +
+        `<div class="lb">${labs(it).map((l) => `<span>${esc(str(l.label).replace(/_/g, " "))}: Jev <span class="${l.jev_ok ? "ok" : "no"}">${esc(l.jev)}</span> · Gemini <span class="${l.gemini_ok ? "ok" : "no"}">${esc(l.gemini)}</span> · truth <b>${esc(l.truth)}</b></span>`).join("")}</div><p>${esc(it.reason)}</p></div></li>`).join("") || '<li class="empty">No items match.</li>'}</ul>`
     );
   };
 
@@ -252,13 +253,28 @@
     $("panel").focus({ preventScroll: true });
     window.scrollTo(0, 0);
   }
-  function closeMenu() {
-    $("side").classList.remove("open");
-    document.querySelector(".menu").setAttribute("aria-expanded", "false");
+  const menuBtn = () => document.querySelector(".menu");
+  const inertTargets = () => [$("panel"), document.querySelector(".bar .mark")].filter(Boolean);
+  const isOpen = () => $("side").classList.contains("open");
+  const focusables = () =>
+    [menuBtn(), ...$("side").querySelectorAll("a[href], button:not([disabled])")].filter((el) => el && !el.hidden && !(el.closest && el.closest("[hidden]")));
+  function setMenu(open, restore) {
+    $("side").classList.toggle("open", open);
+    menuBtn().setAttribute("aria-expanded", String(open));
+    inertTargets().forEach((el) => (el.inert = open));
+    if (open) { const f = focusables()[1]; if (f) f.focus(); }
+    else if (restore) menuBtn().focus();
   }
-
+  function closeMenu(restore = false) {
+    if (isOpen()) setMenu(false, restore);
+  }
+  // Ask for the audit of one judge. Only the newest ask for the judge now shown may land.
   async function loadAudit() {
-    S.stage.audit = await settle(get(`/api/stage/audit${S.judge ? `?judge=${encodeURIComponent(S.judge)}` : ""}`));
+    const judge = S.judge, n = (S.auditSeq = (S.auditSeq || 0) + 1);
+    const r = await settle(get(`/api/stage/audit${judge ? `?judge=${encodeURIComponent(judge)}` : ""}`));
+    if (n !== S.auditSeq || judge !== S.judge) return false;
+    S.stage.audit = r;
+    return true;
   }
 
   document.addEventListener("click", async (e) => {
@@ -268,13 +284,11 @@
     else if (t.dataset.judge) {
       S.judge = t.dataset.judge;
       judgeToggle();
-      await loadAudit();
-      show();
+      if (await loadAudit()) show();
     } else if (t.dataset.f) { S.filt[t.dataset.f] = t.dataset.v; keepScroll(); }
     else if (t.dataset.fatal) { S.filt.fatal = !S.filt.fatal; keepScroll(); }
     else if (t.classList.contains("menu")) {
-      const open = $("side").classList.toggle("open");
-      t.setAttribute("aria-expanded", String(open));
+      setMenu(!isOpen(), true);
     }
   });
   function keepScroll() {
@@ -282,6 +296,16 @@
     show();
     window.scrollTo(0, y);
   }
+  document.addEventListener("keydown", (e) => {
+    if (!isOpen()) return;
+    if (e.key === "Escape") { e.preventDefault(); closeMenu(true); return; }
+    if (e.key !== "Tab") return;
+    const f = focusables(), i = f.indexOf(document.activeElement);
+    if (!f.length) return;
+    if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && (i === -1 || i === f.length - 1)) { e.preventDefault(); f[0].focus(); }
+  });
+  matchMedia("(min-width: 861px)").addEventListener("change", (e) => { if (e.matches) closeMenu(); });
   window.addEventListener("hashchange", () => {
     const id = location.hash.replace(/^#\/?/, "");
     if (ITEMS.some((i) => i.id === id)) go(id, false);
