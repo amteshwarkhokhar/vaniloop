@@ -114,10 +114,11 @@ def test_qty_missed_nonfatal_when_the_buyer_repeats_after_the_reask():
 def test_qty_missed_fatal_when_any_reask_goes_unanswered():
     """Every re-ask is checked: an answered first re-ask must not hide a later re-ask the buyer never answered.
 
-    Review found only the first re-ask was checked, so an ignored final ask graded NonFatal.
+    Review found only the first re-ask was checked, so an ignored final ask graded NonFatal. The captured value is
+    a different quantity (50 vs 10): a matching one would make the re-ask redundant and NonFatal (issue #95).
     """
     u = [UserTurnLabel(idx=1, gave_value_for="quantity"), UserTurnLabel(idx=3, gave_value_for="quantity")]
-    f = _missed([bt(0, "quantity"), bt(2, "quantity"), bt(4, "quantity")], u, kept="10")
+    f = _missed([bt(0, "quantity"), bt(2, "quantity"), bt(4, "quantity")], u, kept="50")
     assert f.status == "Fatal" and f.onset_turn == 4
 
 
@@ -450,9 +451,10 @@ def test_enrich_other_before_clarification_is_not_a_close():
 
 
 def test_qty_missed_captured_quantity_does_not_bypass_reask():
-    """Regression for review round 2 finding: a captured quantity must not excuse a later re-ask.
+    """Regression for review round 2 finding: a captured quantity that does not match must not excuse a re-ask.
 
-    If it did, a bot that ignored the answer but stored it earlier would escape the fault.
+    If it did, a bot that ignored the answer and stored a wrong value earlier would escape the fault. Issue #95:
+    only a MATCHING captured quantity makes the unanswered re-ask a NonFatal redundant question.
     """
     call = mk_call(12)
     led = mk_led(
@@ -460,7 +462,7 @@ def test_qty_missed_captured_quantity_does_not_bypass_reask():
         [bt(0, "quantity"), bt(4, "quantity")],
         [UserTurnLabel(idx=1, gave_value_for="quantity")],
         buyer_facts={"quantity": "10"},
-        bot_confirmed={"product": "pump", "quantity": "10"},
+        bot_confirmed={"product": "pump", "quantity": "50"},
     )
     f = by(audit_call(call, led))["qty_missed"]
     assert f.status == "Fatal" and f.onset_turn == 4

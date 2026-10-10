@@ -8,6 +8,7 @@ because the captured Buy Lead is not available), or unavailable.
 from __future__ import annotations
 
 import re
+from math import isclose
 
 from .models import AuditRecord, CallRecord, Evidence, Finding, Ledger, Silence, Turn
 
@@ -20,7 +21,8 @@ LOOP_MAX_ASKS = 3  # default ask limit for slots without their own limit
 # VANI prompt L69: product 4, quantity 3, each spec 2, name 3, city 3. The first ask past the limit is the onset.
 SLOT_LIMITS = {"product": 4, "quantity": 3, "spec": 2, "name": 3, "city": 3}
 RESET_SLOTS = ("product", "quantity", "spec")  # a product change (L83) restarts these allowances
-LOOP_END_TURNS = 2  # call ending within this many turns of the first ask past the limit counts as a fatal loop
+# matrix: a loop is Fatal if the buyer gets irritated within this many user turns of the onset
+LOOP_IRRITATION_TURNS = 2
 FRUSTRATED_P = 0.6
 HUMAN_P = 0.6
 SHORT_CALL_SEC = 10.0
@@ -142,7 +144,8 @@ _add_units("mass", "g", 1, "gm", "gram", "grams", "gms")
 _add_units("mass", "kg", 1000, "kgs", "kilo", "kilos", "kilogram", "kilograms")
 _add_units("mass", "quintal", 100000, "quintals")
 _add_units("mass", "ton", 1000000, "tons", "tonne", "tonnes")
-_add_units("count", "piece", 1, "pieces", "pc", "pcs", "nos", "number", "numbers", "unit", "units", "set", "sets")
+# "set" is not a piece alias: a set can hold several pieces, so "10 sets" must not equal "10 pieces"
+_add_units("count", "piece", 1, "pieces", "pc", "pcs", "nos", "number", "numbers", "unit", "units")
 _add_units("count", "pair", 2, "pairs")
 _add_units("count", "dozen", 12, "dozens")
 _add_units("length", "mm", 1, "millimeter", "millimetre")
@@ -242,6 +245,40 @@ def parse_quantity_full(text: str | None) -> tuple[float, float, str | None] | N
     return low, high, unit
 
 
+# Words that often follow a spoken number but are not units ("10 ka", "10 chahiye", "10 only"). They leave the
+# quantity unit-less. Any other word after the number is an attempted unit the parser does not know ("10 sets",
+# "10 yards"), so it must not match the same number of pieces.
+_QTY_FILLERS = frozenset(
+    "ka ki ke hi hai hain chahiye chaiye chahie tak se to toh tho bhi na naa hi ho hoga honge only approx "
+    "approximately lagbhag karib kareeb takriban sir ji madam and or bas please pls yaar matlab".split()
+)
+
+
+def _unit_word(text: str | None) -> tuple[str | None, bool]:
+    """(canonical unit|None, unrecognised). Reads the unit position parse_quantity_full reads: the word right
+    after the number (after the second number for a range). unrecognised is True when a word sits there that is
+    a word the parser does not know and that is not a filler, so "10 sets" or "10 yards" cannot silently equal
+    "10 pieces". A bare "10", or a filler such as "10 ka", stays no-unit."""
+    if not text:
+        return None, False
+    toks = _TOKEN.findall(str(text).lower())
+    r = _number_at(toks, 0)
+    if not r:
+        return None, False
+    _, i = r
+    if i < len(toks) and toks[i] in _RANGE_SEP:  # a range: the unit sits after the high number
+        r2 = _number_at(toks, i + 1, skip_junk=False)
+        if r2:
+            _, i = r2
+    if i < len(toks):
+        tok = toks[i]
+        if tok in _UNITS:
+            return _UNITS[tok][1], False
+        if tok.isalpha() and tok not in _QTY_FILLERS:  # an attempted unit the parser does not know
+            return None, True
+    return None, False  # no word, or a filler such as "ka" or "chahiye": not a unit
+
+
 def _fmt_pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
@@ -321,6 +358,16 @@ def _end_of_call_within(call: CallRecord, idx: int, n: int) -> bool:
     return sum(1 for t in call.turns if t.idx > idx) <= n
 
 
+def _irritated_after(call: CallRecord, led: Ledger, onset: int) -> bool:
+    """Matrix: a loop is Fatal when the buyer gets irritated (leading to disconnection or an opportunity miss).
+    True if one of the next LOOP_IRRITATION_TURNS user turns after the onset has frustrated >= FRUSTRATED_P
+    or a Gemini tone of "irritated". A call that simply ends is not irritation."""
+    nxt = sorted(t.idx for t in call.turns if t.speaker == "user" and t.idx > onset)[:LOOP_IRRITATION_TURNS]
+    frustrated = {u.idx: u.frustrated for u in led.user_turns}
+    tone = {t.idx: t.tone for t in call.turns}
+    return any(frustrated.get(i, 0.0) >= FRUSTRATED_P or tone.get(i) == "irritated" for i in nxt)
+
+
 def _limit(key: str) -> int:
     return (
         SLOT_LIMITS["spec" if key.startswith("spec:") else key]
@@ -331,7 +378,8 @@ def _limit(key: str) -> int:
 
 def rule_looping(call: CallRecord, led: Ledger) -> Finding:
     """Per-slot ask limits (VANI prompt L69). A product change (L83) starts a fresh allowance for product, quantity
-    and each spec: asks before the change and asks after it are counted separately. Name and city are never reset."""
+    and each spec: asks before the change and asks after it are counted separately. Name and city are never reset.
+    Matrix: Fatal only if the buyer gets irritated; a loop that ends normally is NonFatal."""
     change = led.product_changed_at_turn
     asks: dict[tuple[str, int], list[int]] = {}
     unnamed_specs: dict[int, list[int]] = {}  # segment -> idx of spec asks with no spec name
@@ -355,16 +403,9 @@ def rule_looping(call: CallRecord, led: Ledger) -> Finding:
         if len(idxs) <= limit:
             continue
         over = idxs[limit]
-        irritated = any(u.frustrated >= FRUSTRATED_P for u in led.user_turns if u.idx > over)
-        ends = _end_of_call_within(call, over, LOOP_END_TURNS)
-        why = (
-            "buyer irritated after the ask past the limit"
-            if irritated
-            else "call ended right after the ask past the limit"
-            if ends
-            else "no sign of irritation"
-        )
-        results.append((irritated or ends, len(idxs), key, idxs, f"limit {limit}; {why}", limit))
+        irritated = _irritated_after(call, led, over)
+        why = "buyer irritated within 2 turns of the ask past the limit" if irritated else "no sign of irritation"
+        results.append((irritated, len(idxs), key, idxs, f"limit {limit}; {why}", limit))
     if not results:
         spec_limit = SLOT_LIMITS["spec"]
         for seg, idxs in sorted(unnamed_specs.items()):
@@ -544,11 +585,36 @@ def rule_qty_probing(call: CallRecord, led: Ledger) -> Finding:
     )
 
 
+def _qty_captured(led: Ledger) -> bool:
+    """True if bot_confirmed holds a quantity equal to the buyer's (same parsing and unit conversion as
+    qty_accuracy). A range the bot stored as its maximum counts (prompt L1255). Unparseable or unit-clashing: False."""
+    said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
+    pa, pb = parse_quantity_full(said), parse_quantity_full(kept)
+    if pa is None or pb is None:
+        return False
+    (alo, ahi, _), (blo, bhi, _) = pa, pb
+    ua, unrec_a = _unit_word(said)
+    ub, unrec_b = _unit_word(kept)
+    if unrec_a or unrec_b:
+        return False  # an unrecognised unit word on either side is not a match ("10 sets" vs "10 pieces")
+    ua = ua or norm_unit(led.buyer_facts.get("unit"))
+    ub = ub or norm_unit(led.bot_confirmed.get("unit"))
+    if ua and ub:
+        if unit_group(ua) != unit_group(ub):
+            return False
+        k = to_base(1, ub) / to_base(1, ua)
+        blo, bhi = blo * k, bhi * k
+    # unit conversion can introduce float rounding (0.7 kg -> 700.0000000000001 g), so compare with a tolerance
+    return (isclose(alo, blo) and isclose(ahi, bhi)) or (blo == bhi and isclose(bhi, ahi) and alo < ahi)
+
+
 def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
     """VANI prompt L1261: a valid quantity is stored and the bot moves on WITHOUT a read-back, so a missing read-back
-    is not a fault. A re-ask after the buyer gave it is a fault. It is Fatal only if the buyer never gives the
-    quantity again: then the lead likely has none. A re-ask the buyer answers costs a turn but loses nothing,
-    so it is NonFatal (official Fatal definition: wrong or missing buyer info in the lead)."""
+    is not a fault. A re-ask after the buyer gave it is a fault. It is Fatal only if the re-ask goes unanswered AND
+    no matching quantity was captured: then the lead likely has none. NonFatal when the quantity turn had unclear
+    audio (matrix: "if voice not clear then Non Fatal"), when the matching quantity was captured (the re-ask is
+    redundant), or when the buyer answers the re-ask (costs a turn, loses nothing). Official Fatal definition:
+    wrong or missing buyer info in the lead."""
     said, kept = led.buyer_facts.get("quantity"), led.bot_confirmed.get("quantity")
     if led.scope not in BL_SCOPES or not said:
         return Finding(
@@ -565,29 +631,51 @@ def rule_qty_missed(call: CallRecord, led: Ledger) -> Finding:
             reason=f"buyer said quantity '{said}' but no turn is labelled as giving it; cannot tell if it was captured",
         )
     change = led.product_changed_at_turn
+    final_seg = 1 if change is not None else 0  # the posted lead carries the FINAL product
 
     def seg(i: int) -> int:  # a product change starts a new quantity (L83): compare only inside one segment
         return 1 if change is not None and i >= change else 0  # the change turn itself belongs to the new product
 
-    reasked = []
-    for sg in (0, 1):
-        first = [g for g in gave if seg(g) == sg]
-        if first:
-            reasked += sorted(
-                b.idx for b in led.bot_turns if b.slot == "quantity" and seg(b.idx) == sg and b.idx > first[0]
-            )
-    reasked.sort()
+    # Only re-asks in the final product segment count. A re-ask in an earlier segment belongs to a product the
+    # lead does not carry; judging it mixed the old product's ask with the final product's quantity (review round 2).
+    first = [g for g in gave if seg(g) == final_seg]
+    reasked = (
+        sorted(b.idx for b in led.bot_turns if b.slot == "quantity" and seg(b.idx) == final_seg and b.idx > first[0])
+        if first
+        else []
+    )
     if reasked:
         unanswered = [r for r in reasked if not any(g > r and seg(g) == seg(r) for g in gave)]
-        if unanswered:  # any re-ask the buyer never answered may leave the lead without a quantity
-            r = unanswered[0]
+        if unanswered:  # an unanswered re-ask may leave the lead without a quantity, unless a, b below apply
+            unclear = {t.idx for t in call.turns if t.audio_unclear}
+            captured = _qty_captured(led)
+            soft = None  # (onset, reason) of the first unanswered re-ask that is only NonFatal
+            for r in unanswered:
+                # the buyer turn the re-ask follows: the latest one before it in the same segment
+                latest = max(g for g in gave if seg(g) == seg(r) and g < r)
+                if latest in unclear:  # (a) matrix: "if voice not clear then Non Fatal"
+                    soft = soft or (r, f"buyer's quantity '{said}' was in unclear audio and the bot asked again")
+                elif captured:  # (b) the right quantity is already captured: the re-ask is a redundant question
+                    soft = soft or (
+                        r,
+                        f"buyer said quantity '{said}', it was captured as '{kept}' and the bot asked again",
+                    )
+                else:  # (c) unanswered and no matching captured quantity
+                    return Finding(
+                        parameter="qty_missed",
+                        status="Fatal",
+                        basis="spoken_proxy",
+                        onset_turn=r,
+                        reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
+                        evidence=[_ev(call, r)],
+                    )
             return Finding(
                 parameter="qty_missed",
-                status="Fatal",
+                status="NonFatal",
                 basis="spoken_proxy",
-                onset_turn=r,
-                reason=f"buyer said quantity '{said}' but the bot asked for it again (ignored)",
-                evidence=[_ev(call, r)],
+                onset_turn=soft[0],
+                reason=soft[1],
+                evidence=[_ev(call, soft[0])],
             )
         r = reasked[0]
         if not kept:  # the buyer answered every re-ask, but no captured value shows the answer was usable

@@ -391,10 +391,11 @@ def test_f6_frustration_before_threshold_does_not_make_fatal_but_after_does():
     assert by(audit_call(call, _loop_led(call, bots, late)))["looping"].status == "Fatal"
 
 
-def test_f6_call_ending_after_fourth_ask_is_fatal_and_worst_slot_reported():
-    """Regression for review round 1 finding: a fourth repeat near the call end is Fatal and the worst slot is reported.
+def test_f6_call_ending_after_fourth_ask_is_nonfatal_and_worst_slot_reported():
+    """Regression for review round 1 finding: the worst looping slot is reported. A call end alone is NonFatal (#95).
 
-    Reporting the wrong slot would point the prompt fix at a question that was not the loop.
+    Reporting the wrong slot would point the prompt fix at a question that was not the loop. When both slots are
+    Fatal, the one with more asks must win the tie-break; the test irritates the buyer after both onsets for that.
     """
     call = mk_call(12)  # turns 0..11
     bots = [bt(0, "quantity")] + [bt(i, "name") for i in (2, 4, 6, 8)] + [bt(10, "city")]
@@ -403,12 +404,12 @@ def test_f6_call_ending_after_fourth_ask_is_fatal_and_worst_slot_reported():
     call2 = mk_call(10)  # 0..9
     bots2 = [bt(0, "city"), bt(2, "city"), bt(4, "city"), bt(6, "city"), bt(8, "city")]  # 4th at 6, turns 7,8,9 after
     assert by(audit_call(call2, _loop_led(call2, bots2)))["looping"].status == "NonFatal"
-    call3 = mk_call(9)  # 0..8; 4th at 6, turns 7,8 after -> within 2
-    assert by(audit_call(call3, _loop_led(call3, bots2)))["looping"].status == "Fatal"
-    # two looping slots: worst (Fatal one) is reported
+    call3 = mk_call(9)  # 0..8; 4th at 6, turns 7,8 after -> the call ends right after, but nobody is irritated
+    assert by(audit_call(call3, _loop_led(call3, bots2)))["looping"].status == "NonFatal"
+    # two looping slots, both Fatal: the tie-break must pick the one with more asks
     call4 = mk_call(30)
     bots4 = [bt(0, "quantity")] + [bt(i, "city") for i in (2, 4, 6, 8)] + [bt(i, "name") for i in (10, 12, 14, 16, 18)]
-    users = [UserTurnLabel(idx=17, frustrated=0.9)]
+    users = [UserTurnLabel(idx=9, frustrated=0.9), UserTurnLabel(idx=17, frustrated=0.9)]
     f = by(audit_call(call4, _loop_led(call4, bots4, users)))["looping"]
     assert f.status == "Fatal" and "name" in f.reason  # both Fatal, name has more asks
     f2 = by(audit_call(call4, _loop_led(call4, bots4, [UserTurnLabel(idx=9, frustrated=0.9)])))["looping"]
@@ -602,3 +603,219 @@ def test_f11_core_rubric_tests_do_not_depend_on_local_data():
     me = sys.modules[__name__]  # this module has no skipif and builds calls in code
     assert not hasattr(me, "pytestmark")
     assert mk_call().turns and audit_call(*clean()).verdict == "Pass"
+
+
+# ---- issue #95: align looping, qty_missed and unit aliases with the official matrix
+def _loop95(users=(), tones=None, n=12):
+    """A 4th name ask at turn 8 (onset). `tones` maps a turn idx to a Gemini tone on that user turn."""
+    call = mk_call(n)
+    for i, tone in (tones or {}).items():
+        call.turns[i].tone = tone
+    bots = [bt(0, "quantity")] + [bt(i, "name") for i in (2, 4, 6, 8)]
+    return by(audit_call(call, _loop_led(call, bots, users)))["looping"]
+
+
+def test_95_loop_that_ends_normally_without_irritation_is_nonfatal():
+    """A loop whose call closes right after the onset, with a calm buyer, must be NonFatal.
+
+    Matrix: looping is Fatal only if the buyer gets irritated. The old end-of-call trigger graded a normal close
+    after a valid answer as Fatal and inflated the Fatal rate against the human audit.
+    """
+    f = _loop95(n=10)  # the onset is at 8: only turn 9 follows, the call ends
+    assert f.status == "NonFatal" and f.onset_turn == 8 and "no sign of irritation" in f.reason
+
+
+def test_95_loop_followed_by_irritated_buyer_is_fatal():
+    """A frustrated label or an irritated tone within the next 2 user turns after the onset must make the loop Fatal.
+
+    Without it a loop that made the buyer angry would be graded like a harmless repeat.
+    """
+    assert _loop95([UserTurnLabel(idx=9, frustrated=0.6)]).status == "Fatal"  # next user turn, at the threshold
+    assert _loop95([UserTurnLabel(idx=11, frustrated=0.9)]).status == "Fatal"  # second user turn after the onset
+    assert _loop95(tones={9: "irritated"}).status == "Fatal"  # tone alone, no frustration label
+    assert _loop95(tones={11: "irritated"}).status == "Fatal"
+
+
+def test_95_irritation_outside_the_two_turn_window_or_before_onset_is_nonfatal():
+    """Irritation on the third user turn after the onset, or any time before it, must leave the loop NonFatal.
+
+    The matrix ties Fatal to the loop leading to a disconnect: a later or earlier outburst is another fault.
+    """
+    assert _loop95([UserTurnLabel(idx=13, frustrated=0.9)], n=16).status == "NonFatal"  # third user turn after 8
+    assert _loop95([UserTurnLabel(idx=7, frustrated=0.9)], tones={5: "irritated"}).status == "NonFatal"
+    assert _loop95([UserTurnLabel(idx=9, frustrated=0.59)], tones={9: "calm"}).status == "NonFatal"
+
+
+def _missed95(call, bots, users, kept="10", said="10"):
+    led = mk_led(
+        call,
+        bots,
+        users,
+        buyer_facts={"quantity": said},
+        bot_confirmed={"product": "pump", **({"quantity": kept} if kept else {})},
+    )
+    return by(audit_call(call, led))["qty_missed"]
+
+
+_GAVE = [UserTurnLabel(idx=1, gave_value_for="quantity")]
+
+
+def test_95_reask_after_a_correctly_captured_quantity_is_nonfatal():
+    """An unanswered re-ask is NonFatal when bot_confirmed already holds the buyer's quantity (a redundant question).
+
+    The lead is right, so grading it Fatal (wrong or missing buyer info) overstates the fault. A unit-converted
+    match counts too, and a different captured value must stay Fatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE)
+    assert f.status == "NonFatal" and f.onset_turn == 2
+    assert _missed95(call, bots, _GAVE, said="2 kg", kept="2000 g").status == "NonFatal"
+    assert _missed95(call, bots, _GAVE, kept="50").status == "Fatal"
+
+
+def test_95_unanswered_reask_on_unclear_audio_quantity_turn_is_nonfatal():
+    """An unanswered re-ask is NonFatal when the buyer turn that gave the quantity has audio_unclear set.
+
+    Matrix: "if voice not clear then Non Fatal". Here nothing was captured, so only the audio flag can excuse it.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    assert _missed95(call, bots, _GAVE, kept=None).status == "Fatal"  # same call without the flag
+    call.turns[1].audio_unclear = True
+    f = _missed95(call, bots, _GAVE, kept=None)
+    assert f.status == "NonFatal" and f.onset_turn == 2 and "unclear" in f.reason
+    call.turns[1].audio_unclear = False
+    assert _missed95(call, bots, _GAVE, kept=None).status == "Fatal"
+
+
+def test_95_unclear_audio_uses_the_latest_quantity_turn_before_the_reask():
+    """An unanswered re-ask is excused only by unclear audio on the buyer's latest quantity turn before it.
+
+    The rule must read the quantity turn the re-ask actually follows, not the first one in the segment. Reading the
+    earliest turn inverts both orders. An unclear first answer with a clear repeat must stay Fatal because the re-ask
+    follows the clear turn; the earliest-turn check excused it as NonFatal. A clear first answer with an unclear
+    repeat must be NonFatal because the re-ask follows the unclear turn; the earliest-turn check graded it Fatal.
+    """
+    bots = [bt(0, "quantity"), bt(4, "quantity")]
+    users = [UserTurnLabel(idx=1, gave_value_for="quantity"), UserTurnLabel(idx=3, gave_value_for="quantity")]
+    # unclear earliest answer, clear repeat: the re-ask follows the clear turn -> Fatal, no captured quantity
+    call = mk_call(12)
+    call.turns[1].audio_unclear = True
+    f = _missed95(call, bots, users, kept=None)
+    assert f.status == "Fatal" and f.onset_turn == 4
+    # clear earliest answer, unclear repeat: the re-ask follows the unclear turn -> NonFatal
+    call2 = mk_call(12)
+    call2.turns[3].audio_unclear = True
+    f2 = _missed95(call2, bots, users, kept=None)
+    assert f2.status == "NonFatal" and "unclear" in f2.reason
+
+
+def test_95_qty_captured_compares_converted_values_with_a_tolerance():
+    """A captured quantity that matches after unit conversion must count as captured despite float rounding.
+
+    "0.7 kg" converted into grams is 700.0000000000001, so exact equality called a correct capture missing and
+    graded an unanswered re-ask Fatal. The lead is right, so the fault is at most NonFatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said="0.7 kg", kept="700 g")
+    assert f.status == "NonFatal" and f.onset_turn == 2
+
+
+def test_95_unanswered_reask_with_no_captured_quantity_stays_fatal():
+    """With no captured quantity, no unclear audio and an unanswered re-ask, qty_missed must stay Fatal.
+
+    This is the real fault the rule exists for: the buyer answered and the lead likely has no quantity.
+    """
+    f = _missed95(mk_call(12), [bt(0, "quantity"), bt(2, "quantity")], _GAVE, kept=None)
+    assert f.status == "Fatal" and f.onset_turn == 2
+
+
+def test_95_set_is_not_an_alias_of_piece():
+    """ "10 sets" against "10 pieces" must not be read as the same unit: "set" is no longer a piece alias.
+
+    A set can hold several pieces, so the old alias passed a possible quantity error without comment. An unknown
+    unit word now takes the existing no-unit path, which says that only one side states a unit.
+    """
+    assert rules.norm_unit("sets") is None and rules.norm_unit("set") is None
+    assert rules.norm_unit("pieces") == "piece"
+    call = mk_call(12)
+    led = mk_led(
+        call, [bt(0, "quantity")], buyer_facts={"quantity": "10 sets"}, bot_confirmed={"quantity": "10 pieces"}
+    )
+    f = by(audit_call(call, led))["qty_unit"]
+    assert "only one side states a unit" in f.reason and "same kind" not in f.reason
+
+
+def test_95_qty_missed_only_judges_reasks_in_the_final_product_segment():
+    """Only re-asks in the FINAL product segment count, because the posted lead carries the final product.
+
+    Review round 2: an earlier product's re-ask was judged Fatal and the final product's quantity was mixed into it.
+    Turn 1 gives 10 pumps, the bot re-asks at turn 2, turn 3 switches to valves, turn 7 gives 20 valves with unclear
+    audio, and the bot re-asks at turn 8. Turn 8 must be judged NonFatal on the unclear turn 7. A Fatal at turn 2
+    would grade the pump ask with the valve quantity and inflate the Fatal rate.
+    """
+    call = mk_call(12)
+    call.turns[7].audio_unclear = True
+    led = mk_led(
+        call,
+        [bt(0, "quantity"), bt(2, "quantity"), bt(8, "quantity")],
+        [UserTurnLabel(idx=1, gave_value_for="quantity"), UserTurnLabel(idx=7, gave_value_for="quantity")],
+        buyer_facts={"quantity": "20"},
+        bot_confirmed={"product": "valve"},
+        product_changed_at_turn=3,
+        final_product="valve",
+    )
+    f = by(audit_call(call, led))["qty_missed"]
+    assert f.status == "NonFatal" and f.onset_turn == 8 and "unclear" in f.reason
+
+
+def test_95_qty_captured_rejects_an_unrecognised_unit_word():
+    """ "10 sets" against "10 pieces" is not a captured match: an unrecognised unit word must not read as no unit.
+
+    Review round 2: "sets" parsed as no unit, the numbers matched, and an unanswered re-ask graded NonFatal. A set
+    can hold several pieces, so a possible quantity error would ship on the lead. With the fix it is Fatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said="10 sets", kept="10 pieces")
+    assert f.status == "Fatal" and f.onset_turn == 2
+
+
+@pytest.mark.parametrize("said", ["10 ka", "10 chahiye", "10 hi", "10 toh chahiye", "10 bhi"])
+def test_95_qty_captured_treats_a_hinglish_filler_as_no_unit(said):
+    """A filler word after the number ("10 ka", "10 chahiye") is not a unit, so it matches a captured "10".
+
+    Review round 3: any word after the number counted as an unknown unit, so a matching quantity graded Fatal on an
+    unanswered re-ask. Hinglish answers often carry such fillers, so this would inflate Fatal on real calls.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said=said, kept="10")
+    assert f.status == "NonFatal" and f.onset_turn == 2
+
+
+@pytest.mark.parametrize("said", ["10 boxes", "10 packets", "10 pairs", "10 yards", "10 millimeters"])
+def test_95_qty_captured_rejects_other_unknown_units(said):
+    """A unit the parser does not know (a packing unit, or a length such as yards) must not equal 10 pieces.
+
+    Review round 4: a packing-unit allowlist let "10 yards" match "10 pieces". Only listed fillers may read as no
+    unit, so an unknown unit word keeps the safe answer, Fatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said=said, kept="10 pieces")
+    assert f.status == "Fatal" and f.onset_turn == 2
+
+
+def test_95_qty_captured_keeps_a_bare_number_matching_a_stated_unit():
+    """Guard: a bare "10" against "10 pieces" keeps today's NonFatal, because a bare number is still "no unit".
+
+    The unit-word fix must not turn every one-sided unit into a capture fault, or calls where the buyer gave only a
+    number and the bot recorded the category's default unit would be regraded Fatal.
+    """
+    call = mk_call(12)
+    bots = [bt(0, "quantity"), bt(2, "quantity")]
+    f = _missed95(call, bots, _GAVE, said="10", kept="10 pieces")
+    assert f.status == "NonFatal" and f.onset_turn == 2
