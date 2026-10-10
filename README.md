@@ -4,7 +4,7 @@ Every bad call gets a second take. **Take Two** is the audit, root-cause, fix an
 loop for VANI, IndiaMART's buyer-side voice bot. It is the demo name; the package, the
 console and the repo are `vaniloop`.
 Built for the IndiaMART Voice AI Hackathon 2.0 (9–10 Oct 2026), problem statement 1,
-"Quality Audit & Fix Loop".
+"Quality Audit & Fix Loop". The package, the repo and the console are named `vaniloop`.
 
 VANI calls a buyer, confirms the requirement and posts a Buy Lead. vaniloop reads the
 call recordings, grades every call Fatal / Non-Fatal / Pass with evidence, groups the
@@ -23,6 +23,10 @@ console shows the whole loop.
 | Test | Fork-the-call replays: a simulated buyer seeded from the real call, old prompt vs new prompt, K seeds per call, exact stratified permutation test, guards on calls that passed | `replay.py`, `render.py`, `prove.py`, `gate.py` |
 | Ship | Prompt versions with lineage, a release check of all shipped patches together, an append-only issue tracker | `pipeline.py ship`, `tracker.py` |
 | Console | Home (one Run-the-loop button), Audit, Issues, Fix, Test, Tracker, Rubric editor, call pages with transcripts | `web.py`, `console.py`, `web/` |
+
+On the hackathon data, Take Two audited 712 calls, named an owner for 12 causes, wrote
+patches for the prompt-owned ones and tickets for the two a prompt cannot fix, and the
+gate refused every patch it could not prove. Not proven, nothing ships.
 
 Data contracts for every stage live in `src/vaniloop/models.py`.
 
