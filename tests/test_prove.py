@@ -768,3 +768,259 @@ def test_prove_refuses_a_demoted_cause_before_any_replay_but_a_dry_run_still_pla
         CAUSE, pf, n=3, k=2, guards=2, replay_fn=Stubs().replay_fn, audit_fn=Stubs().audit_fn, **paths
     )
     assert out.result is not None
+
+
+class ScreenStubs(Stubs):
+    """Stubs whose OLD replays on the screen seeds 0..2 fail a set number of times per call (`screen_fails`).
+
+    On seeds 3 and up OLD always fails a target and NEW passes. With `guard_fatal` every guard's NEW replay is Fatal,
+    so the gate runs its guard re-check.
+    """
+
+    def __init__(self, screen_fails=None, guard_fatal=False):
+        super().__init__()
+        self.screen_fails, self.guard_fatal = screen_fails or {}, guard_fatal
+
+    def audit_fn(self, call):
+        cid, _, rest = call.call_id.partition("__")
+        tag, seed = rest.split("_")[0], int(rest.split("_")[1])
+        onset = call.turns[-1].idx
+        if cid.startswith("p") and tag == "new" and self.guard_fatal:
+            return make_audit(call.call_id, "Fatal", onset=onset)
+        fails = tag == "old" and (seed >= prove.SCREEN_SEEDS or seed < self.screen_fails.get(cid, 3))
+        return make_audit(call.call_id, "NonFatal" if cid.startswith("t") and fails else "Pass", onset=onset)
+
+
+def mixed_fails():
+    """OLD fails out of 3 screen seeds per call: the first three seeded picks give 1, 3 and 0, the others 2."""
+    first = prove.pick([f"t{i:02d}" for i in range(13)], 3)
+    return {f"t{i:02d}": 2 for i in range(13)} | dict(zip(first, [1, 3, 0], strict=True)), first
+
+
+def holdout_ids():
+    return {i for i in (f"t{j:02d}" for j in range(13)) if prove.split_half(i) == "holdout"}
+
+
+def test_holdout_targets_come_only_from_the_holdout_half_and_the_row_says_so(tmp_path):
+    """With holdout, every picked target must be a hold-out call, and the gates row must carry holdout true.
+    Without it the patch would be proven on the calls it was written from, and a row could not tell which run it was."""
+    assert len(holdout_ids()) >= 3  # the synthetic ids give the gate enough hold-out calls
+    out, paths, _ = run(tmp_path, holdout=True)
+    assert {c.call_id for c, _, _ in out.plan.targets} <= holdout_ids()
+    row = json.loads(paths["gates_path"].read_text())
+    assert row["holdout"] is True and "screened" not in row and "seed_base" not in row
+    calls, ledgers, audits = synthetic()
+    _, cand = prove.select_targets(calls, ledgers, audits, PARAM, 3, holdout=True)
+    assert cand == {f"t{i:02d}" for i in range(13)}  # guards still stay clear of the fix half too
+
+
+def test_a_run_without_flags_writes_the_same_gates_row_and_no_stage_field(tmp_path):
+    """Without --holdout and --screen the gates row must hold none of the new keys and no replay row a stage. A new
+    key on every row would change the output that today's dashboard and diffs rely on."""
+    out, paths, _ = run(tmp_path)
+    row = json.loads(paths["gates_path"].read_text())
+    assert not {"holdout", "screened", "kept", "not_reproduced", "seed_base"} & set(row)
+    assert all("stage" not in json.loads(ln) for ln in paths["replays_path"].read_text().splitlines())
+    assert out.screened is None and out.plan.seed_base == 0
+
+
+def test_old_gate_rows_without_the_new_fields_still_load():
+    """A GateResult must load from a row written before #106. The dashboard reads old gates.jsonl files, and a
+    required new field would break every one of them."""
+    from vaniloop.gate import GateResult
+
+    row = dict(cause_id=CAUSE, decision="ship", p_value=0.01, alpha=0.05, lift=0.5, per_call=[], min_achievable_p=0.1,
+               old_fail_rate=0.5, new_fail_rate=0.0, n_calls=3, k_seeds=2, reason="r")  # fmt: skip
+    g = GateResult.model_validate(row)
+    assert g.holdout is None and g.screened is None and g.not_reproduced is None and g.seed_base is None
+
+
+def test_the_screen_keeps_only_reproducing_calls_and_stops_at_n(tmp_path):
+    """The screen must keep a call only when OLD fails on at least 2 of 3 seeds, list the others as not reproduced
+    and stop screening once n are kept. Keeping a call that does not reproduce dilutes the test, and screening past n
+    wastes paid replays."""
+    fails, first = mixed_fails()
+    stubs = ScreenStubs(fails)
+    out, paths, _ = run(tmp_path, stubs, screen=True)
+    screened = list(dict.fromkeys(c for _, c, tag, seed in stubs.log if seed < 3 and c.startswith("t")))
+    kept = {c.call_id for c, _, _ in out.plan.targets}
+    assert len(kept) == 3 and all(fails[c] >= 2 for c in kept)
+    assert screened[-1] in kept and len(screened) < 13  # the n-th kept call ended the screen
+    assert set(out.not_reproduced) == set(screened) - kept and all(fails[c] < 2 for c in out.not_reproduced)
+    assert sorted(out.not_reproduced) == sorted([first[0], first[2]]) and len(screened) == 5  # 1/3 and 0/3 drop
+    row = json.loads(paths["gates_path"].read_text())
+    assert (row["screened"], row["kept"], row["not_reproduced"]) == (len(screened), 3, sorted(out.not_reproduced))
+    assert row["seed_base"] == 3 and row["holdout"] is False
+
+
+def test_the_screen_replays_old_on_seeds_0_1_2_and_the_gate_uses_fresh_seeds(tmp_path):
+    """The screen must replay only OLD on seeds {0,1,2} and the gate only seeds {3,4,5} (k=3), guard re-check
+    included. Reusing a screen seed would let the gate see the replays that selected its calls (selection bias)."""
+    stubs = ScreenStubs(guard_fatal=True)
+    out, paths, _ = run(tmp_path, stubs, screen=True, k=3, workers=1)
+    kept = {c.call_id for c, _, _ in out.plan.targets}
+    guards = {c.call_id for c, _, _ in out.plan.guards}
+    rows = [json.loads(ln) for ln in paths["replays_path"].read_text().splitlines()]
+    screen_rows = [r for r in rows if r.get("stage") == "screen"]
+    assert (
+        screen_rows and {r["prompt"] for r in screen_rows} == {"old"} and {r["seed"] for r in screen_rows} == {0, 1, 2}
+    )
+    gate_rows = [r for r in rows if r.get("stage") != "screen"]
+    assert {r["seed"] for r in gate_rows if r["role"] == "target"} == {3, 4, 5}
+    assert {r["seed"] for r in gate_rows if r["role"] == "guard"} == {
+        3,
+        4,
+    }  # seed_base for NEW, base+1 for the re-check
+    assert {c for _, c, _, seed in stubs.log if seed >= 3 and c in kept | guards} == kept | guards
+    assert out.result.k_seeds == 3 and out.result.decision == "reject" and out.result.guard_breaks
+
+
+def test_screen_replays_count_in_the_cost_and_a_dry_run_never_screens(tmp_path):
+    """The run cost must include the screen replays, including those of dropped calls, and a dry run must make none.
+    Leaving them out would understate what a --screen proof spends."""
+    llm.COSTS_PATH.write_text("")
+    stubs = ScreenStubs(mixed_fails()[0])
+
+    def replay_with_cost(call, ledger, fork, bot_prompt, seed):
+        sent = prove._sent_prompt(bot_prompt, call, ledger)
+        tag = f"replay:bot:{replay.prompt_tag(sent)}:{seed}:{call.call_id}:{fork}"
+        llm.COSTS_PATH.open("a").write(json.dumps({"cache_tag": tag, "cost_usd": 0.5}) + "\n")
+        return stubs.replay_fn(call, ledger, fork, bot_prompt, seed)
+
+    out, paths, _ = run(tmp_path, stubs, screen=True, replay_fn=replay_with_cost)
+    assert out.cost_usd == pytest.approx(0.5 * out.replays) and out.screen_cost_usd == pytest.approx(
+        0.5 * 3 * out.screened
+    )
+    assert 0 < out.screen_cost_usd < out.cost_usd
+    dry, _, dry_stubs = (
+        run(tmp_path / "dry", screen=True, holdout=True, dry_run=True) if (tmp_path / "dry").mkdir() is None else None
+    )
+    assert dry.result is None and dry_stubs.replays == 0
+
+
+def test_too_few_reproducing_calls_stop_the_run_after_the_screen(tmp_path, capsys):
+    """When fewer than 3 calls reproduce on OLD the run must stop with SystemExit and write no gates row, but keep the
+    paid screen replays. A gate on fewer calls than MIN_CALLS can never ship."""
+    stubs = ScreenStubs({f"t{i:02d}": 0 for i in range(13)})
+    with pytest.raises(SystemExit, match="reproduce the fault on OLD"):
+        run(tmp_path, stubs, screen=True)
+    assert "screen:" in capsys.readouterr().out and not (tmp_path / "out" / "gates.jsonl").exists()
+    assert (tmp_path / "out" / "replays.jsonl").read_text().count('"stage": "screen"') == 3 * 13
+
+
+def test_a_later_attempt_must_keep_the_screen_setting(tmp_path):
+    """Every later attempt of a cause must reuse the first attempt's --screen/--holdout flags, in both directions,
+    and stop with SystemExit before any replay, while a matching second attempt still runs. The screen picks its
+    targets from cached OLD replays on seeds 0-2; an attempt 2 without the screen would gate on exactly those cached
+    replays, so its baseline would be chosen by the replays it is judged on, and dropping the screen or holdout
+    silently loses that protection."""
+
+    def set_attempt(paths, n):
+        doc = json.loads(paths["patches_path"].read_text())
+        doc["patches"][0]["attempt"] = n
+        paths["patches_path"].write_text(json.dumps(doc))
+
+    pf, paths = write_inputs(tmp_path)
+    stubs = ScreenStubs(mixed_fails()[0])
+    args = dict(n=3, k=2, guards=2, replay_fn=stubs.replay_fn, audit_fn=stubs.audit_fn, **paths)
+    out = prove.run_prove(CAUSE, pf, screen=True, **args)
+    assert out.result.screened is not None  # attempt 1 ran screened, its gates row now anchors the setting
+    set_attempt(paths, 2)
+    msg = "must use the same --screen/--holdout setting as earlier attempts"
+    for kw, earlier in (
+        (dict(screen=False), "screen=True, holdout=False"),
+        (dict(screen=True, holdout=True), "screen=True, holdout=False"),
+    ):
+        with pytest.raises(SystemExit, match="attempt 2 of " + CAUSE + " " + msg) as e:
+            prove.run_prove(CAUSE, pf, attempt=2, **{**args, "replay_fn": raising, "audit_fn": raising}, **kw)
+        assert f"(earlier: {earlier})" in str(e.value)
+    # the reverse: an unscreened attempt 1 forbids a screened attempt 2
+    (tmp_path / "plain").mkdir()
+    pf2, paths2 = write_inputs(tmp_path / "plain")
+    prove.run_prove(CAUSE, pf2, n=3, k=2, guards=2, replay_fn=Stubs().replay_fn, audit_fn=Stubs().audit_fn, **paths2)
+    set_attempt(paths2, 2)
+    with pytest.raises(SystemExit, match="attempt 2 of " + CAUSE + " " + msg) as e:
+        prove.run_prove(CAUSE, pf2, n=3, k=2, guards=2, attempt=2, screen=True, replay_fn=raising, audit_fn=raising,
+                        **paths2)  # fmt: skip
+    assert "(earlier: screen=False, holdout=False)" in str(e.value)
+    # the same for holdout: an holdout attempt 1 forbids an attempt 2 without it
+    (tmp_path / "hold").mkdir()
+    pf3, paths3 = write_inputs(tmp_path / "hold")
+    prove.run_prove(CAUSE, pf3, n=3, k=2, guards=2, replay_fn=Stubs().replay_fn, audit_fn=Stubs().audit_fn,
+                    holdout=True, **paths3)  # fmt: skip
+    set_attempt(paths3, 2)
+    with pytest.raises(SystemExit, match="attempt 2 of " + CAUSE + " " + msg) as e:
+        prove.run_prove(CAUSE, pf3, n=3, k=2, guards=2, attempt=2, replay_fn=raising, audit_fn=raising, **paths3)
+    assert "(earlier: screen=False, holdout=True)" in str(e.value)
+    # accepted: attempt 2 with the same flags runs and writes a second gates row
+    out2 = prove.run_prove(CAUSE, pf, attempt=2, screen=True, **args)
+    assert out2.result.attempt == 2 and len(paths["gates_path"].read_text().splitlines()) == 2
+
+
+def test_a_screen_stop_records_the_spend_in_screens_jsonl(tmp_path, capsys):
+    """A screen that keeps fewer than 3 calls must append one screens.jsonl row with the screen's spend and the
+    dropped ids, and write no gates row. Without the row the paid screen spend would be invisible: no gates row
+    exists, and replays.jsonl alone cannot say that the run stopped there or what the screen cost."""
+    stubs = ScreenStubs({f"t{i:02d}": 0 for i in range(13)})
+    with pytest.raises(SystemExit, match="reproduce the fault on OLD"):
+        run(tmp_path, stubs, screen=True)
+    capsys.readouterr()
+    row = json.loads((tmp_path / "out" / "screens.jsonl").read_text())
+    assert set(row) == {"cause_id", "attempt", "screened", "kept", "not_reproduced", "screen_cost_usd", "stopped"}
+    assert row["cause_id"] == CAUSE and row["attempt"] == 1 and row["stopped"] is True
+    assert row["screened"] == 13 and row["kept"] == 0
+    assert row["not_reproduced"] == sorted(f"t{i:02d}" for i in range(13))
+    assert row["screen_cost_usd"] == 0.0
+    assert not (tmp_path / "out" / "gates.jsonl").exists()
+
+
+def test_a_screened_run_writes_its_cost_on_the_gates_row(tmp_path):
+    """With --screen (or --holdout) the gates row must carry cost_usd, the run's total replay spend including the
+    screen replays, the same value the Outcome reports. Without it on the row, summing what proofs spend would need
+    a join against costs.jsonl by cache tag."""
+    llm.COSTS_PATH.write_text("")
+    stubs = ScreenStubs(mixed_fails()[0])
+
+    def replay_with_cost(call, ledger, fork, bot_prompt, seed):
+        sent = prove._sent_prompt(bot_prompt, call, ledger)
+        tag = f"replay:bot:{replay.prompt_tag(sent)}:{seed}:{call.call_id}:{fork}"
+        llm.COSTS_PATH.open("a").write(json.dumps({"cache_tag": tag, "cost_usd": 0.5}) + "\n")
+        return stubs.replay_fn(call, ledger, fork, bot_prompt, seed)
+
+    out, paths, _ = run(tmp_path, stubs, screen=True, replay_fn=replay_with_cost)
+    row = json.loads(paths["gates_path"].read_text())
+    assert row["cost_usd"] == pytest.approx(out.cost_usd) == pytest.approx(0.5 * out.replays)
+    (tmp_path / "holdout").mkdir()
+    out_h, paths_h, _ = run(tmp_path / "holdout", holdout=True)  # holdout alone sets the cost too
+    assert json.loads(paths_h["gates_path"].read_text())["cost_usd"] == out_h.cost_usd
+
+
+def test_a_run_without_flags_writes_no_cost_usd_key(tmp_path):
+    """Without --holdout and --screen the gates row must not carry a cost_usd key: consumers and diffs see exactly
+    the row today's runs write, and a null cost would read as a measured zero spend."""
+    out, paths, _ = run(tmp_path)
+    assert "cost_usd" not in json.loads(paths["gates_path"].read_text()) and out.result.cost_usd is None
+
+
+def test_pipeline_passes_holdout_and_screen_flags(monkeypatch):
+    """The CLI flags --holdout (fix, refix, prove) and --screen (prove) must reach the runners, and stay out of the
+    call when absent. A dropped flag would silently run the unprotected flow."""
+    seen = {}
+    monkeypatch.setattr(pipeline, "run_prove", lambda c, p, **kw: seen.update(prove=kw) or prove.Outcome(
+        prove.Plan(CAUSE, PARAM, "o", "n", [], [], 3, 12)))  # fmt: skip
+    monkeypatch.setattr(
+        pipeline, "run_refix", lambda c, p, **kw: seen.update(refix=kw) or {"patches": [], "rejected": []}
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_fix",
+        lambda **kw: seen.update(fix=kw) or {"patches": [], "rejected": [], "tickets": [], "watched": []},
+    )
+    pipeline.main(["prove", "--cause", CAUSE, "--prompt", "p.md", "--holdout", "--screen"])
+    assert seen["prove"]["holdout"] is True and seen["prove"]["screen"] is True
+    pipeline.main(["prove", "--cause", CAUSE, "--prompt", "p.md"])
+    assert "holdout" not in seen["prove"] and "screen" not in seen["prove"]
+    pipeline.main(["refix", "--cause", CAUSE, "--prompt", "p.md", "--holdout"])
+    assert seen["refix"] == {"holdout": True}
+    pipeline.main(["fix", "--prompt", "p.md", "--holdout"])
+    assert seen["fix"]["holdout"] is True
