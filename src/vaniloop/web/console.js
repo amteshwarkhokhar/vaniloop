@@ -58,6 +58,7 @@
     clearTimeout(D.timer);
     D.job = job; D.lines = []; D.next = 0; D.err = null; D.fails = 0;
     dockDraw(true);
+    if (V.onJob) V.onJob();
     tick();
   }
   async function tick() {
@@ -77,6 +78,7 @@
     D.lines = D.lines.concat(Array.isArray(r.data.lines) ? r.data.lines.map(str) : []);
     D.next = num(r.data.next) == null ? D.next : r.data.next;
     dockDraw(was !== D.job.status);
+    if (V.onJob) V.onJob();
     if (C.sub.sid && C.sub.watch === id) await loadSub(C.sub.sid, false);
     if (D.job.status === "running") D.timer = setTimeout(tick, POLL_MS);
     else await ended();
@@ -525,6 +527,6 @@
     redraw();
   });
 
-  window.VL.console = { C, D, call };
+  window.VL.console = { C, D, call, startJob };
   loadConsole();
 })();

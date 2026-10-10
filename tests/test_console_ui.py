@@ -215,3 +215,52 @@ def test_tab_marks_its_page_and_its_family_row():
     assert '<p class="kicker">Configuration</p>' in d["thresholds"]
     assert '<a href="#/tune">Tune</a>' in d["thresholds"]
     assert '<a href="#/thresholds" aria-current="page">All constants</a>' in d["thresholds"]
+
+
+def test_home_shows_the_calls_one_run_button_and_five_steps_in_order():
+    """Home is the first page: one square per call (worst first, ids escaped), the plan line, and the five steps.
+
+    It is the owner's main page. If the order, the escaping or the plan broke, the one-button loop would show the
+    wrong thing or run untrusted text."""
+    d = run("con-home")
+    idle = d["idle"]
+    assert idle.count('class="cd ') == 3
+    assert idle.index("c2&#60;img src=x&#62;") < idle.index('title="c1'), "Fatal comes before Pass"
+    assert "<img" not in idle and 'href="/#/call/c1"' in idle
+    assert "No new calls to grade · 2 patches to test · About $0.90" in idle
+    assert "&#60;b&#62;2&#60;/b&#62;" in idle, "the plan's why text is escaped"
+    heads = [idle.index(f"<h3>{n}</h3>") for n in ("Ingest", "Audit", "Issues", "Fix", "Test")]
+    assert heads == sorted(heads)
+    run_btn = re.search(r'<button[^>]*data-op="home-run"[^>]*>', idle).group(0)
+    assert " disabled" not in run_btn
+    assert d["nav"].index("Home") < d["nav"].index("Tracker")
+
+
+def test_home_run_confirms_then_each_step_lights_up_from_the_loop_log():
+    """Run the loop asks to confirm (Cancel first), then posts confirm true. LOOP_STEP lines light the cards.
+
+    Mid-run Ingest is done, Audit runs and the rest wait. After LOOP_DONE all five are done and the summary shows.
+    Without it the main page would not show the loop working, or a paid run could start with one click."""
+    d = run("con-home")
+    assert d["posts"] == [{"stage": "loop", "args": {}}, {"stage": "loop", "args": {}, "confirm": True}]
+    assert "This run calls paid models." in d["confirm"] and "Estimate $0.90." in d["confirm"]
+    assert d["confirm"].index('data-op="home-cancel"') < d["confirm"].index('data-op="home-go"')
+    mid = d["mid"]
+    assert 'class="st st-done" data-step="ingest"' in mid and 'class="st st-run" data-step="audit"' in mid
+    assert 'class="st st-wait" data-step="issues"' in mid and "Jev labels each turn" in mid
+    assert all(f'class="st st-done" data-step="{s}"' in d["done"] for s in ("ingest", "audit", "issues", "fix", "gate"))
+    assert "1 patch ready to ship" in d["done"] and "2 tickets" in d["done"] and "$0.42" in d["done"]
+
+
+def test_home_read_only_turns_run_off_and_replay_writes_nothing():
+    """On a read-only folder Run is disabled and only Replay (data-view) stays on. Replay walks all five steps.
+
+    Replay reads the saved results and posts no job. If Run stayed on, the frozen demo folder could be written."""
+    d = run("con-home-ro")
+    tags = re.findall(r"<(?:button|input|select|textarea)\b[^>]*>", d["ro"])
+    writers = [t for t in tags if "data-view" not in t]
+    assert writers and all(" disabled" in t for t in writers)
+    assert "read-only" in d["ro"]
+    assert 'class="st st-run" data-step="ingest"' in d["replay"]
+    assert all(f'class="st st-done" data-step="{s}"' in d["end"] for s in ("ingest", "audit", "issues", "fix", "gate"))
+    assert "Nothing was graded again." in d["end"] and d["posts"] == []
