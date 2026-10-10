@@ -35,7 +35,7 @@
 
   // One state per card, read from the job log: wait, run, done or fail. null when no job is on screen.
   function live() {
-    if (H.replay) return H.replay.st;
+    if (H.replay && !running()) return H.replay.st;
     const j = K.D.job;
     if (!j) return null;
     const st = { cards: {}, doing: {}, prog: {}, summary: null, fail: null, stage: j.stage };
@@ -191,6 +191,7 @@
     const db = $("home-done");
     if (db) db.innerHTML = doneBox(st);
   }
+  const stopReplay = () => { if (H.replay) clearTimeout(H.replay.timer); H.replay = null; };
   // Replay the saved results step by step. It reads nothing new and writes nothing.
   const REPLAY_MS = 1300, FRAME_MS = 100;
   function replay() {
@@ -219,8 +220,8 @@
     const t = e.target.closest && e.target.closest("button");
     const op = t && t.dataset && t.dataset.op;
     if (!op || t.disabled || !op.startsWith("home-")) return;
-    if (op === "home-run") { H.replay = null; await K.startJob("loop", {}, false); }
-    else if (op === "home-go") { H.replay = null; await K.startJob("loop", {}, true); }
+    if (op === "home-run") { stopReplay(); await K.startJob("loop", {}, false); }
+    else if (op === "home-go") { stopReplay(); await K.startJob("loop", {}, true); }
     else if (op === "home-cancel") { K.C.confirm = null; V.show(); }
     else if (op === "home-replay") replay();
   });
@@ -234,6 +235,7 @@
   };
   // console.js calls this on each log poll. A job that ended reloads the plan and the calls once.
   V.onJob = () => {
+    if (running()) stopReplay(); // a real job, from any page, replaces a replay
     drawLive();
     const j = K.D.job;
     if (j && j.status !== "running" && H.endedFor !== j.id) { H.endedFor = j.id; V.enter.home(); }

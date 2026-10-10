@@ -264,3 +264,12 @@ def test_home_read_only_turns_run_off_and_replay_writes_nothing():
     assert 'class="st st-run" data-step="ingest"' in d["replay"]
     assert all(f'class="st st-done" data-step="{s}"' in d["end"] for s in ("ingest", "audit", "issues", "fix", "gate"))
     assert "Nothing was graded again." in d["end"] and d["posts"] == []
+
+
+def test_home_a_real_job_replaces_a_replay():
+    """A job started from another page (Run one step) after a Replay shows on Home as that job, not as the replay.
+
+    Codex found Home kept the replay's progress. Then the owner would see a fake step while a real one ran."""
+    d = run("con-home-job")
+    assert 'class="st st-run" data-step="audit"' in d["home"]
+    assert 'class="st st-run" data-step="ingest"' not in d["home"], "the replay's first step must be gone"

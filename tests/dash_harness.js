@@ -237,6 +237,17 @@ const SC = {
     out.posts = posts();
     return out;
   },
+  async "con-home-job"() {
+    routes["GET /api/calls"] = [200, [{ call_id: "c1", verdict: "Fatal" }]];
+    routes["GET /api/loop/plan"] = [200, { steps: [], causes: [], new_calls: 0, estimate_usd: 0 }];
+    await click({ go: "home" }); await tick();
+    await click({ op: "home-replay" });
+    routes["POST /api/jobs"] = [202, { job: job("J1", "judge", "running") }];
+    logRoute("J1", 0, "running", ["working"], 1);
+    await click({ go: "run" }); await click({ op: "run", stage: "judge" });
+    await click({ go: "home" });
+    return { home: ids.panel.innerHTML };
+  },
   async "con-home-ro"() {
     routes["GET /api/calls"] = [200, [{ call_id: "c1", verdict: "Fatal" }]];
     routes["GET /api/loop/plan"] = [200, { steps: [], causes: [], new_calls: 0, estimate_usd: null }];
