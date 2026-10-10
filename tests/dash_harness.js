@@ -140,11 +140,6 @@ const SC = {
     await click({ op: "run", stage: "judge" });
     await click({ op: "cancel" });
     return calls.filter((c) => c.p.endsWith("/cancel"));
-
-    routes["GET /api/rubric"] = [200, RUB]; routes["POST /api/tune"] = [200, TUNE];
-    for (const g of ["run", "submit", "audit", "rubric", "tune"]) { await click({ go: g }); out[g] = ids.panel.innerHTML; }
-    out.dock = ids["dock-actions"].innerHTML;
-    return out;
   },
   async "con-rubric"() {
     const out = {}, put = () => calls.filter((c) => c.method === "PUT").map((c) => c.body);
