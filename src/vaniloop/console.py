@@ -57,6 +57,8 @@ STAGES: list[dict] = [
     {"id": "ship", "label": "Ship a proven fix", "paid": False, "args": [_arg("cause", "str", required=True)]},
     {"id": "submit", "label": "Audit submitted calls", "paid": True,
      "args": [_arg("submission_id", "str", required=True)]},
+    {"id": "loop", "label": "Run the whole loop", "paid": True,
+     "args": [_arg("top", "int", default=3), _arg("n", "int", default=8), _arg("k", "int", default=3)]},
 ]  # fmt: skip
 STAGE_BY_ID = {s["id"]: s for s in STAGES}
 INT_RANGES = {
@@ -65,6 +67,9 @@ INT_RANGES = {
     ("prove", "n"): (2, 20),
     ("prove", "k"): (1, 5),
     ("prove", "attempt"): (1, 2),
+    ("loop", "top"): (1, 8),
+    ("loop", "n"): (2, 20),
+    ("loop", "k"): (1, 5),
 }
 CLI_STAGE = {"agreement": "judge-agreement"}  # stage id -> pipeline subcommand when they differ
 
@@ -159,7 +164,7 @@ def validate(d: Path, stage: object, args: object, confirm: object) -> tuple[dic
             ):
                 raise _bad(name, "unknown submission")
         clean[name] = value
-    if stage in ("fix", "prove", "ship") and not PROMPT_PATH.is_file():
+    if stage in ("fix", "prove", "ship", "loop") and not PROMPT_PATH.is_file():
         raise _bad("prompt", "VANI prompt file missing")
     if stage == "ship":  # changes the live prompt: needs confirm, and a cause that the gate said ship for
         from vaniloop import tracker
@@ -170,7 +175,15 @@ def validate(d: Path, stage: object, args: object, confirm: object) -> tuple[dic
         if st != "ready_to_ship":
             raise ConsoleError(409, {"error": f"{clean['cause']} is {st}, not ready_to_ship"})
     if spec["paid"] and confirm is not True:
-        raise ConsoleError(400, {"error": "confirm", "estimate_usd": None})
+        estimate = None
+        if stage == "loop":  # the only stage with an estimator: its plan, from the cost history
+            from vaniloop import loop
+
+            try:
+                estimate = loop.plan(d, top=clean["top"])["estimate_usd"]
+            except Exception:  # noqa: BLE001 - a bad data file must not turn the confirm answer into a 500
+                pass
+        raise ConsoleError(400, {"error": "confirm", "estimate_usd": estimate})
     return spec, clean
 
 
@@ -184,12 +197,14 @@ def build_argv(d: Path, stage: str, args: dict) -> list[str]:
     if stage == "regrade":
         jev = d / "ledgers_jev.jsonl"
         argv += ["--ledgers", str(jev if jev.exists() else d / "ledgers.jsonl")]
-    if stage in ("fix", "prove", "ship"):
+    if stage in ("fix", "prove", "ship", "loop"):
         argv += ["--prompt", str(PROMPT_PATH)]
     if stage == "ship":
         argv += ["--cause", args["cause"]]
-    if stage == "fix":
+    if stage in ("fix", "loop"):
         argv += ["--top", str(args["top"])]
+    if stage == "loop":
+        argv += ["--n", str(args["n"]), "--k", str(args["k"])]
     if stage == "prove":
         argv += ["--cause", args["cause"]]
         for flag in ("n", "k", "attempt"):

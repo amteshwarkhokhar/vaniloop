@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from vaniloop import console, fix, gate, jev, llm, prove, rules, tracker
+from vaniloop import console, fix, gate, jev, llm, loop, prove, rules, tracker
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -719,6 +719,18 @@ class Handler(BaseHTTPRequestHandler):
                 400, {"error": str(e)[:200] or "bad value", "field": getattr(e, "field", None)}
             ) from None
 
+    def _loop_plan(self, d: Path, query: str) -> None:
+        """GET /api/loop/plan[?top=N]: loop.plan(d) in-process. It writes nothing, so a read-only folder is fine."""
+        lo, hi = console.INT_RANGES[("loop", "top")]
+        raw = parse_qs(query).get("top", [str(loop.DEFAULT_TOP)])[0]
+        if not raw.isdecimal() or not lo <= int(raw) <= hi:
+            self._json({"error": f"must be an integer {lo}..{hi}", "field": "top"}, 400)
+            return
+        try:
+            self._json(loop.plan(d, top=int(raw)))
+        except Exception as e:  # noqa: BLE001 - a bad data file gives a JSON error, not a dropped connection
+            self._json({"error": f"plan failed: {type(e).__name__}"}, 500)
+
     def do_PUT(self) -> None:  # noqa: N802
         body = self._read_json()
         if body is None:
@@ -782,6 +794,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/submit/"):
             out = console.submission(d, path[len("/api/submit/") :], self._runner())
             self._json(out if out else {"error": "unknown submission"}, 200 if out else 404)
+        elif path == "/api/loop/plan":
+            self._loop_plan(d, parts.query)
         elif path == "/api/console":
             self._json(console_info(d, self._runner()))
         elif path == "/api/jobs":
