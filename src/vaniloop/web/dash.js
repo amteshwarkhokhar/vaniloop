@@ -59,7 +59,7 @@
     calls: '<path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 8v8"/><path d="M20 11v2"/>',
   };
   const icon = (id) => `<span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24">${own(ICON, id) || ""}</svg></span>`;
-  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "home", filt: { kind: "all", verdict: "all", fatal: false }, calls: null, causes: null, cv: { verdict: "Fatal", n: 25 } };
+  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "home", filt: { kind: "all", verdict: "all", fatal: false }, calls: null, causes: null, fresh: false, gen: 0, cv: { verdict: "Fatal", n: 25 } };
   const famHead = (fam) => ITEMS.find((i) => i.fam === fam && i.side !== "tab");
 
   async function get(path) {
@@ -317,15 +317,20 @@
     if ($("tb-title")) $("tb-title").textContent = it.name;
   }
 
+  // Draw a page after a route change. A page with no enter hook enters now. A page that loads its own data (home,
+  // the pipeline, the console pages) enters once more when its hook settles, if the person is still on it: that redraw
+  // is the only one that plays the entrance. Redraws while loading, and a hook that lands after another navigation, never do.
+  function land(id) {
+    const hook = window.VL && window.VL.enter && window.VL.enter[id], gen = ++S.gen;
+    S.fresh = !hook;
+    show();
+    if (hook) Promise.resolve().then(hook).then(() => { if (S.gen === gen && S.now === id) { S.fresh = true; show(); } }, () => {});
+  }
   function go(id, push = true) {
     S.now = id;
     if (push && location.hash !== `#/${id}`) history.replaceState(null, "", `#/${id}`);
     closeMenu();
-    // A page that loads its own data (home, the console pages) enters once, on the redraw that shows that data.
-    const hook = window.VL && window.VL.enter && window.VL.enter[id];
-    S.fresh = !hook;
-    show();
-    if (hook) { S.fresh = true; hook(); }
+    land(id);
     $("panel").focus({ preventScroll: true });
     window.scrollTo(0, 0);
   }
@@ -405,10 +410,7 @@
     } else S.cfgErr = cfg.e;
     const id = location.hash.replace(/^#\/?/, "");
     if (ITEMS.some((i) => i.id === id)) S.now = id;
-    const hook = window.VL && window.VL.enter && window.VL.enter[S.now];
-    S.fresh = !hook;
-    show();
-    if (hook) { S.fresh = true; hook(); }
+    land(S.now);
   }
   // Reload the stage data after a job ends. An Operate panel keeps its own state, so only the sidebar is redrawn there.
   async function refresh() {

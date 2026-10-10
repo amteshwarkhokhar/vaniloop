@@ -443,10 +443,9 @@
     { id: "rubric", group: "operate", name: "Rubric", side: "config", fam: "rubric" }, { id: "tune", group: "operate", name: "Scoring criteria", side: "config", fam: "tune", tab: "Tune" },
     { id: "tracker", group: "operate", name: "Tracker", side: "top", fam: "tracker" });
   V.vals = () => { const n = TR.data && TR.data.causes.filter((c) => c.state === "ready_to_ship" || c.state === "ticket_open").length; return { tracker: n == null ? "" : n ? `${n} waiting` : "None waiting" }; };
-  // The loading redraws do not play the entrance; land() does, once the data is here.
-  const enter = async () => { S.fresh = false; if (!C.con) await loadConsole(); await loadJobs(); redraw(); };
+  const enter = async () => { if (!C.con) await loadConsole(); await loadJobs(); redraw(); };
   // The last redraw of a route change is the page's entrance, so it plays once its data has landed.
-  const land = () => { S.fresh = true; redraw(); };
+  const land = () => redraw(); // the router plays the entrance once the hook settles
   V.enter = {
     run: async () => { if (!C.con) await loadConsole(); await loadJobs(); land(); },
     submit: async () => {
