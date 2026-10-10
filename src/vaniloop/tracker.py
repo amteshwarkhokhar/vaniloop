@@ -1,7 +1,10 @@
-"""Issue tracker (#130).
+"""Issue tracker and prompt lineage (#130).
 
 `<runs>/tracker.jsonl` is an append-only event log, one row per event. The state of a cause is a fold of its events:
-`step` is the one pure function that holds every transition. The stages call `record`; they never compute a state.
+`step` is the one pure function that holds every transition. `<runs>/prompts/v<N>.md` and `versions.json` hold the
+shipped prompt versions. The stages call `record`; they never compute a state themselves.
+
+fix.py and prove.py import this module, so it imports fix lazily, inside the functions that need it.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import prompt
 from .jsonl import read_jsonl
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -26,6 +30,7 @@ KINDS = (
     "rubric_changed",  # not in the contract list: counts under two rubric versions are never compared, so say so
 )  # fmt: skip
 TICKET_STATES = ("ticket_open", "ticket_sent", "ticket_resolved")
+DEFAULT_PROMPT = Path(__file__).resolve().parents[2] / "data" / "reference" / "vani_prompt_sarvam.md"
 
 
 def now_ist() -> str:
@@ -257,12 +262,97 @@ def _sync(causes: list[dict], runs: Path, run_id: str | None) -> None:
             record("count_changed", cid, d, run_id, runs)
 
 
+# ---- prompt lineage ----
+
+
+VERSION_NAME = re.compile(r"^v[1-9][0-9]*$")
+
+
+def fingerprint(*parts: str) -> str:
+    """sha256 of the parts, each length-prefixed so ("ab", "c") and ("a", "bc") differ."""
+    h = hashlib.sha256()
+    for part in parts:
+        b = part.encode("utf-8")
+        h.update(f"{len(b)}:".encode() + b)
+    return h.hexdigest()
+
+
 def _versions(runs: Path) -> list[dict]:
-    try:
-        v = json.loads((Path(runs) / "prompts" / "versions.json").read_text(encoding="utf-8")).get("versions", [])
-    except (OSError, ValueError, AttributeError):
+    """The shipped versions in order. A missing versions.json means none; a present but unreadable or malformed one
+    stops with SystemExit, so fix, refix and prove never fall back to the clean base by mistake."""
+    path = Path(runs) / "prompts" / "versions.json"
+    if not path.exists():
         return []
-    return [x for x in v if isinstance(x, dict) and x.get("version")]
+    bad = f"{path} is unreadable or malformed: fix it or restore it before fix, refix, prove or ship"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise SystemExit(bad) from None
+    rows = doc.get("versions") if isinstance(doc, dict) else None
+    if not isinstance(rows, list) or not all(
+        isinstance(x, dict) and VERSION_NAME.match(str(x.get("version"))) and isinstance(x.get("causes"), list)
+        for x in rows
+    ):
+        raise SystemExit(bad)
+    if [x["version"] for x in rows] != [f"v{n}" for n in range(1, len(rows) + 1)]:
+        raise SystemExit(bad)
+    for x in rows:  # every listed version must have its text, not only the last
+        if not (Path(runs) / "prompts" / f"{x['version']}.md").is_file():
+            raise SystemExit(
+                f"{Path(runs) / 'prompts' / (x['version'] + '.md')} is missing but versions.json names it: restore it"
+            )
+    return rows
+
+
+def current_version(runs: Path) -> str:
+    v = _versions(runs)
+    return v[-1]["version"] if v else BASE
+
+
+def current_prompt(prompt_path: Path, runs: Path) -> tuple[str, str]:
+    """(text, version): the latest shipped version, else the clean base prompt. Fix, refix and prove start here."""
+    v = current_version(runs)
+    if v == BASE:
+        return prompt.load(prompt_path), BASE
+    path = Path(runs) / "prompts" / f"{v}.md"
+    try:
+        return path.read_text(encoding="utf-8"), v
+    except OSError:
+        raise SystemExit(f"{path} is missing but versions.json names {v}: restore it") from None
+
+
+def shipped_ranges(runs: Path) -> list[tuple[int, int]]:
+    """Lines changed by every shipped patch, in the line numbers of the current version.
+
+    Each version records its patch as start, end (the replaced span's last line in its base), new_end (the last
+    changed line after the edit) and delta (newlines in new_text minus newlines in old_text). A later patch moves
+    every line after its end by its delta, so the earlier ranges are shifted forward through each later version.
+    """
+    out: list[tuple[int, int]] = []
+    for v in _versions(runs):
+        p = v.get("patch") or {}
+        if not all(isinstance(p.get(k), int) for k in ("start", "end", "new_end", "delta")):
+            continue
+        out = [(a + p["delta"], b + p["delta"]) if a > p["end"] else (a, b) for a, b in out]
+        out.append((p["start"], p["new_end"]))
+    return out
+
+
+def overlap_reason(runs: Path, patch, patches: list[dict]) -> str | None:
+    """Why a patch on the current version cannot be written: it edits lines a shipped version changed, or lines
+    another in-flight patch (same base, not shipped) already targets. None when it is clear."""
+    runs, cur = Path(runs), current_version(runs)
+    lo, hi = patch.target_start_line, patch.target_end_line
+    for a, b in shipped_ranges(runs):
+        if lo <= b and a <= hi:
+            return f"old_text overlaps lines {a}-{b} changed by a shipped prompt version"
+    shipped = {c for v in _versions(runs) for c in v.get("causes", [])}
+    for p in patches:
+        if p.get("cause_id") in (patch.cause_id, *shipped) or (p.get("base_version") or BASE) != cur:
+            continue
+        if lo <= p.get("target_end_line", -1) and p.get("target_start_line", 1 << 30) <= hi:
+            return f"old_text overlaps lines of the in-flight patch for {p['cause_id']}"
+    return None
 
 
 def _atomic(path: Path, text: str) -> None:
@@ -270,6 +360,91 @@ def _atomic(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def edit_span(text: str, old: str, new: str) -> dict:
+    """Where old (found once in text) is replaced by new, in line numbers: start; end = the last line of the replaced
+    span in text; new_end = the last line changed after the edit; delta = newlines in new minus newlines in old.
+
+    A span that ends in a newline ends on that newline's line. One that stops mid-line also touches the rest of
+    that line, so removing or adding a trailing newline counts that line and shifts the lines after it by delta.
+    """
+    off = text.index(old)
+    after = text.count("\n", 0, off + len(old) - 1 if old.endswith("\n") else off + len(old))
+    patched = text[:off] + new + text[off + len(old) :]
+    last = off + len(new) - 1 if old.endswith("\n") else off + len(new)
+    return {"start": text.count("\n", 0, off) + 1, "end": after + 1,
+            "new_end": patched.count("\n", 0, last) + 1, "delta": new.count("\n") - old.count("\n")}  # fmt: skip
+
+
+def ship(cause_id: str, runs: Path, prompt_path: Path | None = None, patches_path: Path | None = None) -> str:
+    """Make the next prompt version: the current version plus this cause's gated patch. Returns its name.
+
+    The whole transaction runs under an flock on <runs>/prompts/.ship.lock, so two ships never take the same
+    version name. Stops with SystemExit unless the latest gate row for the cause says ship for the current patch's
+    attempt, carries the fingerprints of this exact patch and of the exact prompt text the gate replayed (a row
+    without them cannot ship), the patch sits on the current version and its anchor occurs once.
+    """
+    from .fix import PromptPatch, _count_overlapping, apply_patch  # lazy: fix imports this module
+
+    runs, prompt_path = Path(runs), prompt_path or DEFAULT_PROMPT
+    (runs / "prompts").mkdir(parents=True, exist_ok=True)
+    with (runs / "prompts" / ".ship.lock").open("a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            return _ship(cause_id, runs, prompt_path, patches_path, PromptPatch, _count_overlapping, apply_patch)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def _ship(cause_id, runs, prompt_path, patches_path, PromptPatch, _count_overlapping, apply_patch) -> str:
+    patches_file = patches_path or runs / "patches.json"
+    doc = json.loads(patches_file.read_text(encoding="utf-8")) if patches_file.exists() else {}
+    rows = [x for x in doc.get("patches", []) if x.get("cause_id") == cause_id]
+    if not rows:
+        raise SystemExit(f"no patch for {cause_id}; run `pipeline fix` first")
+    patch = PromptPatch.model_validate(rows[-1])
+    gate_row = next((r for r in reversed(read_jsonl(runs / "gates.jsonl")) if r.get("cause_id") == cause_id), None)
+    if gate_row is None or gate_row.get("decision") != "ship":
+        raise SystemExit(
+            f"the latest gate decision for {cause_id} is '{(gate_row or {}).get('decision')}': ship needs 'ship'"
+        )
+    if gate_row.get("attempt", 1) != patch.attempt:
+        raise SystemExit(
+            f"the latest gate row for {cause_id} is for attempt {gate_row.get('attempt', 1)}, "
+            f"the current patch is attempt {patch.attempt}"
+        )
+    text, cur = current_prompt(prompt_path, runs)
+    if any(cause_id in v.get("causes", []) for v in _versions(runs)):
+        raise SystemExit(f"{cause_id} is already shipped")
+    if (patch.base_version or BASE) != cur:
+        raise SystemExit(
+            f"the patch for {cause_id} is on {patch.base_version or BASE}, the current version is {cur}: refix"
+        )
+    if gate_row.get("patch_fp") != patch_fingerprint(patch) or gate_row.get("base_fp") != fingerprint(text):
+        raise SystemExit(
+            f"the gate row for {cause_id} does not match this patch and this prompt text (or has no fingerprints): "
+            "run `pipeline prove` again"
+        )
+    if _count_overlapping(text, patch.old_text) != 1:
+        raise SystemExit(f"the patch for {cause_id} does not fit {cur}: old_text must occur exactly once")
+    name = f"v{len(_versions(runs)) + 1}"
+    _atomic(runs / "prompts" / f"{name}.md", apply_patch(text, patch))
+    entry = {
+        "version": name, "created_ist": now_ist(), "causes": [cause_id], "base": None if cur == BASE else cur,
+        "patch": {"cause_id": cause_id, **edit_span(text, patch.old_text, patch.new_text)},  # exact offsets
+    }  # fmt: skip
+    _atomic(runs / "prompts" / "versions.json", json.dumps({"versions": [*_versions(runs), entry]}, indent=1))
+    if state(cause_id, runs) != "ready_to_ship":  # the log may be missing the gated event: the gate row is the proof
+        emit("gated", cause_id, {"decision": "ship", "attempt": patch.attempt, "source": "gates.jsonl"}, runs=runs)
+    emit("approved", cause_id, {"attempt": patch.attempt}, runs=runs)
+    emit("shipped", cause_id, {"version": name, "attempt": patch.attempt}, runs=runs)
+    return name
+
+
+def patch_fingerprint(patch) -> str:
+    """The exact edit a gate row vouches for: old_text and new_text."""
+    return fingerprint(patch.old_text, patch.new_text)
 
 
 # ---- tickets ----
@@ -346,9 +521,13 @@ def board(runs: Path) -> dict:
         raw = []
     rows = {c["cause_id"]: c for c in raw if isinstance(c, dict) and c.get("cause_id")}
     ids = [*rows, *(e["cause_id"] for e in events(runs) if e["cause_id"] not in rows)]
-    vers = _versions(runs)
+    try:
+        vers, vers_error = _versions(runs), None
+    except SystemExit as e:
+        vers, vers_error = [], str(e)
     return {
         "causes": [cause_view(i, runs, rows.get(i)) for i in dict.fromkeys(ids)],
         "prompt_versions": [{k: v.get(k) for k in ("version", "created_ist", "causes", "base")} for v in vers],
         "current_prompt_version": vers[-1]["version"] if vers else None,
+        **({"prompt_versions_error": vers_error} if vers_error else {}),
     }

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from . import prompt, tracker
+from . import tracker
 from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits, require_fixable
 from .jsonl import read_jsonl
 from .llm import complete_json
@@ -71,6 +71,7 @@ class PromptPatch(BaseModel):
     rationale: str
     risk: str
     attempt: int = 1  # 1 = the first patch for the cause; a refix stores previous + 1
+    base_version: str | None = None  # prompt version the patch was written on (#130); None = an old row: "base"
 
 
 def _numbered(prompt_text: str) -> str:
@@ -460,7 +461,7 @@ def run_fix(
                 tracker.ticket_header("ticket_open") + ticket_text(c, audits, gate_rows, category_of),
             )
     runs = out.parent
-    prompt_text = prompt.load(prompt_path)  # clean main variant: line N is line N of the file
+    prompt_text, version = tracker.current_prompt(prompt_path, runs)  # latest shipped version, else the clean file
     rejected: list[dict] = []
     patches = []
     for cause in to_patch:
@@ -469,6 +470,11 @@ def run_fix(
             continue
         p = propose_patch(cause, examples[cause.cause_id], prompt_text, llm=llm, rejected=rejected)
         if p is not None:
+            p = p.model_copy(update={"base_version": version})
+            why = tracker.overlap_reason(runs, p, [*existing.get("patches", []), *(x.model_dump() for x in patches)])
+            if why:
+                rejected.append({"cause_id": cause.cause_id, "reason": why})
+                continue
             patches.append(p)
     lock_path = out.with_name(out.name + ".lock")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -491,7 +497,8 @@ def run_fix(
         if p.cause_id not in have:
             tracker.emit(
                 "patch_written", p.cause_id,
-                {"attempt": p.attempt, "changed_lines": changed_lines(p.old_text, p.new_text)}, runs=runs,
+                {"attempt": p.attempt, "changed_lines": changed_lines(p.old_text, p.new_text),
+                 "base_version": p.base_version}, runs=runs,
             )  # fmt: skip
     return {
         "patches": result["patches"],
@@ -634,12 +641,15 @@ def run_refix(
         calls = _load_calls(calls_path)  # an absence fault has no quote: the fallback keeps its fix-half examples
         examples = evidence_examples(cause, {a.call_id: a for a in load_audits(Path(audits_path))}, True, calls)
     runs = patches_path.parent
-    prompt_text = prompt.load(prompt_path)
+    prompt_text, version = tracker.current_prompt(prompt_path, runs)
     rejected: list[dict] = []
     new = propose_patch(cause, examples, prompt_text, llm=llm, rejected=rejected, previous=previous)
     if new is None:
         return {"patches": [], "rejected": rejected}
-    new = new.model_copy(update={"attempt": current.attempt + 1})
+    new = new.model_copy(update={"attempt": current.attempt + 1, "base_version": version})
+    why = tracker.overlap_reason(runs, new, doc.get("patches", []))
+    if why:
+        return {"patches": [], "rejected": [{"cause_id": cause_id, "reason": why}]}
     lock_path = patches_path.with_name(patches_path.name + ".lock")
     with lock_path.open("a") as lf:  # the LLM call is slow: re-read under the lock so a parallel run's write is kept
         fcntl.flock(lf, fcntl.LOCK_EX)
@@ -656,6 +666,7 @@ def run_refix(
             fcntl.flock(lf, fcntl.LOCK_UN)
     tracker.emit(
         "patch_written", cause_id,
-        {"attempt": new.attempt, "changed_lines": changed_lines(new.old_text, new.new_text)}, runs=runs,
+        {"attempt": new.attempt, "changed_lines": changed_lines(new.old_text, new.new_text),
+         "base_version": version}, runs=runs,
     )  # fmt: skip
     return {"patches": [new.model_dump()], "rejected": []}

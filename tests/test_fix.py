@@ -150,7 +150,13 @@ def test_run_fix_ranked_only_and_top_n(tmp_path):
         for c in causes:
             if c.name in user:
                 seen.append(c.cause_id)
-        return {"old_text": "line 3: rule text 3", "new_text": "line 3: better", "rationale": "r", "risk": "low"}
+        n = 3 + 2 * len(seen)  # one line per cause: two in-flight patches may not target the same lines (#130)
+        return {
+            "old_text": f"line {n}: rule text {n}",
+            "new_text": f"line {n}: better",
+            "rationale": "r",
+            "risk": "low",
+        }
 
     r = run_fix(cp, pp, op, top_n=2, llm=llm, audits_path=ap)
     doc = json.loads(op.read_text())
