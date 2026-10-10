@@ -222,9 +222,11 @@ def main(argv: list[str] | None = None) -> None:
     f.add_argument("--prompt", default=None, help="the VANI prompt file; not needed with --dry-run")
     f.add_argument("--top", type=int, default=3)
     f.add_argument("--dry-run", action="store_true", help="list patch / ticket / watch per cause; no LLM call")
+    f.add_argument("--holdout", action="store_true", help="write the patch from fix-half calls only")
     rf = sub.add_parser("refix")
     rf.add_argument("--cause", required=True)
     rf.add_argument("--prompt", required=True)
+    rf.add_argument("--holdout", action="store_true", help="fix-half evidence only; no failing replay lines")
     pv = sub.add_parser("prove")
     pv.add_argument("--cause", required=True)
     pv.add_argument("--prompt", required=True)
@@ -235,6 +237,8 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--workers", type=int, default=1)
     pv.add_argument("--dry-run", action="store_true")
     pv.add_argument("--attempt", type=int, default=1)
+    pv.add_argument("--holdout", action="store_true", help="targets from hold-out calls only")
+    pv.add_argument("--screen", action="store_true", help="keep calls OLD fails on 2 of 3 seeds; gate on seeds 3..")
     rc = sub.add_parser("rootcause")
     rc.add_argument("--cause", required=True)
     rc.add_argument("--prompt", default=str(DEFAULT_PROMPT))
@@ -273,6 +277,8 @@ def main(argv: list[str] | None = None) -> None:
         if args.prompt is None and not args.dry_run:
             ap.error("fix needs --prompt unless --dry-run")
         kw = {"prompt_path": Path(args.prompt)} if args.prompt else {}
+        if args.holdout:
+            kw["holdout"] = True
         r = run_fix(causes_path=CAUSES_PATH, out_path=PATCHES_PATH, top_n=args.top, dry_run=args.dry_run, **kw)
         if args.dry_run:
             for x in r["plan"]:
@@ -290,7 +296,7 @@ def main(argv: list[str] | None = None) -> None:
         for cid in r["watched"]:
             print(f"  watch {cid}")
     elif args.cmd == "refix":
-        r = run_refix(args.cause, Path(args.prompt))
+        r = run_refix(args.cause, Path(args.prompt), **({"holdout": True} if args.holdout else {}))
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")
@@ -308,6 +314,8 @@ def main(argv: list[str] | None = None) -> None:
             dry_run=args.dry_run,
             attempt=args.attempt,
             causes_path=CAUSES_PATH,
+            **({"holdout": True} if args.holdout else {}),
+            **({"screen": True} if args.screen else {}),
         )
         print("\n".join(describe(out)))
     elif args.cmd == "rootcause":

@@ -19,6 +19,7 @@ from .issue import AUDITS_PATH, CAUSES_PATH, FIXABLE_STATUSES, load_audits, requ
 from .jsonl import read_jsonl
 from .llm import complete_json
 from .models import AuditRecord, Cause
+from .split import split_half
 
 ROOT = Path(__file__).resolve().parents[2]
 PATCHES_PATH = ROOT / "runs" / "patches.json"
@@ -139,13 +140,16 @@ def _strip_new_text_numbers(text: str) -> str | None:
     return _strip_line_numbers(text) if numbered == len(lines) else None
 
 
-def evidence_examples(cause: Cause, audits: dict[str, AuditRecord]) -> list[str]:
+def evidence_examples(cause: Cause, audits: dict[str, AuditRecord], holdout: bool = False) -> list[str]:
     """Up to MAX_EXAMPLES one-line evidence quotes of the cause's parameter, one per member call.
 
-    Fatal calls come first. Each quote is joined onto one line and cut to EXAMPLE_CHARS.
+    Fatal calls come first. Each quote is joined onto one line and cut to EXAMPLE_CHARS. With `holdout` only members
+    in the fix half (see split_half) give a quote, so the hold-out half stays unseen by the patch writer.
     """
     out: list[str] = []
     for call_id in [*cause.fatal_calls, *cause.nonfatal_calls]:
+        if holdout and split_half(call_id) != "fix":
+            continue
         audit = audits.get(call_id)
         if audit is None:
             continue
@@ -372,6 +376,7 @@ def run_fix(
     tickets_dir: Path = TICKETS_DIR,
     category_of=None,
     dry_run: bool = False,
+    holdout: bool = False,
 ) -> dict:
     """Route each cause (see `route`): patch the first top_n patch causes, write a ticket per tool or data cause.
 
@@ -388,7 +393,7 @@ def run_fix(
     for c in causes:
         action, why = route(c)
         if action == "patch":
-            examples[c.cause_id] = evidence_examples(c, audits)
+            examples[c.cause_id] = evidence_examples(c, audits, holdout)
             if not examples[c.cause_id]:  # no quote to anchor a prompt edit on: do not spend an LLM call on a guess
                 action, why = "watch", "no usable evidence: no member call has a failing quote in the audits"
         routed.append((c, action, why))
@@ -515,6 +520,8 @@ def run_refix(
     gates_path: Path = GATES_PATH,
     replays_path: Path = REPLAYS_PATH,
     llm=complete_json,
+    holdout: bool = False,
+    audits_path: Path = AUDITS_PATH,
 ) -> dict:
     """Write a second patch for a cause whose patch the gate rejected, from what the replays showed.
 
@@ -524,6 +531,9 @@ def run_refix(
     patch moves to `history` (with its gate decision) and the new patch becomes current with attempt + 1. A
     refused proposal writes nothing and comes back in `rejected`. Returns {"patches": [new patch] or [],
     "rejected": [...]}.
+
+    With `holdout` the prompt gets fix-half evidence quotes (see evidence_examples) and no failing replay lines,
+    because those replays are of the hold-out calls the patch is proven on.
     """
     require_not_ticket(cause_id, Path(causes_path))  # first: a tool or data cause takes no patch, so say so
     patches_path = Path(patches_path)
@@ -563,11 +573,18 @@ def run_refix(
         "p_value": _finite(gate_row.get("p_value")),
         "old_fail_rate": _finite(gate_row.get("old_fail_rate")),
         "new_fail_rate": _finite(gate_row.get("new_fail_rate")),
-        "failing_replays": failing_replay_lines(read_jsonl(replays_path), cause_id, cause.parameter, current.attempt),
+        "failing_replays": (
+            []
+            if holdout
+            else failing_replay_lines(read_jsonl(replays_path), cause_id, cause.parameter, current.attempt)
+        ),
     }
+    examples: list[str] = []
+    if holdout:
+        examples = evidence_examples(cause, {a.call_id: a for a in load_audits(Path(audits_path))}, holdout=True)
     prompt_text = prompt.load(prompt_path)
     rejected: list[dict] = []
-    new = propose_patch(cause, [], prompt_text, llm=llm, rejected=rejected, previous=previous)
+    new = propose_patch(cause, examples, prompt_text, llm=llm, rejected=rejected, previous=previous)
     if new is None:
         return {"patches": [], "rejected": rejected}
     new = new.model_copy(update={"attempt": current.attempt + 1})

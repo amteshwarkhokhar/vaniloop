@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -5,9 +6,11 @@ import pytest
 from vaniloop.dashboard import load_patches_doc
 from vaniloop.fix import (
     MAX_ATTEMPTS,
+    MAX_EXAMPLES,
     PromptPatch,
     _retry_kwargs,
     apply_patch,
+    evidence_examples,
     propose_patch,
     route,
     run_fix,
@@ -15,6 +18,7 @@ from vaniloop.fix import (
 )
 from vaniloop.llm import complete_json
 from vaniloop.models import AuditRecord, Cause, Evidence, Finding
+from vaniloop.split import split_half
 
 PROMPT = "\n".join(f"line {i}: rule text {i}" for i in range(1, 31))
 
@@ -1135,3 +1139,55 @@ def test_refix_refuses_a_ticket_cause_before_any_llm_call(tmp_path):
     with pytest.raises(SystemExit, match="ticket"):
         run_refix("cause_qty_probing", llm=_boom, **kw)
     assert json.loads(kw["patches_path"].read_text())["patches"][0]["new_text"] == FIRST_NEW
+
+
+def halves(n=24):
+    """Synthetic call ids split by split_half: (fix ids, hold-out ids)."""
+    ids = [f"member_{i}" for i in range(n)]
+    return [i for i in ids if split_half(i) == "fix"], [i for i in ids if split_half(i) == "holdout"]
+
+
+def test_split_half_is_deterministic_and_close_to_even():
+    """split_half must give the same half for an id every time and put 45-55% of ids in the fix half. A random or
+    skewed split would make two runs write and prove a patch on different calls, or starve one half."""
+    ids = [f"synthetic_call_{i}" for i in range(1000)]
+    first = [split_half(i) for i in ids]
+    assert first == [split_half(i) for i in ids] and set(first) == {"fix", "holdout"}
+    assert 0.45 <= first.count("fix") / len(ids) <= 0.55
+    assert split_half("a") == ("holdout" if hashlib.sha256(b"a").digest()[0] % 2 else "fix")  # the stated rule
+
+
+def test_holdout_evidence_examples_come_only_from_the_fix_half():
+    """With holdout, evidence_examples must quote only fix-half members; without it every member still counts. A
+    hold-out quote in the patch prompt would let the patch see the calls it is later proven on."""
+    fix_ids, hold_ids = halves()
+    c = cause().model_copy(update={"fatal_calls": [*hold_ids, *fix_ids]})  # hold-out members first
+    audits = {i: audit(i, c.parameter, [f"quote {i}"], status="Fatal") for i in [*fix_ids, *hold_ids]}
+    assert evidence_examples(c, audits, holdout=True) == [f"quote {i}" for i in fix_ids][:MAX_EXAMPLES]
+    assert evidence_examples(c, audits)[0] == f"quote {hold_ids[0]}"  # the default is unchanged
+
+
+def test_run_fix_and_run_refix_holdout_send_only_fix_half_evidence(tmp_path):
+    """--holdout must reach the LLM prompt of fix and of refix as fix-half quotes only, and refix must then drop the
+    failing replay lines (they are replays of hold-out calls). Without this a flagged run leaks the hold-out half."""
+    fix_ids, hold_ids = halves()
+    c = cause().model_copy(update={"fatal_calls": [hold_ids[0], fix_ids[0]]})
+    audits = [
+        audit(hold_ids[0], c.parameter, ["HOLDOUT-QUOTE"], "Fatal"),
+        audit(fix_ids[0], c.parameter, ["FIX-QUOTE"], "Fatal"),
+    ]
+    cp, pp, ap, op = write_run(tmp_path, PROMPT.encode(), [c], audits)
+    seen: list = []
+    run_fix(
+        cp, pp, op, llm=stub("line 10: rule text 10", "line 10: rule text 10 X", seen), audits_path=ap, holdout=True
+    )
+    assert "FIX-QUOTE" in seen[0][1] and "HOLDOUT-QUOTE" not in seen[0][1]
+
+    (tmp_path / "r").mkdir()
+    kw = refix_files(tmp_path / "r")
+    kw["causes_path"].write_text(json.dumps({"causes": [c.model_dump()]}))
+    seen = []
+    llm = stub("line 3: rule text 3", "line 3: other rule", seen)
+    run_refix("cause_qty_probing", llm=llm, holdout=True, audits_path=ap, **kw)
+    data = json.loads(seen[0][1].split("<data>\n")[1].split("\n</data>")[0])
+    assert data["examples"] == ["FIX-QUOTE"] and data["previous_attempt"]["failing_replays"] == []

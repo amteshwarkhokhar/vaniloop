@@ -83,6 +83,12 @@ class GateResult(BaseModel):
     n_calls: int  # distinct target calls covered by old and new
     k_seeds: int
     reason: str
+    # Set by prove only with --holdout / --screen (#106); old rows without them still load.
+    holdout: bool | None = None  # targets came from the hold-out half of the calls
+    screened: int | None = None  # candidates replayed by the reproduction screen
+    kept: int | None = None  # candidates the screen kept as targets
+    not_reproduced: list[str] | None = None  # screened candidates dropped because OLD failed on fewer than 2 of 3 seeds
+    seed_base: int | None = None  # the gate replayed seeds seed_base..seed_base+K-1
 
 
 def min_achievable_p(n: int, k: int) -> float:
@@ -403,8 +409,12 @@ def run_gate(
     attempt: int = 1,
     alpha: float = DEFAULT_ALPHA,
     max_new_fail_rate: float = DEFAULT_MAX_NEW_FAIL_RATE,
+    seed_base: int = 0,
 ) -> GateResult:
     """Replay the target calls and guards, then decide.
+
+    With `seed_base` b the replay function gets seeds b..b+K-1 (the guard re-check seeds shift too), and the
+    trials keep the seeds 0..K-1 relative to b, so the decision logic does not change. The default 0 is today's run.
 
     A target call is a call that failed with the old prompt; a guard is a call that passed before. It
     breaks if a replay with the new prompt gets a Fatal verdict. An invalid_output replay counts as a
@@ -439,7 +449,7 @@ def run_gate(
 
     def run_one(item: Item, prompt: str, seed: int, which: Literal["old", "new"], target: bool = True) -> Trial:
         call, ledger, fork = item
-        res = replay_fn(call, ledger, fork, prompt, seed)
+        res = replay_fn(call, ledger, fork, prompt, seed + seed_base)
         replayed[(call.call_id, seed, which)] = res
         return _trial(call.call_id, which, seed, res, audit_fn, parameter, target)
 
