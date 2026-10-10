@@ -8,21 +8,22 @@
   };
   const status = (s) => V.own(STATUS, s) || String(s || "").replace(/_/g, " ");
   const list = (x) => (Array.isArray(x) ? x : []);
+  const idl = (x) => list(x).filter((s) => typeof s === "string" && s); // member ids: non-empty strings only
   const seg = (n, max, t) => (n ? `<i class="t-${esc(t)}" style="width:${((100 * n) / max).toFixed(2)}%"></i>` : "");
   const link = (id, v) =>
     `<a class="mlink" href="#/call/${encodeURIComponent(id)}"><span class="dot t-${esc(V.tone(v))}"></span><span class="mono">${esc(id)}</span></a>`;
 
   function row(c, i, max) {
-    const fatal = list(c.fatal_calls).length;
-    const non = list(c.nonfatal_calls).length;
-    const sym = list(c.symptom_calls);
+    const fatal = idl(c.fatal_calls).length;
+    const non = idl(c.nonfatal_calls).length;
+    const sym = idl(c.symptom_calls);
     const n = fatal + non;
     const owner = c.owner
       ? `<span class="chip owner">${esc(c.owner)}</span>${c.owner_evidence ? `<span class="ev" title="${esc(c.owner_evidence)}">${esc(c.owner_evidence)}</span>` : ""}`
       : "";
     const calls = [
-      ...list(c.fatal_calls).map((id) => link(id, "Fatal")),
-      ...list(c.nonfatal_calls).map((id) => link(id, "NonFatal")),
+      ...idl(c.fatal_calls).map((id) => link(id, "Fatal")),
+      ...idl(c.nonfatal_calls).map((id) => link(id, "NonFatal")),
       ...sym.map((id) => link(id, "NeedsReview")),
     ].join("");
     const pid = `cause-${i}`;
@@ -53,8 +54,8 @@
         el.innerHTML = `<h1 class="view-title">Causes</h1><p class="empty">No causes yet. Run <code>uv run python -m vaniloop.pipeline issues</code> to group faults into causes.</p>`;
         return;
       }
-      const ids = new Set(causes.flatMap((c) => [...list(c.fatal_calls), ...list(c.nonfatal_calls)]));
-      const max = Math.max(1, ...causes.map((c) => list(c.fatal_calls).length + list(c.nonfatal_calls).length));
+      const ids = new Set(causes.flatMap((c) => [...idl(c.fatal_calls), ...idl(c.nonfatal_calls)]));
+      const max = Math.max(1, ...causes.map((c) => idl(c.fatal_calls).length + idl(c.nonfatal_calls).length));
       el.innerHTML = `
         <h1 class="view-title"><em>${causes.length}</em> ${causes.length === 1 ? "cause" : "causes"} found in <em>${ids.size}</em> ${ids.size === 1 ? "call" : "calls"}.</h1>
         <p class="lede">In rank order. Open a cause to see its calls.</p>
