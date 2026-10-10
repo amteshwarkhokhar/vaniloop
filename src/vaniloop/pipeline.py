@@ -13,6 +13,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from . import rubric
 from .categorize import CATEGORIES_PATH, run_categorize
 from .fix import GATES_PATH, PATCHES_PATH, REPLAYS_PATH, TICKETS_DIR, run_fix, run_refix
 from .golden import (
@@ -386,7 +387,6 @@ def run_submit(runs: Path, inbox: Path, calls: list[str] | None = None, from_run
     ids = list(dict.fromkeys(r.call_id for r in records))
     if ids:
         _upsert_calls(p["calls"], records)
-        # HOOK(#125): rubric.apply runs once at the start of main(), so audit and regrade below use the chosen rubric.
         for name, run in (
             (
                 "audit",
@@ -534,6 +534,10 @@ def main(argv: list[str] | None = None) -> None:
     def extra(**names):  # path options a stage gets only under --runs, so a run without it passes what it always did
         return {k: P[v] for k, v in names.items()} if args.runs else {}
 
+    try:  # overrides from VANILOOP_RUBRIC, else <--runs or runs/>/rubric.json; none when the file is absent
+        rubric.apply(rubric.path(Path(args.runs) if args.runs else None))
+    except rubric.RubricError as e:
+        raise SystemExit(f"rubric: {e}") from None
     ids = [c for c in (getattr(args, "calls", None) or "").split(",") if c]
     if args.cmd == "submit":
         if not args.runs:
