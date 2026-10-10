@@ -120,9 +120,12 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
 
 
 def fingerprint(call: CallRecord, led: Ledger) -> str:
-    """sha256 of what a Jev judgement depends on: the state, the questions, the model and JEV_VERSION."""
+    """sha256 of what a judged row depends on: the state, the questions, the model, JEV_VERSION and the source
+    ledger (the row copies its structural fields, so a changed Gemini field must redo the row)."""
     raw = json.dumps(
-        [_state(call), build_questions(call, led), jev_model(), JEV_VERSION], sort_keys=True, ensure_ascii=False
+        [_state(call), build_questions(call, led), jev_model(), JEV_VERSION, led.model_dump(mode="json")],
+        sort_keys=True,
+        ensure_ascii=False,
     )
     return hashlib.sha256(raw.encode()).hexdigest()
 

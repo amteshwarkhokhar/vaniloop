@@ -424,3 +424,39 @@ def test_agreement_excludes_missing_frustrated():
     b["user_turns"][1]["frustrated"] = 0.9
     row = next(r for r in jev.judge_agreement([a], [b]) if r["field"].startswith("frustrated"))
     assert (row["n"], row["agree"], row["none_a"]) == (1, 1, 1)
+
+
+def test_judge_redoes_a_row_whose_gemini_ledger_changed(transport, tmp_path):
+    """Protects resume: the judged row copies Gemini's structural fields, so a changed source ledger must redo it.
+
+    If it failed, a corrected buyer quantity in ledgers.jsonl would keep the old value in ledgers_jev.jsonl and the
+    regrade would grade stale structure (Codex round 2 on #112).
+    """
+    calls, ledgers, out = tmp_path / "calls.jsonl", tmp_path / "ledgers.jsonl", tmp_path / "ledgers_jev.jsonl"
+    calls.write_text(json.dumps(_call().model_dump(mode="json")) + "\n")
+    led = _ledger()
+    ledgers.write_text(json.dumps(led.model_dump(mode="json")) + "\n")
+    kw = dict(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=tmp_path / "e.jsonl", workers=1)
+    pipeline.run_judge(**kw)
+    changed = led.model_copy(update={"buyer_facts": {**led.buyer_facts, "quantity": "10"}})
+    ledgers.write_text(json.dumps(changed.model_dump(mode="json")) + "\n")
+    assert pipeline.run_judge(**kw) == {"judged": 1, "skipped": 0, "errors": 0}
+
+
+def test_judge_skips_a_malformed_ledger_row_and_goes_on(transport, tmp_path):
+    """Protects the batch: one ledger row that fails validation goes to the errors file and the others are judged.
+
+    If it failed, one bad row (for example scope "invalid") would stop the whole judge run before any call.
+    """
+    good, bad = _ledger(), {**_ledger().model_dump(mode="json"), "call_id": "bad_row", "scope": "invalid"}
+    calls, ledgers, out = tmp_path / "calls.jsonl", tmp_path / "ledgers.jsonl", tmp_path / "ledgers_jev.jsonl"
+    calls.write_text(
+        json.dumps(_call().model_dump(mode="json"))
+        + "\n"
+        + json.dumps({**_call().model_dump(mode="json"), "call_id": "bad_row"})
+        + "\n"
+    )
+    ledgers.write_text(json.dumps(good.model_dump(mode="json")) + "\n" + json.dumps(bad) + "\n")
+    errs = tmp_path / "e.jsonl"
+    r = pipeline.run_judge(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=errs, workers=1)
+    assert r == {"judged": 1, "skipped": 0, "errors": 1} and "bad_row" in errs.read_text()

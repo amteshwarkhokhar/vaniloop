@@ -139,11 +139,18 @@ def run_judge(
     def fp(r: dict) -> str:
         return fingerprint(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
 
-    keep = [r for r in ledgers if r.get("call_id") in calls]
-    done = set() if refresh else {r["call_id"] for r in keep if stored.get(r["call_id"]) == fp(r)}  # same fingerprint
-    todo = [r for r in keep if r["call_id"] not in done]
     lock = threading.Lock()
-    errors = 0
+    errors = invalid = 0
+    done: set[str] = set()
+    todo = []
+    for r in (r for r in ledgers if r.get("call_id") in calls):
+        try:  # a malformed row goes to the errors file; it must not stop the run
+            same = not refresh and stored.get(r["call_id"]) == fp(r)
+        except Exception as e:
+            invalid += 1
+            append_jsonl(errors_path, [{"call_id": r["call_id"], "error": f"jev invalid row {type(e).__name__}"}])
+            continue
+        (done.add(r["call_id"]) if same else todo.append(r))
 
     def work(r: dict) -> dict:
         led = judge_ledger(CallRecord.model_validate(calls[r["call_id"]]), Ledger.model_validate(r))
@@ -163,7 +170,7 @@ def run_judge(
                 continue
             with lock:
                 append_jsonl(out_path, [led])
-    return {"judged": len(todo) - errors, "skipped": len(done), "errors": errors}
+    return {"judged": len(todo) - errors, "skipped": len(done), "errors": errors + invalid}
 
 
 def describe_agreement(rows: list[dict]) -> str:
