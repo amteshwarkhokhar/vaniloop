@@ -416,6 +416,37 @@ MAX_FILES = 20
 MAX_FILE_BYTES = 25 * 1024 * 1024
 
 
+ABS_PATH_RE = re.compile(r"(?<![\w.:/-])/(?:[^\s:'\"/]+/)*([^\s:'\"/]*)")
+
+
+def clean_text(text) -> str:
+    """Hide secrets, and cut every absolute path to its last part. Used on any text an API returns from files."""
+    return ABS_PATH_RE.sub(lambda m: m.group(1) or "", mask(str(text)))[:300]
+
+
+def _sub_base(d: Path, sid) -> Path | None:
+    """<data>/console/submissions/<sid> when sid is well formed, no path part is a symlink and it is a folder
+    inside the data folder. Otherwise None."""
+    if not isinstance(sid, str) or not SID_RE.match(sid):
+        return None
+    cur = Path(d)
+    for part in ("console", "submissions", sid):
+        cur = cur / part
+        if cur.is_symlink():
+            return None
+    if not cur.is_dir() or not cur.resolve().is_relative_to(Path(d).resolve() / "console" / "submissions"):
+        return None
+    return cur
+
+
+def _sub_file(base: Path, name: str) -> Path | None:
+    """A regular file directly inside the submission folder: not a symlink, resolved inside it."""
+    p = base / name
+    if p.is_symlink() or not p.is_file() or not p.resolve().is_relative_to(base.resolve()):
+        return None
+    return p
+
+
 def create_submission(d: Path, body: dict) -> dict:
     """POST /api/submit: check every file and call id, then write the files to console/submissions/<sid>/inbox."""
     files, ids = body.get("files") or [], body.get("call_ids") or []
@@ -443,10 +474,20 @@ def create_submission(d: Path, body: dict) -> dict:
         seen.add(name)
         decoded.append((name, raw))
     sid = "s" + secrets.token_hex(6)
-    inbox = d / "console" / "submissions" / sid / "inbox"
-    inbox.mkdir(parents=True)
+    root = Path(d)
+    for part in ("console", "submissions"):
+        root = root / part
+        if root.is_symlink():
+            raise ConsoleError(400, {"error": "unsafe folder", "field": "files"})
+        root.mkdir(exist_ok=True)
+    if not root.resolve().is_relative_to(Path(d).resolve()):
+        raise ConsoleError(400, {"error": "unsafe folder", "field": "files"})
+    (root / sid).mkdir(exist_ok=False)
+    inbox = root / sid / "inbox"
+    inbox.mkdir(exist_ok=False)
     for name, raw in decoded:
-        (inbox / name).write_bytes(raw)
+        with open(inbox / name, "xb") as f:  # exclusive create: never follows or replaces a link
+            f.write(raw)
     out = [{"name": n, "kind": "mp3" if n.endswith(".mp3") else "transcript"} for n, _ in decoded]
     meta = {"submission_id": sid, "created_ist": now_ist(), "created_utc": datetime.now(UTC).isoformat()}
     (inbox.parent / "meta.json").write_text(json.dumps({**meta, "files": out, "call_ids": ids}), encoding="utf-8")
@@ -454,10 +495,10 @@ def create_submission(d: Path, body: dict) -> dict:
 
 
 def _submission_meta(d: Path, sid: str) -> dict | None:
-    if not isinstance(sid, str) or not SID_RE.match(sid):
-        return None
+    base = _sub_base(d, sid)
+    meta = base and _sub_file(base, "meta.json")
     try:
-        return json.loads((d / "console" / "submissions" / sid / "meta.json").read_text(encoding="utf-8"))
+        return json.loads(meta.read_text(encoding="utf-8")) if meta else None
     except (OSError, ValueError):
         return None
 
@@ -480,24 +521,27 @@ def submission(d: Path, sid: str, runner: JobRunner) -> dict | None:
     meta = _submission_meta(d, sid)
     if meta is None:
         return None
-    base = d / "console" / "submissions" / sid
+    base = _sub_base(d, sid)
     uploaded = {Path(f["name"]).stem for f in meta.get("files", [])}
     calls = []
-    for a in read_jsonl(base / "audits.jsonl"):
+    for a in read_jsonl(_sub_file(base, "audits.jsonl")):
         if isinstance(a, dict) and isinstance(a.get("call_id"), str):
             findings = [
-                {k: f.get(k) for k in ("parameter", "status", "reason", "onset_turn")}
+                {
+                    k: clean_text(f.get(k)) if k == "reason" and f.get(k) else f.get(k)
+                    for k in ("parameter", "status", "reason", "onset_turn")
+                }
                 for f in a.get("findings") or []
                 if isinstance(f, dict)
             ]
             calls.append({"call_id": a["call_id"], "source": "upload" if a["call_id"] in uploaded else "existing",
                           "verdict": a.get("verdict"), "scope": a.get("scope"), "findings": findings,
                           "flags": a.get("flags") or [], "error": None})  # fmt: skip
-    for e in read_jsonl(base / "errors.jsonl"):
+    for e in read_jsonl(_sub_file(base, "errors.jsonl")):
         if isinstance(e, dict) and isinstance(e.get("call_id"), str):
             calls.append({"call_id": e["call_id"], "source": "upload" if e["call_id"] in uploaded else "existing",
                           "verdict": None, "scope": None, "findings": [], "flags": [],
-                          "error": str(e.get("error", "error"))[:300]})  # fmt: skip
+                          "error": clean_text(e.get("error", "error"))})  # fmt: skip
     busy = runner.get(runner.busy_job_id() or "")
     running = bool(busy and busy.get("stage") == "submit" and busy.get("args", {}).get("submission_id") == sid)
     return {"submission_id": sid, "status": "running" if running else "done" if calls else "pending", "calls": calls}

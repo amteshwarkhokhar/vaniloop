@@ -162,3 +162,35 @@ def test_tune_passes_through_and_maps_errors(srv, data, monkeypatch):  # noqa: F
 
     monkeypatch.setattr(tune, "score", lambda d, t: (_ for _ in ()).throw(tune.NoRaw()))
     assert call(srv, "POST", "/api/tune", body)[0] == 409
+
+
+def test_symlinked_submission_folders_cannot_escape(srv, data, tmp_path_factory):  # noqa: F811
+    """Protects the data folder: a symlinked console/ or submissions/ folder must make POST /api/submit refuse
+    and write nothing outside, and GET must not read through a symlinked submission or file."""
+    outside = tmp_path_factory.mktemp("outside")
+    (data / "console").symlink_to(outside, target_is_directory=True)
+    status, _ = call(srv, "POST", "/api/submit", {"files": [{"name": "a.mp3", "data_b64": b64()}]})
+    assert status == 400 and list(outside.iterdir()) == []
+    (data / "console").unlink()
+    (data / "console" / "submissions").mkdir(parents=True)
+    (outside / "meta.json").write_text(json.dumps({"submission_id": "sx", "files": [], "call_ids": []}))
+    (data / "console" / "submissions" / "sx").symlink_to(outside, target_is_directory=True)
+    assert call(srv, "GET", "/api/submit/sx")[0] == 404
+    assert call(srv, "GET", "/api/submit")[1] == {"submissions": []}
+    _, made = call(srv, "POST", "/api/submit", {"call_ids": ["c1"]})
+    base = data / "console" / "submissions" / made["submission_id"]
+    (outside / "audits.jsonl").write_text(json.dumps({"call_id": "zz", "verdict": "Fatal"}) + "\n")
+    (base / "audits.jsonl").symlink_to(outside / "audits.jsonl")
+    assert call(srv, "GET", f"/api/submit/{made['submission_id']}")[1]["calls"] == []
+
+
+def test_submission_errors_hide_paths_and_secrets(srv, data):  # noqa: F811
+    """Protects secrets and the file layout: an error text with an absolute path and an api_key must come back
+    masked, with the path cut to its file name."""
+    _, made = call(srv, "POST", "/api/submit", {"call_ids": ["c1"]})
+    base = data / "console" / "submissions" / made["submission_id"]
+    err = "cannot read /Users/someone/secret dir/x.mp3 api_key=abc123 failed at /tmp/a/b.json"
+    (base / "errors.jsonl").write_text(json.dumps({"call_id": "c1", "error": err}) + "\n")
+    text = call(srv, "GET", f"/api/submit/{made['submission_id']}")[1]["calls"][0]["error"]
+    assert "/Users" not in text and "/tmp" not in text and "abc123" not in text
+    assert "b.json" in text and "***" in text
