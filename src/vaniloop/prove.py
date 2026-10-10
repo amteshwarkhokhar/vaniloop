@@ -43,6 +43,7 @@ GATES_PATH = RUNS / "gates.jsonl"
 REPLAYS_PATH = RUNS / "replays.jsonl"
 
 PICK_SEED = 0
+RELEASE_TARGETS = 4  # hold-out target calls per shipped cause in release-check
 CALL_VALUES_HEADING = "Call values"
 SCREEN_SEEDS = 3  # the screen replays OLD on seeds 0..2; the gate then starts at seed_base = SCREEN_SEEDS
 SCREEN_MIN_FAILS = 2  # a call is kept when OLD fails the parameter on at least this many screen seeds
@@ -672,6 +673,139 @@ def run_prove(
     if screen:
         out.screened, out.kept = result.screened, result.kept
         out.not_reproduced, out.screen_cost_usd = result.not_reproduced or [], screen_cost
+    return out
+
+
+def run_release_check(
+    prompt_path: Path,
+    guards: int = 10,
+    per_cause: int = RELEASE_TARGETS,
+    max_turns: int = 12,
+    dry_run: bool = False,
+    calls_path: Path = CALLS_PATH,
+    ledgers_path: Path = LEDGERS_PATH,
+    audits_path: Path = AUDITS_PATH,
+    patches_path: Path = PATCHES_PATH,
+    causes_path: Path | None = None,
+    replay_fn: ReplayFn | None = None,
+    audit_fn: AuditFn | None = None,
+) -> dict:
+    """Replay the current prompt version (every shipped patch together) against the clean base, K=1, seed 0.
+
+    Items: the Pass guard calls and up to `per_cause` hold-out target calls per shipped cause (root calls only).
+    A new Fatal is a Fatal on a parameter under the bundle that the base replay of the same call does not show.
+    A cause fails when a new Fatal appears on any item (the bundle is to blame, so every shipped cause fails) or
+    when its own targets fail again: the bundle fail rate is above gate.DEFAULT_MAX_NEW_FAIL_RATE. It records a
+    release_check event per shipped cause and, on a fail, a regressed event. It never ships anything. A dry run
+    makes no LLM call and writes nothing.
+
+    Unresolved evidence is never hidden. A trial without conclusive evidence (same meaning as in the gate) is listed
+    in result["unresolved"], per arm, with the call, the role and how the replay ended, so it can be rerun. Any
+    unresolved trial makes a result "inconclusive" instead of "ok" (a guard's trial counts for every cause, a
+    target's for its own cause). A fail needs resolved evidence and still wins: it marks the causes regressed. An
+    inconclusive result marks nothing. Returns {"status", "ok", "causes", "new_fatals", "unresolved", "targets",
+    "guards", "replays"}; ok is true only for status "ok".
+    """
+    runs = Path(patches_path).parent
+    shipped = [c for v in tracker._versions(runs) for c in v.get("causes", [])]
+    if not shipped:
+        raise SystemExit("no shipped prompt version: nothing to release-check")
+    causes_path = causes_path or runs / "causes.json"
+    base = prompt.load(prompt_path)
+    bundle, version = tracker.current_prompt(prompt_path, runs)
+    calls = {
+        r["call_id"]: CallRecord.model_validate(r) for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)
+    }
+    ledgers = {r["call_id"]: Ledger.model_validate(r) for r in dedupe_by_call_id(read_jsonl(ledgers_path))}
+    audits = {a.call_id: a for a in load_audits(Path(audits_path))}
+    targets: dict[str, list[Item]] = {}
+    candidates: set[str] = set()
+    ticket_calls: set[str] = set()
+    for cid in shipped:
+        roots, ticket_calls = root_sets(cid, causes_path)
+        targets[cid], seen = select_targets(
+            calls, ledgers, audits, cid.removeprefix("cause_"), per_cause, None, None, True, quiet=True, roots=roots
+        )
+        candidates |= seen
+    guard_items = select_guards(calls, ledgers, audits, candidates, guards, ticket_calls)
+    n_items = sum(map(len, targets.values())) + len(guard_items)
+    out = {
+        "ok": None, "version": version, "causes": {}, "new_fatals": [], "guards": len(guard_items),
+        "targets": {c: len(t) for c, t in targets.items()}, "replays": 0, "max_replays": 2 * n_items,
+    }  # fmt: skip
+    if dry_run:
+        return out
+    replay_fn, audit_fn = replay_fn or real_replay_fn(max_turns), audit_fn or real_audit_fn
+    unresolved: list[dict] = []  # every trial without conclusive evidence: rerun these
+
+    def arm(item: Item, text: str, label: str, role: str, parameter: str | None) -> tuple[set[str], bool, bool]:
+        """Replay and audit one call under one prompt. Returns (Fatal parameters, failed the cause, resolved).
+
+        A target is judged by gate._trial, so unresolved means the same as in the gate: invalid_output, NeedsReview,
+        no finding, Unknown, NotApplicable, or a cause finding that does not start at or after the fork. A guard is
+        unresolved on invalid_output or NeedsReview.
+        """
+        res = replay_fn(*item, text, 0)
+        out["replays"] += 1
+        seen: list[AuditRecord] = []
+        if parameter:
+            trial = gate._trial(
+                item[0].call_id,
+                "new" if label == "bundle" else "old",
+                0,
+                res,
+                lambda c: seen.append(audit_fn(c)) or seen[-1],
+                parameter,
+            )
+            bad, failed = trial.unresolved, trial.failed and not trial.unresolved
+        else:
+            audit = audit_fn(res.call)
+            seen.append(audit)
+            bad, failed = res.ended_by == "invalid_output" or audit.verdict == "NeedsReview", False
+        if bad:
+            unresolved.append({"call_id": item[0].call_id, "arm": label, "role": role, "ended_by": res.ended_by})
+        return {f.parameter for f in seen[0].findings if f.status == "Fatal"}, failed, not bad
+
+    def check(item: Item, role: str, parameter: str | None) -> tuple[bool, bool]:
+        """(the bundle failed the cause on a resolved trial, both arms resolved). New Fatals count only when both
+        arms are resolved: a Fatal next to missing evidence is not proof."""
+        old_fatal, _, old_ok = arm(item, base, "base", role, parameter)
+        new_fatal, failed, new_ok = arm(item, bundle, "bundle", role, parameter)
+        if old_ok and new_ok:
+            out["new_fatals"] += [{"call_id": item[0].call_id, "parameter": p} for p in sorted(new_fatal - old_fatal)]
+        return failed, new_ok
+
+    for item in guard_items:
+        check(item, "guard", None)
+    guard_unresolved = len(unresolved)
+    for cid in shipped:
+        mark = len(unresolved)
+        results = [check(item, "target", cid.removeprefix("cause_")) for item in targets[cid]]
+        resolved = [failed for failed, ok in results if ok]
+        out["causes"][cid] = {
+            "targets": len(results), "resolved_targets": len(resolved), "target_fails": sum(resolved),
+            "unresolved_trials": len(unresolved) - mark + guard_unresolved,
+        }  # fmt: skip
+    for r in out["causes"].values():
+        r["targets_fail_again"] = (
+            bool(r["resolved_targets"]) and r["target_fails"] / r["resolved_targets"] > gate.DEFAULT_MAX_NEW_FAIL_RATE
+        )
+        r["status"] = "fail" if r["targets_fail_again"] or out["new_fatals"] else (
+            "inconclusive" if r["unresolved_trials"] else "ok"
+        )  # fmt: skip
+        r["ok"] = r["status"] == "ok"
+    out["unresolved"] = {
+        "base": sum(u["arm"] == "base" for u in unresolved), "bundle": sum(u["arm"] == "bundle" for u in unresolved),
+        "trials": unresolved,
+    }  # fmt: skip
+    statuses = {r["status"] for r in out["causes"].values()}
+    out["status"] = "fail" if "fail" in statuses else "inconclusive" if "inconclusive" in statuses else "ok"
+    out["ok"] = out["status"] == "ok"
+    for cid, r in out["causes"].items():
+        detail = {**r, "version": version, "new_fatals": out["new_fatals"], "unresolved": unresolved}
+        tracker.emit("release_check", cid, detail, runs=runs)
+        if r["status"] == "fail":  # an inconclusive result marks nothing
+            tracker.emit("regressed", cid, {"note": "release check failed", "version": version}, runs=runs)
     return out
 
 
