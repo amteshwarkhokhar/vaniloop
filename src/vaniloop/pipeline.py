@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -226,11 +227,14 @@ def run_grade_sample(
     return ids
 
 
-def run_regrade(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AUDITS_PATH) -> dict:
+def run_regrade(
+    calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AUDITS_PATH, only: set[str] | None = None
+) -> dict:
     """Re-apply the Python rules to saved ledgers and rewrite audits.jsonl. No LLM call, no cost.
 
     Calibration changes rules, not labels, so every rule change can be re-scored on all audited calls in
     seconds. Calls without a saved ledger are left out. The file is replaced atomically under the audit lock.
+    With `only`, just those call ids are regraded and every other audit row stays.
     """
     lock_path = Path(audits_path).parent / ".audit.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -242,6 +246,8 @@ def run_regrade(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AU
         try:
             calls = {r["call_id"]: r for r in dedupe_by_call_id(read_jsonl(calls_path), last_wins=False)}
             ledgers = dedupe_by_call_id(read_jsonl(ledgers_path), last_wins=True)
+            if only is not None:
+                ledgers = [r for r in ledgers if r.get("call_id") in only]
             if not calls or not ledgers:  # never replace real audits with an empty file
                 raise SystemExit(f"regrade needs calls and ledgers; found {len(calls)} calls, {len(ledgers)} ledgers")
             audits = [
@@ -253,7 +259,12 @@ def run_regrade(calls_path=CALLS_PATH, ledgers_path=LEDGERS_PATH, audits_path=AU
                 raise SystemExit(f"regrade found no ledger for any of the {len(calls)} calls; audits left unchanged")
             out = Path(audits_path)
             tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            tmp.write_text("".join(json.dumps(a.model_dump(mode="json")) + "\n" for a in audits), encoding="utf-8")
+            keep = [r for r in read_jsonl(out) if only is not None and r.get("call_id") not in only]
+            tmp.write_text(
+                "".join(json.dumps(r) + "\n" for r in keep)
+                + "".join(json.dumps(a.model_dump(mode="json")) + "\n" for a in audits),
+                encoding="utf-8",
+            )
             os.replace(tmp, out)
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
@@ -295,11 +306,30 @@ def run_golden(cmd: str, n: int = 150, seed: int = 0) -> None:
 def _upsert_calls(path: Path, records: list[CallRecord]) -> None:
     """Write these records into calls.jsonl. A call with the same id is replaced, so a resubmit is fresh."""
     new = {r.call_id: r.model_dump(mode="json") for r in records}
-    rows = [r for r in read_jsonl(path) if r.get("call_id") not in new] + list(new.values())
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-    os.replace(tmp, path)
+    with (path.parent / ".calls.lock").open("a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)  # wait: read, modify and replace must not interleave with another submit
+        try:
+            rows = [r for r in read_jsonl(path) if r.get("call_id") not in new] + list(new.values())
+            tmp = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+CALL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
+
+
+def _check_id(call_id: str) -> None:
+    """Reject a call id that is not a plain file-name token. It names files in the workspace and inbox."""
+    if not CALL_ID_RE.match(call_id) or ".." in call_id:
+        raise ValueError(f"invalid call id {call_id!r}")
+
+
+def _inside(path: Path, root: Path) -> None:
+    if not Path(path).resolve().is_relative_to(Path(root).resolve()):
+        raise ValueError("path outside the folder")
 
 
 def _step(name: str, i: int, n: int, call_id: str) -> None:
@@ -318,17 +348,17 @@ def run_submit(runs: Path, inbox: Path, calls: list[str] | None = None, from_run
     src = [("mp3", f) for f in sorted(inbox.glob("*.mp3"))] + [("json", f) for f in sorted(inbox.glob("*.json"))]
     wanted = list(calls or [])
     n = len(src) + len(wanted)
-    errors, records, i = 0, [], 0
+    records, i = [], 0
+    errors_before = len(read_jsonl(p["errors"]))
 
     def fail(call_id: str, msg: str) -> None:
-        nonlocal errors
-        errors += 1
         append_jsonl(p["errors"], [{"call_id": call_id, "error": msg}])
 
     for kind, f in src:
         i += 1
         _step("ingest", i, n, f.stem)
         try:
+            _check_id(f.stem)
             if kind == "mp3":
                 out = transcribe_call(f, out_dir=runs / "transcripts", log_path=runs / "transcribe_log.jsonl")
                 if out.get("status") not in ("ok", "exists"):
@@ -338,6 +368,9 @@ def run_submit(runs: Path, inbox: Path, calls: list[str] | None = None, from_run
                     rec.silences = detect_silences(rec.audio_path)
             else:
                 rec = load_transcript(f, audio_dir=inbox)
+            _check_id(rec.call_id)
+            if rec.audio_path:
+                _inside(Path(rec.audio_path), inbox)
             records.append(rec)
         except Exception as e:  # one bad file must not stop the run
             fail(f.stem, f"ingest {type(e).__name__}: {e}"[:300])
@@ -346,6 +379,7 @@ def run_submit(runs: Path, inbox: Path, calls: list[str] | None = None, from_run
         i += 1
         _step("ingest", i, n, cid)
         try:
+            _check_id(cid)
             records.append(CallRecord.model_validate(existing[cid]))
         except Exception as e:
             fail(cid, f"ingest {type(e).__name__}: {e}"[:300])
@@ -371,14 +405,20 @@ def run_submit(runs: Path, inbox: Path, calls: list[str] | None = None, from_run
                 done[0] += 1
                 _step(name, done[0], len(ids), cid)
 
-            errors += run(cb)["errors"]
+            try:
+                run(cb)  # a failed call has its own error row
+            except SystemExit as e:  # the audit lock is held by another run
+                fail("-", f"{name} {e}")
         _step("regrade", 1, 1, "all")
+        have_jev = {r.get("call_id") for r in read_jsonl(p["ledgers_jev"])}
         try:
-            run_regrade(p["calls"], p["ledgers_jev"], p["audits"])
-        except SystemExit as e:  # e.g. every judge call failed: nothing to grade
-            print(f"regrade skipped: {e}", flush=True)
+            run_regrade(p["calls"], p["ledgers_jev"], p["audits"], only=set(ids))
+        except (SystemExit, Exception) as e:  # e.g. every judge call failed: nothing to grade
+            fail("-", f"regrade {type(e).__name__}: {e}"[:300])
+        _drop_audits(p["audits"], {c for c in ids if c not in have_jev})  # no Jev ledger: no final grade
     audited = {r.get("call_id") for r in read_jsonl(p["audits"])}
     n_calls = sum(c in audited for c in ids)
+    errors = len(read_jsonl(p["errors"])) - errors_before
     print(f"SUBMIT_DONE calls={n_calls} errors={errors}", flush=True)
     return {"calls": n_calls, "errors": errors}
 

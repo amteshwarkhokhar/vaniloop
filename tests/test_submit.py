@@ -59,3 +59,81 @@ def test_submit_mp3_json_existing_call_and_a_bad_file(tmp_path, monkeypatch, cap
     assert [e["call_id"] for e in rows(ws / "errors.jsonl")] == ["bad"]
     assert "SUBMIT_DONE calls=3 errors=1" in out
     assert "STEP ingest 2/4 bad" in out and "STEP audit 3/3" in out and "STEP judge 3/3" in out
+
+
+def setup_submit(tmp_path, monkeypatch, judge=lambda call, led: led):
+    """A workspace with one valid transcript in the inbox and mocked Gemini and Jev."""
+    ws = tmp_path / "ws"
+    inbox = ws / "inbox"
+    inbox.mkdir(parents=True)
+    (inbox / "up_json.json").write_text(json.dumps(transcript("up_json")))
+    monkeypatch.setattr(ledger, "complete_json", lambda *a, **k: dict(FAKE))
+    monkeypatch.setattr(pipeline, "judge_ledger", judge)
+    return ws, inbox
+
+
+def test_submit_keeps_unrelated_audit_rows(tmp_path, monkeypatch):
+    """submit must regrade only the submitted ids and keep an older audit row that has no Jev ledger.
+
+    A bug would rewrite the whole audits file from the Jev ledgers and silently delete other calls' grades.
+    """
+    ws, inbox = setup_submit(tmp_path, monkeypatch)
+    (ws / "audits.jsonl").write_text(json.dumps({"call_id": "older", "verdict": "Pass"}) + "\n")
+    pipeline.main(["--runs", str(ws), "submit", "--inbox", str(inbox)])
+    assert sorted(a["call_id"] for a in rows(ws / "audits.jsonl")) == ["older", "up_json"]
+
+
+def test_upsert_calls_waits_for_the_workspace_lock(tmp_path):
+    """_upsert_calls must wait while another process holds the calls lock.
+
+    A bug would read and replace calls.jsonl with no lock, so two concurrent submits lose a call.
+    """
+    import fcntl
+    import threading
+    import time
+
+    from vaniloop.models import CallRecord
+
+    rec = CallRecord.model_validate_json(FIXTURE.read_text().splitlines()[0])
+    path = tmp_path / "calls.jsonl"
+    with (tmp_path / ".calls.lock").open("a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        t = threading.Thread(target=pipeline._upsert_calls, args=(path, [rec]))
+        t.start()
+        time.sleep(0.3)
+        assert not path.exists()
+        fcntl.flock(lf, fcntl.LOCK_UN)
+    t.join(5)
+    assert len(rows(path)) == 1
+
+
+def test_submit_counts_a_jev_failure_as_errors_and_no_final_audit(tmp_path, monkeypatch, capsys):
+    """When Jev fails, submit must report calls=0 and errors equal to the error rows of the run.
+
+    A bug would count the Gemini-only audit row as a final grade and print only the regrade failure.
+    """
+
+    def boom(call, led):
+        raise RuntimeError("jev down")
+
+    ws, inbox = setup_submit(tmp_path, monkeypatch, judge=boom)
+    pipeline.main(["--runs", str(ws), "submit", "--inbox", str(inbox)])
+    n = len(rows(ws / "errors.jsonl"))
+    assert n >= 2  # the judge failure and the regrade that had no ledger
+    assert f"SUBMIT_DONE calls=0 errors={n}" in capsys.readouterr().out
+    assert rows(ws / "audits.jsonl") == []
+
+
+def test_submit_rejects_unsafe_call_ids(tmp_path, monkeypatch, capsys):
+    """submit must reject a transcript call_id like ../outside and a --calls id like ../x with an error row.
+
+    A bug would accept it, and its audio path would resolve outside the inbox.
+    """
+    ws, inbox = setup_submit(tmp_path, monkeypatch)
+    (inbox / "evil.json").write_text(json.dumps(transcript("../outside")))
+    src = tmp_path / "src"
+    src.mkdir()
+    pipeline.main(["--runs", str(ws), "submit", "--inbox", str(inbox), "--calls", "../x", "--from", str(src)])
+    assert [a["call_id"] for a in rows(ws / "audits.jsonl")] == ["up_json"]
+    assert sorted(e["call_id"] for e in rows(ws / "errors.jsonl")) == ["../x", "evil"]
+    assert "SUBMIT_DONE calls=1 errors=2" in capsys.readouterr().out
