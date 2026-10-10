@@ -1257,3 +1257,19 @@ def test_quoted_finding_examples_do_not_change_when_calls_are_passed():
     plain = evidence_examples(c, audits)
     assert plain == ["real quote"]
     assert evidence_examples(c, audits, calls={"q1": absence_call("q1")}) == plain
+
+
+def test_absence_example_keeps_the_last_bot_turn_under_a_long_reason():
+    """The real qty_probing reason is over 100 characters and is the same on every member, so the example must put the
+    last bot turn first. With the reason first the 160-character cut drops the turn, and every member gives the
+    same reason-only line: the patch writer gets one example and no call text."""
+    long_reason = (
+        "bot never asked for quantity and the buyer did not give one "
+        "(assumes quantity is a defined field for this category)"
+    )
+    a = absence_audit("a1")
+    a = a.model_copy(update={"findings": [f.model_copy(update={"reason": long_reason}) for f in a.findings]})
+    c = cause().model_copy(update={"fatal_calls": ["a1"]})
+    turn = "Theek hai, aapki requirement post kar di gayi hai, dhanyavaad"
+    ex = evidence_examples(c, {"a1": a}, calls={"a1": absence_call("a1", turn)})
+    assert len(ex) == 1 and turn in ex[0] and len(ex[0]) <= 160

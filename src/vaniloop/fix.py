@@ -152,7 +152,7 @@ def evidence_examples(
     in the fix half (see split_half) give a quote, so the hold-out half stays unseen by the patch writer.
 
     With `calls` (call_id -> CallRecord), a member whose finding has no quote is an absence fault (the bot never did
-    it): its example is "<reason>. Last bot turn: <text>", or the reason alone when the call record is missing.
+    it): its example is "Last bot turn: <text> (fault: <reason>)", or the reason alone when the call record is missing.
     """
     out: list[str] = []
     for call_id in [*cause.fatal_calls, *cause.nonfatal_calls]:
@@ -185,8 +185,8 @@ def _absence_example(audit: AuditRecord, parameter: str, call: CallRecord | None
         return None
     line = finding.reason.strip().rstrip(".")
     last_bot = next((t.text for t in reversed(call.turns) if t.speaker == "bot"), None) if call else None
-    if last_bot:
-        line = f"{line}. Last bot turn: {last_bot}"
+    if last_bot:  # the turn first: the reason is the same on every member, so a cut must not drop the turn
+        line = f"Last bot turn: {' '.join(last_bot.split())} (fault: {line})"
     return _one_line(line, EXAMPLE_CHARS) or None
 
 
