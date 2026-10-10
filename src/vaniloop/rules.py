@@ -17,6 +17,10 @@ DEAD_AIR_SEC = 5.0  # matrix: dead air > 5 s
 DEAD_AIR_SLACK_SEC = 0.5
 # TODO: matrix allows 8 s on noisy lines; noise detection is not built yet, so this is not used.
 DEAD_AIR_NOISY_SEC = 8.0
+# Transcript timing is untrusted, so dead air cannot be graded, when any one of these holds (#105).
+TIMING_MIN_COVERAGE = 0.85  # the last turn must end at or after this share of duration_sec
+TIMING_MAX_BACK_TO_BACK = 0.8  # share of consecutive turn pairs with a gap under 0.01 s
+TIMING_MAX_ZERO_TURNS = 1  # two or more zero-length turns is untrusted
 LOOP_MAX_ASKS = 3  # default ask limit for slots without their own limit
 # VANI prompt L69: product 4, quantity 3, each spec 2, name 3, city 3. The first ask past the limit is the onset.
 SLOT_LIMITS = {"product": 4, "quantity": 3, "spec": 2, "name": 3, "city": 3}
@@ -326,10 +330,48 @@ def _bot_gaps(call: CallRecord) -> list[tuple[Silence, Turn]]:
     return gaps
 
 
+def _timing_trusted(call: CallRecord) -> tuple[bool, str]:
+    """Whether the turn timestamps can show a gap: (True, "") or (False, which test failed, with the number).
+
+    The transcriber's timing often does not match the audio: the last turn ends well before the audio does,
+    turns sit back to back with made-up lengths, or several turns collapse onto one time. A gap can never be
+    found on that timing, so a Pass would claim a check that was never made.
+    """
+    turns = sorted(call.turns, key=lambda t: (t.start_sec, t.end_sec))
+    if turns and call.duration_sec > 0:
+        coverage = max(t.end_sec for t in turns) / call.duration_sec
+        if coverage < TIMING_MIN_COVERAGE:
+            return (
+                False,
+                f"last turn ends at {coverage * 100:.0f}% of the audio, under {TIMING_MIN_COVERAGE * 100:.0f}%",
+            )
+    if len(turns) >= 2:
+        pairs = len(turns) - 1
+        touching = sum(1 for a, b in zip(turns, turns[1:], strict=False) if b.start_sec - a.end_sec < 0.01)
+        if touching / pairs > TIMING_MAX_BACK_TO_BACK:
+            return (
+                False,
+                f"{touching / pairs * 100:.0f}% of turn pairs are back to back, "
+                f"over {TIMING_MAX_BACK_TO_BACK * 100:.0f}%",
+            )
+    zero = sum(1 for t in turns if t.end_sec <= t.start_sec)
+    if zero > TIMING_MAX_ZERO_TURNS:
+        return False, f"{zero} turns have zero length, over {TIMING_MAX_ZERO_TURNS}"
+    return True, ""
+
+
 def rule_dead_air(call: CallRecord, led: Ledger) -> Finding:
     if not call.audio_path:
         return Finding(
             parameter="dead_air", status="Unknown", reason="no audio to measure silence", basis="unavailable"
+        )
+    trusted, why = _timing_trusted(call)
+    if not trusted:
+        return Finding(
+            parameter="dead_air",
+            status="Unknown",
+            reason=f"transcript timing does not match the audio ({why})",
+            basis="unavailable",
         )
     long_pauses = [s for s in call.silences if s.duration > DEAD_AIR_SEC]
     gaps = _bot_gaps(call)
@@ -1026,6 +1068,8 @@ def audit_call(call: CallRecord, led: Ledger) -> AuditRecord:
         for f in findings
     ):
         flags.append("wrong_requirement")
+    if call.audio_path and any(f.parameter == "dead_air" and f.status == "Unknown" for f in findings):
+        flags.append("dead_air_review")
     statuses = {f.status for f in findings}
     unknown = [f.parameter for f in findings if f.status == "Unknown" and f.parameter not in UNKNOWN_EXEMPT]
     review = None

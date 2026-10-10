@@ -477,15 +477,94 @@ def test_f8_noisy_constant_defined_no_behaviour_change():
 
     A changed constant would regrade every past call and break the stated no-behaviour-change promise. The silence
     now sits after a buyer turn and before the bot's answer, because only a buyer-then-bot gap counts as dead air.
+    The call duration is 20 s so it matches the turns (#105): timing that stops short of the audio is untrusted.
     """
     assert rules.DEAD_AIR_NOISY_SEC == 8.0 and rules.DEAD_AIR_SEC == 5.0
     # 11 s: starts after the buyer turn and ends before the bot answers, with no speech inside, so it is a bot gap
-    call = mk_call(audio="x.mp3", silences=[Silence(start_sec=4.0, end_sec=15.0)])
+    call = mk_call(audio="x.mp3", silences=[Silence(start_sec=4.0, end_sec=15.0)], duration=20.0)
     call.turns = [
         Turn(idx=0, speaker="user", start_sec=0.0, end_sec=4.0, text="buyer"),
         Turn(idx=1, speaker="bot", start_sec=15.0, end_sec=19.0, text="answer"),
     ]
     assert by(audit_call(call, mk_led(call, [bt(1, "quantity")])))["dead_air"].status == "NonFatal"
+
+
+# ---- #105
+def _timed(turns, duration, audio="x.mp3"):
+    """A call whose turns are given as (speaker, start, end) triples."""
+    call = mk_call(audio=audio, duration=duration)
+    call.turns = [Turn(idx=i, speaker=s, start_sec=a, end_sec=b, text="t") for i, (s, a, b) in enumerate(turns)]
+    return call
+
+
+GOOD = [("bot", 0.0, 4.0), ("user", 5.0, 9.0), ("bot", 10.0, 14.0), ("user", 15.0, 19.0)]
+
+
+def test_untrusted_coverage_gives_unknown_and_review_flag():
+    """Turns that end at 59% of the audio must make dead_air Unknown (basis unavailable) with the dead_air_review flag.
+
+    If this failed, a call whose timing cannot show a gap would Pass dead air, a check that was never made.
+    """
+    call = _timed(GOOD, duration=32.0)
+    a = audit_call(call, mk_led(call))
+    f = by(a)["dead_air"]
+    assert f.status == "Unknown" and f.basis == "unavailable" and "does not match the audio" in f.reason
+    assert "59%" in f.reason and "dead_air_review" in a.flags
+
+
+def test_back_to_back_turns_give_unknown():
+    """Turns with no gap between them (made-up lengths) must make dead_air Unknown.
+
+    If this failed, a transcript that packs turns edge to edge would Pass on a gap it cannot represent.
+    """
+    turns = [("bot", 0.0, 4.0), ("user", 4.0, 8.0), ("bot", 8.0, 12.0), ("user", 12.0, 16.0)]
+    call = _timed(turns, duration=17.0)
+    f = by(audit_call(call, mk_led(call)))["dead_air"]
+    assert f.status == "Unknown" and "back to back" in f.reason
+
+
+def test_two_zero_length_turns_give_unknown():
+    """Two zero-length turns (collapsed onto one time) must make dead_air Unknown, with one still trusted.
+
+    If this failed, collapsed timing would Pass, or a single odd turn would wrongly void a good call.
+    """
+    turns = [("bot", 0.0, 4.0), ("user", 6.0, 6.0), ("bot", 9.0, 9.0), ("user", 12.0, 16.0)]
+    call = _timed(turns, duration=17.0)
+    assert "zero length" in by(audit_call(call, mk_led(call)))["dead_air"].reason
+    one = _timed([("bot", 0.0, 4.0), ("user", 6.0, 6.0), ("bot", 9.0, 13.0), ("user", 15.0, 19.0)], duration=20.0)
+    assert by(audit_call(one, mk_led(one)))["dead_air"].status == "Pass"
+
+
+def test_trusted_timing_with_a_real_buyer_then_bot_gap_stays_nonfatal():
+    """Timing that matches the audio and has a 7 s buyer-then-bot silence must still be NonFatal.
+
+    If this failed, the sanity check would hide real dead air and the rule would never fire.
+    """
+    turns = [("bot", 0.0, 4.0), ("user", 5.0, 9.0), ("bot", 16.0, 20.0), ("user", 21.0, 25.0)]
+    call = _timed(turns, duration=26.0)
+    call.silences = [Silence(start_sec=9.0, end_sec=16.0)]
+    a = audit_call(call, mk_led(call))
+    assert by(a)["dead_air"].status == "NonFatal" and "dead_air_review" not in a.flags
+
+
+def test_clean_call_with_untrusted_timing_keeps_verdict_pass():
+    """A clean call with untrusted timing must keep verdict Pass: dead_air Unknown is exempt from NeedsReview.
+
+    If this failed, most calls would flip to NeedsReview, because most transcripts have untrusted timing.
+    """
+    call = _timed(GOOD, duration=32.0)
+    a = audit_call(call, mk_led(call))
+    assert by(a)["dead_air"].status == "Unknown" and a.verdict == "Pass"
+
+
+def test_no_audio_gives_no_dead_air_review_flag():
+    """A call with no audio keeps dead_air Unknown ("no audio") and must not get the dead_air_review flag.
+
+    If this failed, the review queue would fill with calls where there is no audio to review.
+    """
+    call = _timed(GOOD, duration=32.0, audio=None)
+    a = audit_call(call, mk_led(call))
+    assert by(a)["dead_air"].reason == "no audio to measure silence" and "dead_air_review" not in a.flags
 
 
 # ---- F9

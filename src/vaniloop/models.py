@@ -99,7 +99,7 @@ class Finding(BaseModel):
     onset_turn: int | None = None  # turn where the fault started (not just context)
 
 
-RiskFlag = Literal["wrong_requirement", "frustration", "loops", "low_confidence", "human_request"]
+RiskFlag = Literal["wrong_requirement", "frustration", "loops", "low_confidence", "human_request", "dead_air_review"]
 
 
 class AuditRecord(BaseModel):
