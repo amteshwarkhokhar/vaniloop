@@ -605,6 +605,19 @@ def test_turn_ending_before_it_starts_gives_unknown_and_review_flag():
     assert "dead_air_review" in a.flags
 
 
+def test_turn_starting_before_the_audio_gives_unknown_and_review_flag():
+    """A turn with a negative start time is impossible: dead_air must be Unknown (unavailable) and flagged.
+
+    If this failed, a turn placed before the audio would hide the real opening silence and dead_air would be graded.
+    """
+    call = _timed([("user", -8.0, -1.0), ("bot", 6.0, 19.0)], duration=20.0)
+    a = audit_call(call, mk_led(call))
+    f = by(a)["dead_air"]
+    assert f.status == "Unknown" and f.basis == "unavailable"
+    assert "a turn starts before the audio does" in f.reason
+    assert "dead_air_review" in a.flags
+
+
 # ---- F9
 class FakeClient:
     calls = 0

@@ -339,6 +339,8 @@ def _timing_trusted(call: CallRecord) -> tuple[bool, str]:
     so a Pass would claim a check that was never made.
     """
     turns = sorted(call.turns, key=lambda t: (t.start_sec, t.end_sec))
+    if any(t.start_sec < 0 for t in turns):
+        return False, "a turn starts before the audio does"
     if any(t.end_sec < t.start_sec for t in turns):
         return False, "a turn ends before it starts"
     if call.duration_sec > 0:
