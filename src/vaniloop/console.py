@@ -6,6 +6,7 @@ known ids first. Then `build_argv` makes an argv list from those values only.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -408,3 +409,139 @@ class JobRunner:
         except ProcessLookupError:
             pass
         return self.public(row)
+
+
+FILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}\.(mp3|json)$")
+MAX_FILES = 20
+MAX_FILE_BYTES = 25 * 1024 * 1024
+
+
+ABS_PATH_RE = re.compile(r"(?<![\w.:/-])/(?:[^\s:'\"/]+/)*([^\s:'\"/]*)")
+
+
+def clean_text(text) -> str:
+    """Hide secrets, and cut every absolute path to its last part. Used on any text an API returns from files."""
+    return ABS_PATH_RE.sub(lambda m: m.group(1) or "", mask(str(text)))[:300]
+
+
+def _sub_base(d: Path, sid) -> Path | None:
+    """<data>/console/submissions/<sid> when sid is well formed, no path part is a symlink and it is a folder
+    inside the data folder. Otherwise None."""
+    if not isinstance(sid, str) or not SID_RE.match(sid):
+        return None
+    cur = Path(d)
+    for part in ("console", "submissions", sid):
+        cur = cur / part
+        if cur.is_symlink():
+            return None
+    if not cur.is_dir() or not cur.resolve().is_relative_to(Path(d).resolve() / "console" / "submissions"):
+        return None
+    return cur
+
+
+def _sub_file(base: Path, name: str) -> Path | None:
+    """A regular file directly inside the submission folder: not a symlink, resolved inside it."""
+    p = base / name
+    if p.is_symlink() or not p.is_file() or not p.resolve().is_relative_to(base.resolve()):
+        return None
+    return p
+
+
+def create_submission(d: Path, body: dict) -> dict:
+    """POST /api/submit: check every file and call id, then write the files to console/submissions/<sid>/inbox."""
+    files, ids = body.get("files") or [], body.get("call_ids") or []
+    if not isinstance(files, list) or not isinstance(ids, list):
+        raise _bad("files", "files and call_ids must be lists")
+    if not files and not ids:
+        raise _bad("files", "send at least one file or call id")
+    if len(files) > MAX_FILES:
+        raise _bad("files", f"at most {MAX_FILES} files")
+    known = _call_ids(d)
+    for cid in ids:
+        if not isinstance(cid, str) or cid not in known:
+            raise _bad("call_ids", "unknown call id")
+    decoded, seen = [], set()
+    for f in files:
+        name = f.get("name") if isinstance(f, dict) else None
+        if not isinstance(name, str) or not FILE_RE.match(name) or name.startswith(".") or name in seen:
+            raise _bad("files", "bad or repeated file name")
+        try:
+            raw = base64.b64decode(f.get("data_b64"), validate=True)
+        except (TypeError, ValueError):
+            raise _bad("files", "data_b64 is not base64") from None
+        if not raw or len(raw) > MAX_FILE_BYTES:
+            raise _bad("files", "file is empty or over 25 MB")
+        seen.add(name)
+        decoded.append((name, raw))
+    sid = "s" + secrets.token_hex(6)
+    root = Path(d)
+    for part in ("console", "submissions"):
+        root = root / part
+        if root.is_symlink():
+            raise ConsoleError(400, {"error": "unsafe folder", "field": "files"})
+        root.mkdir(exist_ok=True)
+    if not root.resolve().is_relative_to(Path(d).resolve()):
+        raise ConsoleError(400, {"error": "unsafe folder", "field": "files"})
+    (root / sid).mkdir(exist_ok=False)
+    inbox = root / sid / "inbox"
+    inbox.mkdir(exist_ok=False)
+    for name, raw in decoded:
+        with open(inbox / name, "xb") as f:  # exclusive create: never follows or replaces a link
+            f.write(raw)
+    out = [{"name": n, "kind": "mp3" if n.endswith(".mp3") else "transcript"} for n, _ in decoded]
+    meta = {"submission_id": sid, "created_ist": now_ist(), "created_utc": datetime.now(UTC).isoformat()}
+    (inbox.parent / "meta.json").write_text(json.dumps({**meta, "files": out, "call_ids": ids}), encoding="utf-8")
+    return {"submission_id": sid, "files": out, "call_ids": ids}
+
+
+def _submission_meta(d: Path, sid: str) -> dict | None:
+    base = _sub_base(d, sid)
+    meta = base and _sub_file(base, "meta.json")
+    try:
+        return json.loads(meta.read_text(encoding="utf-8")) if meta else None
+    except (OSError, ValueError):
+        return None
+
+
+def submissions(d: Path) -> dict:
+    """GET /api/submit: every submission, newest first."""
+    rows = []
+    for p in (d / "console" / "submissions").glob("*/meta.json"):
+        meta = _submission_meta(d, p.parent.name)
+        if meta:
+            n = len(meta.get("files", [])) + len(meta.get("call_ids", []))
+            rows.append({"submission_id": meta["submission_id"], "created_ist": meta.get("created_ist"), "calls": n,
+                         "_t": meta.get("created_utc", "")})  # fmt: skip
+    rows.sort(key=lambda r: r["_t"], reverse=True)
+    return {"submissions": [{k: v for k, v in r.items() if k != "_t"} for r in rows]}
+
+
+def submission(d: Path, sid: str, runner: JobRunner) -> dict | None:
+    """GET /api/submit/<sid>: per-call results from audits.jsonl and errors.jsonl, or None for an unknown id."""
+    meta = _submission_meta(d, sid)
+    if meta is None:
+        return None
+    base = _sub_base(d, sid)
+    uploaded = {Path(f["name"]).stem for f in meta.get("files", [])}
+    calls = []
+    for a in read_jsonl(_sub_file(base, "audits.jsonl")):
+        if isinstance(a, dict) and isinstance(a.get("call_id"), str):
+            findings = [
+                {
+                    k: clean_text(f.get(k)) if k == "reason" and f.get(k) else f.get(k)
+                    for k in ("parameter", "status", "reason", "onset_turn")
+                }
+                for f in a.get("findings") or []
+                if isinstance(f, dict)
+            ]
+            calls.append({"call_id": a["call_id"], "source": "upload" if a["call_id"] in uploaded else "existing",
+                          "verdict": a.get("verdict"), "scope": a.get("scope"), "findings": findings,
+                          "flags": a.get("flags") or [], "error": None})  # fmt: skip
+    for e in read_jsonl(_sub_file(base, "errors.jsonl")):
+        if isinstance(e, dict) and isinstance(e.get("call_id"), str):
+            calls.append({"call_id": e["call_id"], "source": "upload" if e["call_id"] in uploaded else "existing",
+                          "verdict": None, "scope": None, "findings": [], "flags": [],
+                          "error": clean_text(e.get("error", "error"))})  # fmt: skip
+    busy = runner.get(runner.busy_job_id() or "")
+    running = bool(busy and busy.get("stage") == "submit" and busy.get("args", {}).get("submission_id") == sid)
+    return {"submission_id": sid, "status": "running" if running else "done" if calls else "pending", "calls": calls}

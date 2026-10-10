@@ -660,17 +660,55 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = unquote(urlsplit(self.path).path)
         try:
+            d = self.data
             if path == "/api/jobs":
-                d = self.data
                 spec, args = console.validate(d, body.get("stage"), body.get("args"), body.get("confirm"))
                 self._json({"job": self._runner().start(spec["id"], args)}, 202)
             elif (m := JOB_PATH.match(path)) and m.group(2) == "cancel":
                 job = self._runner().cancel(m.group(1))
                 self._json({"job": job} if job else {"error": "unknown job"}, 200 if job else 404)
+            elif path == "/api/submit":
+                self._json(console.create_submission(d, body), 201)
+            elif path == "/api/tune":
+                self._json(self._tune(body))
             else:
                 self._json({"error": "not found"}, 404)
         except console.ConsoleError as e:
             self._json(e.payload, e.status)
+
+    def _tune(self, body: dict):
+        """POST /api/tune through vaniloop.tune.score. Imported late: the module may not exist yet."""
+        from vaniloop import tune
+
+        thresholds = body.get("thresholds")
+        if not isinstance(thresholds, dict):
+            raise console.ConsoleError(400, {"error": "thresholds must be an object", "field": "thresholds"})
+        if not (self.data / "jev_raw.jsonl").exists():
+            raise console.ConsoleError(409, {"error": "no raw Jev answers: run judge"})
+        try:
+            return tune.score(self.data, thresholds)
+        except tune.NoRaw:
+            raise console.ConsoleError(409, {"error": "no raw Jev answers: run judge"}) from None
+        except (ValueError, TypeError, KeyError) as e:
+            raise console.ConsoleError(
+                400, {"error": str(e)[:200] or "bad value", "field": getattr(e, "field", None)}
+            ) from None
+
+    def do_PUT(self) -> None:  # noqa: N802
+        body = self._read_json()
+        if body is None:
+            return
+        if unquote(urlsplit(self.path).path) != "/api/rubric":
+            self._json({"error": "not found"}, 404)
+            return
+        from vaniloop import rubric
+
+        path = self.data / "rubric.json"
+        try:
+            rubric.save(path, body)
+            self._json(rubric.describe(path))
+        except rubric.RubricError as e:
+            self._json({"error": str(e)[:300], "field": getattr(e, "field", None)}, 400)
 
     def do_GET(self) -> None:  # noqa: N802 - name fixed by BaseHTTPRequestHandler
         if not self._host_ok():
@@ -708,6 +746,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "unknown stage"}, 404)
             else:
                 self._json(result)
+        elif path == "/api/rubric":
+            from vaniloop import rubric
+
+            self._json(rubric.describe(d / "rubric.json"))
+        elif path == "/api/submit":
+            self._json(console.submissions(d))
+        elif path.startswith("/api/submit/"):
+            out = console.submission(d, path[len("/api/submit/") :], self._runner())
+            self._json(out if out else {"error": "unknown submission"}, 200 if out else 404)
         elif path == "/api/console":
             self._json(console_info(d, self._runner()))
         elif path == "/api/jobs":
