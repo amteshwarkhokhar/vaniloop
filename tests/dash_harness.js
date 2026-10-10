@@ -280,6 +280,7 @@ const SC = {
       causes: [{ cause_id: "C-02", name: "Wrong spec question", type: "prompt", status: "open", role: "fatal" }],
       patches: [{ cause_id: "C-02", attempt: 1, old_text: "ask colour", new_text: "ask grade", rationale: "pipes have grades" }],
       gates: [{ cause_id: "C-02", attempt: 1, decision: "inconclusive", k: 3, old_fails: 3, new_fails: 1 }] }];
+    routes["GET /api/jobs"] = [200, { jobs: [job("L9", "loop", "done", { ended_ist: "17:34:52 10 Oct" })] }];
     await click({ go: "flow" }); await tick();
     const out = { all: ids.panel.innerHTML };
     (doc.listeners.click || []).forEach((f) => f({ target: { closest: (q) => (q === "[data-pick]" ? { dataset: { pick: "c1<b>" } } : null) } }));
