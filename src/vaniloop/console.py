@@ -54,6 +54,7 @@ STAGES: list[dict] = [
      "args": [_arg("cause", "str", required=True), _arg("n", "int", default=8), _arg("k", "int", default=3),
               _arg("attempt", "int", default=1), _arg("holdout", "bool", default=True),
               _arg("screen", "bool", default=True)]},
+    {"id": "ship", "label": "Ship a proven fix", "paid": False, "args": [_arg("cause", "str", required=True)]},
     {"id": "submit", "label": "Audit submitted calls", "paid": True,
      "args": [_arg("submission_id", "str", required=True)]},
 ]  # fmt: skip
@@ -158,8 +159,16 @@ def validate(d: Path, stage: object, args: object, confirm: object) -> tuple[dic
             ):
                 raise _bad(name, "unknown submission")
         clean[name] = value
-    if stage in ("fix", "prove") and not PROMPT_PATH.is_file():
+    if stage in ("fix", "prove", "ship") and not PROMPT_PATH.is_file():
         raise _bad("prompt", "VANI prompt file missing")
+    if stage == "ship":  # changes the live prompt: needs confirm, and a cause that the gate said ship for
+        from vaniloop import tracker
+
+        if confirm is not True:
+            raise ConsoleError(400, {"error": "confirm"})
+        st = tracker.state(clean["cause"], d)
+        if st != "ready_to_ship":
+            raise ConsoleError(409, {"error": f"{clean['cause']} is {st}, not ready_to_ship"})
     if spec["paid"] and confirm is not True:
         raise ConsoleError(400, {"error": "confirm", "estimate_usd": None})
     return spec, clean
@@ -175,8 +184,10 @@ def build_argv(d: Path, stage: str, args: dict) -> list[str]:
     if stage == "regrade":
         jev = d / "ledgers_jev.jsonl"
         argv += ["--ledgers", str(jev if jev.exists() else d / "ledgers.jsonl")]
-    if stage in ("fix", "prove"):
+    if stage in ("fix", "prove", "ship"):
         argv += ["--prompt", str(PROMPT_PATH)]
+    if stage == "ship":
+        argv += ["--cause", args["cause"]]
     if stage == "fix":
         argv += ["--top", str(args["top"])]
     if stage == "prove":

@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from vaniloop import console, fix, gate, jev, llm, prove, rules
+from vaniloop import console, fix, gate, jev, llm, prove, rules, tracker
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +50,8 @@ DATA_FILES = (
 DATA_FILE_EXT = {"causes": "json", "patches": "json"}
 RUNNER_LOCK = threading.Lock()
 MAX_BODY = 30 * 1024 * 1024
+TRACKER_POST = re.compile(r"^/api/tracker/([^/]+)/(ticket|ship)$")
+TICKET_REF_MAX = 200
 JOB_PATH = re.compile(r"^/api/jobs/([^/]+)/(log|cancel)$")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 
@@ -671,10 +673,33 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(console.create_submission(d, body), 201)
             elif path == "/api/tune":
                 self._json(self._tune(body))
+            elif m := TRACKER_POST.match(path):
+                status, payload = self._tracker_post(m.group(1), m.group(2), body)
+                self._json(payload, status)
             else:
                 self._json({"error": "not found"}, 404)
         except console.ConsoleError as e:
             self._json(e.payload, e.status)
+
+    def _tracker_post(self, cause_id: str, action: str, body: dict) -> tuple[int, dict]:
+        """POST /api/tracker/<id>/ticket (sent or resolved, at once) and /ship (a console job, 202 {job})."""
+        d = self.data
+        if not tracker.events(d, cause_id) and cause_id not in console._cause_ids(d):
+            return 404, {"error": "unknown cause id"}
+        if action == "ship":  # validate checks confirm, the cause and the state ready_to_ship; the runner checks busy
+            spec, args = console.validate(d, "ship", {"cause": cause_id}, body.get("confirm"))
+            return 202, {"job": self._runner().start(spec["id"], args)}
+        ref, note = body.get("ref"), body.get("note")
+        try:
+            if body.get("action") == "sent" and isinstance(ref, str) and 1 <= len(ref) <= TICKET_REF_MAX:
+                tracker.ticket(cause_id, d, sent=ref)
+            elif body.get("action") == "resolved" and isinstance(note, str):
+                tracker.ticket(cause_id, d, resolved=note)
+            else:
+                return 400, {"error": "need {action: sent, ref: 1..200 chars} or {action: resolved, note: str}"}
+        except SystemExit as e:
+            return 409, {"error": str(e)}
+        return 200, {"cause": tracker.cause_view(cause_id, d)}
 
     def _tune(self, body: dict):
         """POST /api/tune through vaniloop.tune.score. Imported late: the module may not exist yet."""
@@ -734,6 +759,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(causes(d))
         elif path == "/api/gates":
             self._json(gates(d))
+        elif path == "/api/tracker":
+            self._json(tracker.board(d))
         elif path == "/api/config":
             self._json(config(d))
         elif path.startswith("/api/stage/"):

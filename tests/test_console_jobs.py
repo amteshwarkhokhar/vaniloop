@@ -113,13 +113,13 @@ def test_read_only_folder_refuses_writes(tmp_path, monkeypatch):
 
 
 def test_console_lists_stages(srv):
-    """Protects the UI's stage form: GET /api/console must list the eight contract stages with paid flags and
+    """Protects the UI's stage form: GET /api/console must list the nine contract stages with paid flags and
     no busy job, or the UI cannot build its forms."""
     status, out = call(srv, "GET", "/api/console")
     assert status == 200 and out["busy_job_id"] is None and out["read_only"] is False
     paid = {s["id"]: s["paid"] for s in out["stages"]}
     assert paid == {"audit": True, "judge": False, "regrade": False, "issues": False, "agreement": False,
-                    "fix": True, "prove": True, "submit": True}  # fmt: skip
+                    "fix": True, "prove": True, "ship": False, "submit": True}  # fmt: skip
 
 
 def test_job_runs_logs_and_finishes(srv, data, monkeypatch):

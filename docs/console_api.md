@@ -25,9 +25,10 @@ The server builds argv from validated args only. It never passes client strings 
 | agreement | none | no |
 | fix | top?: int 1..8 = 3, holdout?: bool = true | yes |
 | prove | cause: str (must be a cause_id in causes.json), n?: int 2..20 = 8, k?: int 1..5 = 3, attempt?: int 1..2 = 1, holdout?: bool = true, screen?: bool = true | yes |
+| ship | cause: str (must be a cause_id in causes.json and in state ready_to_ship). Needs `"confirm": true`. Runs `pipeline ship --cause`, which makes a new prompt version. | no (changes the live prompt) |
 | submit | submission_id: str (from POST /api/submit) | yes |
 
-A paid stage needs `"confirm": true` in the body. Otherwise the server returns 400 `{"error": "confirm", "estimate_usd": number|null}`.
+Stage `ship` needs `"confirm": true` too: 400 `{"error": "confirm"}` without it, and 409 `{"error": "<cause> is <state>, not ready_to_ship"}` when the tracker state is not ready_to_ship. A paid stage needs `"confirm": true` in the body. Otherwise the server returns 400 `{"error": "confirm", "estimate_usd": number|null}`.
 
 ### Jobs
 - `POST /api/jobs {stage, args, confirm?}`. Responses:
@@ -73,4 +74,10 @@ A paid stage needs `"confirm": true` in the body. Otherwise the server returns 4
 - `estimate_usd` is always null for now: there is no estimator.
 - A job row also keeps `pid`, `started_utc` and `ended_utc` in jobs.jsonl. The API hides them.
 - `--calls` takes one comma-separated value. Stage `submit` runs with `--runs <data>/console/submissions/<sid>` and `--inbox <sid>/inbox --from <data>`. Its `--calls` come from `meta.json` in the submission folder.
-- `fix` and `prove` pass `--prompt data/reference/vani_prompt_sarvam.md`. When it is missing the job is refused: 400 `{error: "VANI prompt file missing", field: "prompt"}`.
+- `fix`, `prove` and `ship` pass `--prompt data/reference/vani_prompt_sarvam.md`. When it is missing the job is refused: 400 `{error: "VANI prompt file missing", field: "prompt"}`.
+
+### Tracker (#130)
+- `GET /api/tracker` returns `{causes: [...], prompt_versions: [...], current_prompt_version}`. Each cause has `state`, `route`, `counts` and `events`. An event that skipped its prerequisite state has `ignored: true`. `prompt_versions_error` is set when `prompts/versions.json` is malformed.
+- `POST /api/tracker/<cause_id>/ticket {action: "sent", ref: str 1..200} | {action: "resolved", note: str}` returns 200 `{cause}`, 400 for a bad body, 409 `{error}` for a wrong state and 404 for an unknown cause.
+- `POST /api/tracker/<cause_id>/ship {confirm: true}` starts the `ship` job and returns 202 `{job}`. The UI polls the job. 409 `{error}` when the state is not ready_to_ship, 409 `{error: "busy", job_id}` when another job runs, 400 `{error: "confirm"}` without confirm.
+- Both POSTs use the same security checks as every POST (see Security).
