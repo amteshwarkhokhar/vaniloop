@@ -183,11 +183,21 @@ def _absence_example(audit: AuditRecord, parameter: str, call: CallRecord | None
     finding = next((f for f in audit.findings if f.parameter == parameter and f.status in ("Fatal", "NonFatal")), None)
     if finding is None:
         return None
-    line = finding.reason.strip().rstrip(".")
+    reason = _one_line(finding.reason.strip().rstrip("."), EXAMPLE_CHARS * 3 // 8)  # the turn needs more room
     last_bot = next((t.text for t in reversed(call.turns) if t.speaker == "bot"), None) if call else None
-    if last_bot:  # the turn first: the reason is the same on every member, so a cut must not drop the turn
-        line = f"Last bot turn: {' '.join(last_bot.split())} (fault: {line})"
+    if last_bot:  # both parts survive the cut: the turn gets the room the reason leaves
+        tail = f" (fault: {reason})"
+        line = f"Last bot turn: {_one_line(last_bot, EXAMPLE_CHARS - len(tail) - len('Last bot turn: '))}{tail}"
+    else:
+        line = reason
     return _one_line(line, EXAMPLE_CHARS) or None
+
+
+def _load_calls(calls_path: Path | None) -> dict[str, CallRecord] | None:
+    """call_id -> CallRecord from calls_path, or None without a path (then absence faults get no example)."""
+    if calls_path is None:
+        return None
+    return {r["call_id"]: CallRecord.model_validate(r) for r in read_jsonl(calls_path) if r.get("call_id")}
 
 
 def changed_lines(old: str, new: str) -> int:
@@ -412,11 +422,7 @@ def run_fix(
     doc = json.loads(Path(causes_path).read_text(encoding="utf-8"))
     causes = [Cause.model_validate(c) for c in doc.get("causes", [])]
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
-    calls = (
-        {r["call_id"]: CallRecord.model_validate(r) for r in read_jsonl(calls_path) if r.get("call_id")}
-        if calls_path is not None
-        else None
-    )
+    calls = _load_calls(calls_path)
     examples: dict[str, list[str]] = {}
     routed = []
     for c in causes:
@@ -551,6 +557,7 @@ def run_refix(
     llm=complete_json,
     holdout: bool = False,
     audits_path: Path = AUDITS_PATH,
+    calls_path: Path | None = None,
 ) -> dict:
     """Write a second patch for a cause whose patch the gate rejected, from what the replays showed.
 
@@ -610,7 +617,8 @@ def run_refix(
     }
     examples: list[str] = []
     if holdout:
-        examples = evidence_examples(cause, {a.call_id: a for a in load_audits(Path(audits_path))}, holdout=True)
+        calls = _load_calls(calls_path)  # an absence fault has no quote: the fallback keeps its fix-half examples
+        examples = evidence_examples(cause, {a.call_id: a for a in load_audits(Path(audits_path))}, True, calls)
     prompt_text = prompt.load(prompt_path)
     rejected: list[dict] = []
     new = propose_patch(cause, examples, prompt_text, llm=llm, rejected=rejected, previous=previous)

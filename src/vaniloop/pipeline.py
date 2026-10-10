@@ -303,7 +303,9 @@ def main(argv: list[str] | None = None) -> None:
         for cid in r["watched"]:
             print(f"  watch {cid}")
     elif args.cmd == "refix":
-        r = run_refix(args.cause, Path(args.prompt), **({"holdout": True} if args.holdout else {}))
+        r = run_refix(
+            args.cause, Path(args.prompt), calls_path=CALLS_PATH, **({"holdout": True} if args.holdout else {})
+        )
         print(f"{len(r['patches'])} patches, {len(r['rejected'])} rejected -> {PATCHES_PATH}")
         for x in r["rejected"]:
             print(f"  rejected {x['cause_id']}: {x['reason']}")

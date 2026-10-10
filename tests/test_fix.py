@@ -1273,3 +1273,35 @@ def test_absence_example_keeps_the_last_bot_turn_under_a_long_reason():
     turn = "Theek hai, aapki requirement post kar di gayi hai, dhanyavaad"
     ex = evidence_examples(c, {"a1": a}, calls={"a1": absence_call("a1", turn)})
     assert len(ex) == 1 and turn in ex[0] and len(ex[0]) <= 160
+
+
+def test_refix_holdout_keeps_fix_half_absence_examples(tmp_path):
+    """refix --holdout drops the failing replay lines, so an absence cause must still send its fix-half fallback
+    examples, and no hold-out one. Without calls in refix the second patch is written from zero examples (#109)."""
+    fix_ids, hold_ids = halves()
+    c = cause().model_copy(update={"fatal_calls": [hold_ids[0], fix_ids[0]]})
+    _, _, ap, _ = write_run(tmp_path, PROMPT.encode(), [c], [absence_audit(i) for i in (hold_ids[0], fix_ids[0])])
+    cl = tmp_path / "calls.jsonl"
+    cl.write_text(
+        absence_call(hold_ids[0], "HOLDOUT-TURN").model_dump_json()
+        + "\n"
+        + absence_call(fix_ids[0], "FIX-TURN").model_dump_json()
+        + "\n"
+    )
+    (tmp_path / "r").mkdir()
+    kw = refix_files(tmp_path / "r")
+    kw["causes_path"].write_text(json.dumps({"causes": [c.model_dump()]}))
+    seen: list = []
+    llm = stub("line 3: rule text 3", "line 3: other rule", seen)
+    run_refix("cause_qty_probing", llm=llm, holdout=True, audits_path=ap, calls_path=cl, **kw)
+    data = json.loads(seen[0][1].split("<data>\n")[1].split("\n</data>")[0])
+    assert len(data["examples"]) == 1 and "FIX-TURN" in data["examples"][0]
+    assert "HOLDOUT-TURN" not in seen[0][1]
+
+
+def test_absence_example_keeps_the_reason_under_a_long_last_turn():
+    """A last bot turn longer than the example limit must not push the fault reason out of the example. Without the
+    split the patch writer sees only closing text and not what went wrong."""
+    c = cause().model_copy(update={"fatal_calls": ["a1"]})
+    ex = evidence_examples(c, {"a1": absence_audit("a1")}, calls={"a1": absence_call("a1", "lamba jawab " * 40)})
+    assert len(ex) == 1 and "Bot never asked for quantity" in ex[0] and "lamba jawab" in ex[0] and len(ex[0]) <= 160
