@@ -27,12 +27,13 @@ from .fix import (
     apply_patch,
     require_patchable,
 )
+from .fix import route as fix_route
 from .gate import AuditFn, Item, ReplayFn
 from .ingest import OUT_PATH as CALLS_PATH
 from .issue import AUDITS_PATH, load_audits
 from .jsonl import append_jsonl, dedupe_by_call_id, read_jsonl
 from .ledger import extract_ledger
-from .models import AuditRecord, CallRecord, Ledger
+from .models import AuditRecord, CallRecord, Cause, Ledger
 from .rules import audit_call
 from .split import split_half
 
@@ -158,6 +159,8 @@ def select_targets(
     holdout: bool = False,
     screen: Callable[[Item], bool] | None = None,
     quiet: bool = False,
+    roots: set[str] | None = None,
+    ticket_calls: set[str] | None = None,
 ) -> tuple[list[Item], set[str]]:
     """Main-variant calls whose saved audit fails the parameter and that have a fork turn.
 
@@ -170,6 +173,10 @@ def select_targets(
     failing call, so the guards stay clear of the fix half too. With `screen`, a call that passed the two checks is
     replayed by `screen(item)`, and False drops it as "not reproduced" (the next candidate takes its place, until n
     are kept). `quiet` stops the prints, for a second pass over the same inputs.
+
+    `roots` (#130) are the cause's root calls (fatal_calls + nonfatal_calls in causes.json). A failing call outside
+    them is a symptom of another root and is dropped. `ticket_calls` are the root calls of ticket-routed causes:
+    a call in them is dropped too. None for either turns that rule off.
     """
     forks: dict[str, int] = {}
     skipped: list[str] = []
@@ -186,12 +193,19 @@ def select_targets(
     first = pick(list(pool), n)  # the plain pick first, so a run with no drop keeps its picks
     rest = sorted(set(pool) - set(first))
     random.Random(PICK_SEED).shuffle(rest)  # the same seeded order for the replacements
-    reasons: dict[str, list[str]] = {"inert patch": [], "channel fault": [], "not reproduced": []}
+    reasons: dict[str, list[str]] = {
+        "symptom of another root": [], "root is a ticket cause": [], "inert patch": [], "channel fault": [],
+        "not reproduced": [],
+    }  # fmt: skip
     kept: list[str] = []
     for cid in [*first, *rest]:
         if len(kept) >= n:
             break
-        if prompts is not None and inert_patch(calls[cid], ledgers[cid], *prompts):
+        if roots is not None and cid not in roots:
+            reasons["symptom of another root"].append(cid)
+        elif ticket_calls and cid in ticket_calls:
+            reasons["root is a ticket cause"].append(cid)
+        elif prompts is not None and inert_patch(calls[cid], ledgers[cid], *prompts):
             reasons["inert patch"].append(cid)
         elif channel_fault(calls[cid], forks[cid]):
             reasons["channel fault"].append(cid)
@@ -214,8 +228,10 @@ def select_guards(
     audits: dict[str, AuditRecord],
     exclude: set[str],
     n: int,
+    ticket_calls: set[str] | None = None,
 ) -> list[Item]:
-    """Main-variant calls with verdict Pass, not in `exclude`, that have a guard fork turn."""
+    """Main-variant calls with verdict Pass, not in `exclude` or `ticket_calls`, that have a guard fork turn."""
+    exclude = exclude | (ticket_calls or set())
     forks: dict[str, int] = {}
     for cid, audit in audits.items():
         if cid in calls and cid in ledgers and cid not in exclude and ledgers[cid].variant == "main":
@@ -244,7 +260,12 @@ def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path, attempt:
             f"the current patch for {cause_id} is attempt {patch.attempt}, not {attempt}; "
             f"pass --attempt {patch.attempt}"
         )
-    old = prompt.load(prompt_path)
+    old, version = tracker.current_prompt(prompt_path, Path(patches_path).parent)  # latest shipped version, else base
+    if (patch.base_version or tracker.BASE) != version:
+        raise SystemExit(
+            f"the patch for {cause_id} was written on {patch.base_version or tracker.BASE}, the current prompt is "
+            f"{version}; run `pipeline refix --cause {cause_id}` on the new base"
+        )
     n = _count_overlapping(old, patch.old_text)
     if n != 1:
         raise SystemExit(
@@ -255,6 +276,25 @@ def build_prompts(cause_id: str, prompt_path: Path, patches_path: Path, attempt:
     if new == old:  # the old/new label in replays.jsonl comes from comparing the two texts
         raise SystemExit(f"the patch for {cause_id} leaves the prompt unchanged; a no-op patch cannot be tested")
     return old, new
+
+
+def root_sets(cause_id: str, causes_path: Path) -> tuple[set[str] | None, set[str]]:
+    """(this cause's root calls, root calls of every ticket-routed cause) from causes.json; (None, empty) when the
+    file or the cause is missing, so a run on old inputs keeps its old target rules."""
+    try:
+        raw = [c for c in json.loads(Path(causes_path).read_text(encoding="utf-8")).get("causes", [])]
+        mine = next(c for c in raw if c.get("cause_id") == cause_id)
+    except (OSError, ValueError, AttributeError, StopIteration):
+        return None, set()
+    tickets: set[str] = set()
+    for c in raw:
+        try:
+            if fix_route(Cause.model_validate(c))[0] == "ticket":
+                tickets |= set(c.get("fatal_calls") or []) | set(c.get("nonfatal_calls") or [])
+        except ValueError:
+            continue
+    mine_roots = set(mine.get("fatal_calls") or []) | set(mine.get("nonfatal_calls") or [])
+    return (mine_roots or None), tickets  # a row with no call lists is an old file: no root rule
 
 
 def call_values(ledger: Ledger) -> dict:
@@ -433,8 +473,11 @@ def run_prove(
     ledgers = {r["call_id"]: Ledger.model_validate(r) for r in dedupe_by_call_id(read_jsonl(ledgers_path))}
     audits = {a.call_id: a for a in load_audits(Path(audits_path))}
     dropped: dict[str, list[str]] = {}
+    roots, ticket_calls = root_sets(cause_id, causes_path or Path(patches_path).with_name("causes.json"))
     try:  # the inert check renders every candidate: a template error must stop here, before any LLM call
-        targets, candidates = select_targets(calls, ledgers, audits, parameter, n, (old, new), dropped, holdout)
+        targets, candidates = select_targets(
+            calls, ledgers, audits, parameter, n, (old, new), dropped, holdout, roots=roots, ticket_calls=ticket_calls
+        )
     except TemplateError as e:
         raise SystemExit(f"a prompt for cause {cause_id} does not render: {type(e).__name__}: {e}") from e
     if len(targets) < gate.MIN_CALLS:
@@ -446,7 +489,14 @@ def run_prove(
             )
         raise SystemExit(f"only {len(targets)} target call(s) for '{parameter}'; the gate needs {gate.MIN_CALLS}")
     plan = Plan(
-        cause_id, parameter, old, new, targets, select_guards(calls, ledgers, audits, candidates, guards), k, max_turns
+        cause_id,
+        parameter,
+        old,
+        new,
+        targets,
+        select_guards(calls, ledgers, audits, candidates, guards, ticket_calls),
+        k,
+        max_turns,
     )
     try:
         _sent_tags(plan)  # render every prompt for every call now: a template error must not surface mid-run
@@ -511,7 +561,18 @@ def run_prove(
         stage = "screen"
         try:
             kept_items, _ = select_targets(
-                calls, ledgers, audits, parameter, n, (old, new), dropped_screen, holdout, screen_fn, quiet=True
+                calls,
+                ledgers,
+                audits,
+                parameter,
+                n,
+                (old, new),
+                dropped_screen,
+                holdout,
+                screen_fn,
+                quiet=True,
+                roots=roots,
+                ticket_calls=ticket_calls,
             )
         finally:
             stage = None
@@ -577,7 +638,11 @@ def run_prove(
         result.not_reproduced, result.seed_base = sorted(dropped_screen.get("not reproduced", [])), plan.seed_base
     gates_path = Path(gates_path)
     gates_path.parent.mkdir(parents=True, exist_ok=True)
-    append_jsonl(gates_path, [result.model_dump(mode="json", exclude_none=True)])
+    row = result.model_dump(mode="json", exclude_none=True)
+    counts = {r: len(ids) for r, ids in dropped.items() if ids}
+    if counts:  # candidates each target rule dropped (first pass); no key when nothing was dropped
+        row["dropped"] = counts
+    append_jsonl(gates_path, [row])
     rd = Path(gates_path).parent
     if screen:
         tracker.emit("screened", cause_id, {"attempt": attempt, "screened": len(screened_items),
