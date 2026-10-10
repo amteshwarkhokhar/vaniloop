@@ -15,12 +15,12 @@
 
   function row(g, i, names) {
     // Own-property lookup: a decision such as "constructor" falls back to the raw word, review tone.
-    const [word, tone] = V.own(DECISION, g.decision) || [String(g.decision || "Unknown"), "review"];
+    const [word, tone] = V.own(DECISION, g.decision) || [V.str(g.decision) || "Unknown", "review"];
     const p = num(g.p_value);
     const oldR = num(g.old_fail_rate);
     const newR = num(g.new_fail_rate);
     return `<li class="gate">
-      <span class="gcause"><b>${esc(names.get(g.cause_id) || V.name(String(g.cause_id || "").replace(/^cause_/, "")))}</b>
+      <span class="gcause"><b>${esc(names.get(g.cause_id) || V.name(V.str(g.cause_id).replace(/^cause_/, "")))}</b>
         <span class="label">${esc(g.cause_id)}<span class="sep">/</span>Attempt ${esc(g.attempt ?? 1)}</span></span>
       <span class="gdec"><span class="chip t-${esc(tone)}">${esc(word)}</span></span>
       <span class="rates" role="img" aria-label="Fail rate ${pct(oldR)} on the old prompt, ${pct(newR)} on the new prompt">

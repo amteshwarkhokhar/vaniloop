@@ -6,7 +6,7 @@
     ranked: "Recurring pattern", pattern_unconfirmed: "Pattern not confirmed", watch: "Watching",
     outlier: "Outlier", single_category: "One category only", isolated: "Isolated",
   };
-  const status = (s) => V.own(STATUS, s) || String(s || "").replace(/_/g, " ");
+  const status = (s) => V.own(STATUS, s) || V.str(s).replace(/_/g, " ");
   const list = (x) => (Array.isArray(x) ? x : []);
   const idl = (x) => list(x).filter((s) => typeof s === "string" && s); // member ids: non-empty strings only
   const seg = (n, max, t) => (n ? `<i class="t-${esc(t)}" style="width:${((100 * n) / max).toFixed(2)}%"></i>` : "");

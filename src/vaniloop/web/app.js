@@ -9,17 +9,19 @@
   const WORDS = { Fatal: "Fatal", NonFatal: "Non-fatal", NeedsReview: "Needs review", Pass: "Pass", Unknown: "Unknown" };
   const TONE = { Fatal: "fatal", NonFatal: "nonfatal", NeedsReview: "review", Unknown: "review", Pass: "pass" };
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
-  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  // Text of a data value: an object (for example {"toString": null}) gives "", so String() never throws.
+  const str = (s) => (s == null || typeof s === "object" || typeof s === "function" ? "" : String(s));
+  const esc = (s) => str(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   // Own-property lookup: a data string such as "constructor" must not reach Object.prototype.
   const own = (dict, k) => (typeof k === "string" && Object.hasOwn(dict, k) ? dict[k] : undefined);
   const tone = (v) => own(TONE, v) || "review";
   const word = (v) => own(WORDS, v) || v || "";
 
   const V = (window.V = {
-    esc, own, tone, word,
+    esc, own, str, tone, word,
     reduced: () => motion.matches,
     name: (p) => own(NAMES, p) || p || "",
-    scope: (s) => (s === "bl_collection" ? "lead call" : String(s || "unclear").replace(/_/g, " ")),
+    scope: (s) => (s === "bl_collection" ? "lead call" : (str(s) || "unclear").replace(/_/g, " ")),
     speaker: (s) => (s === "bot" ? "VANI" : s === "user" ? "Buyer" : s || ""),
     chip: (v) => `<span class="chip t-${esc(tone(v))}">${esc(word(v))}</span>`,
     shortId: (id) => (id.length > 14 ? `${id.slice(0, 10)}…` : id),

@@ -9,7 +9,7 @@
 
   function tape(call, faults, dur) {
     const segs = call.turns.map((t) => {
-      const words = String(t.text || "").split(/\s+/).filter(Boolean).length;
+      const words = V.str(t.text).split(/\s+/).filter(Boolean).length;
       const h = Math.min(38, 8 + words * 1.6);
       const side = t.speaker === "bot" ? "bot" : "user";
       return `<span class="seg ${side}" data-turn="${esc(t.idx)}" style="left:${pct(t.start_sec, dur)};width:${pct(Math.max(0, t.end_sec - t.start_sec), dur)};height:${h}%"></span>`;
