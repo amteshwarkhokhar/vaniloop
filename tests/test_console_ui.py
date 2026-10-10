@@ -52,7 +52,8 @@ def test_read_only_leaves_no_enabled_control_in_operate():
     for view in ("run", "submit", "audit", "rubric", "tune", "tracker"):
         tags = re.findall(r"<(?:button|input|select|textarea)\b[^>]*>", d[view])
         assert tags
-        assert all(" disabled" in t for t in tags if "data-view" not in t), (view, [t for t in tags if " disabled" not in t])
+        writers = [t for t in tags if "data-view" not in t]
+        assert all(" disabled" in t for t in writers), (view, [t for t in writers if " disabled" not in t])
     assert "read-only" in d["run"]
 
 

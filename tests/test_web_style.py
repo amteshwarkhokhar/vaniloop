@@ -7,7 +7,10 @@ from pathlib import Path
 
 WEB = Path(__file__).parent.parent / "src" / "vaniloop" / "web"
 TITLES = ("h1", ".ptitle", ".view-title", ".call-id", ".hero-line")
-FORBIDDEN = r"Bodoni|Didot|Georgia|Hanken|(?<!sans-)serif|var\(--display\)|italic|oblique|text-transform\s*:\s*(?!none)|font-variant-caps"
+FORBIDDEN = (
+    r"Bodoni|Didot|Georgia|Hanken|(?<!sans-)serif|var\(--display\)|italic|oblique"
+    r"|text-transform\s*:\s*(?!none)|font-variant-caps"
+)
 
 
 def test_web_css_has_no_display_font_italic_caps_or_tracking():
