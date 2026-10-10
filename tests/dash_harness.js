@@ -13,7 +13,7 @@ function el(id) {
   return e;
 }
 const ids = {}, doc = { activeElement: null, listeners: {} };
-for (const id of ["panel", "side", "nav", "judge", "judge-wrap", "menu-now", "dock", "dock-info", "dock-actions", "dock-log"]) ids[id] = el(id);
+for (const id of ["panel", "side", "nav", "judge", "judge-wrap", "menu-now", "dock", "dock-info", "dock-actions", "dock-log", "tune-res", "rb-save"]) ids[id] = el(id);
 const menu = el("menu"), mark = el("mark"), a1 = el("a1"), a2 = el("a2");
 ids.side.kids = [a1, a2];
 doc.getElementById = (id) => ids[id];
@@ -35,9 +35,10 @@ const stages = {
   ] },
 };
 const pending = {}, calls = [], timers = [], routes = {};
+let tid = 0;
 const consoleOn = (process.argv[2] || "").startsWith("con-");
 const sandbox = {
-  btoa: (b) => Buffer.from(b, "binary").toString("base64"), setTimeout: (f, ms) => timers.push({ f, ms }), clearTimeout: (i) => { timers[i - 1] = null; },
+  btoa: (b) => Buffer.from(b, "binary").toString("base64"), setTimeout: (f, ms) => (timers.push({ id: ++tid, f, ms }), tid), clearTimeout: (i) => { const k = timers.findIndex((t) => t && t.id === i); if (k >= 0) timers[k] = null; },
   document: doc, console, history: { replaceState() {} },
   location: { hash: "" }, performance: { now: () => 0 }, requestAnimationFrame() {},
   matchMedia: () => ({ matches: false, addEventListener() {} }),
@@ -138,6 +139,50 @@ const SC = {
     await click({ op: "run", stage: "judge" });
     await click({ op: "cancel" });
     return calls.filter((c) => c.p.endsWith("/cancel"));
+
+    routes["GET /api/rubric"] = [200, RUB]; routes["POST /api/tune"] = [200, TUNE];
+    for (const g of ["run", "submit", "audit", "rubric", "tune"]) { await click({ go: g }); out[g] = ids.panel.innerHTML; }
+    out.dock = ids["dock-actions"].innerHTML;
+    return out;
+  },
+  async "con-rubric"() {
+    const out = {}, put = () => calls.filter((c) => c.method === "PUT").map((c) => c.body);
+    routes["GET /api/rubric"] = [200, RUB];
+    await click({ go: "rubric" });
+    out.panel = ids.panel.innerHTML;
+    await emit("input", { dataset: { op: "param", id: "rules.FRUSTRATED_P" }, value: "0.9" });
+    await emit("input", { dataset: { op: "q", q: "spec_fit", f: "instructions" }, value: "New text" });
+    routes["PUT /api/rubric"] = [[400, { error: "must be at most 0.8", field: "rules.FRUSTRATED_P" }], [200, { ...RUB, params: [prm("rules.FRUSTRATED_P", "Frustrated at", 0.5, { value: 0.7, overridden: true }), ...RUB.params.slice(1)] }]];
+    await click({ op: "save-rubric" });
+    out.err = ids.panel.innerHTML;
+    await emit("input", { dataset: { op: "param", id: "rules.FRUSTRATED_P" }, value: "0.7" });
+    await click({ op: "save-rubric" });
+    out.saved = ids.panel.innerHTML; out.put = put();
+    routes["POST /api/jobs"] = [202, { job: job("j1", "judge", "running") }];
+    await click({ op: "rejudge" });
+    out.posts = posts(); out.chain = sandbox.window.VL.console.C.chain;
+    return out;
+  },
+  async "con-tune"() {
+    const out = {};
+    routes["GET /api/rubric"] = [200, RUB];
+    routes["POST /api/tune"] = [200, TUNE];
+    routes["PUT /api/rubric"] = [200, RUB];
+    await click({ go: "tune" });
+    const tunes = () => calls.filter((c) => c.p === "/api/tune");
+    const n0 = tunes().length;
+    for (const v of ["0.6", "0.62", "0.65"]) await emit("input", { dataset: { op: "tune", key: "question_fits.true_at" }, value: v });
+    out.timers = timers.filter(Boolean).map((t) => t.ms);
+    out.beforeFire = tunes().length - n0;
+    await fire();
+    out.after = tunes().slice(n0).map((c) => c.body);
+    out.res = ids["tune-res"].innerHTML;
+    await click({ op: "tune-save" });
+    out.put = calls.filter((c) => c.method === "PUT").map((c) => c.body);
+    routes["POST /api/tune"] = [409, { error: "no raw Jev answers: run judge" }];
+    await emit("input", { dataset: { op: "tune", key: "frustrated_p" }, value: "0.4" }); await fire();
+    out.noraw = ids["tune-res"].innerHTML;
+    return out;
   },
   async "con-chain"() {
     const out = {};
@@ -155,6 +200,15 @@ const SC = {
     return out;
   },
 };
+const prm = (id, label, value, extra = {}) => ({ id, group: "g", label, help: "Plain help.", type: "float", min: 0, max: 1, step: 0.05, default: value, value, overridden: false, ...extra });
+const Q = { instructions: "Ask it.", true: { description: "yes", examples: ["a"] }, false: { description: "no", examples: [] } };
+const RUB = { path_name: "rubric.json", jev_version_effective: "4", checks: [
+  { id: "looping", name: "No looping <img src=x onerror=alert(1)>", what: "Bot repeats itself.", fatal_when: "Three asks.", nonfatal_when: "Two asks.", prompt_ref: "L69", judged_by: "code", params: ["rules.FRUSTRATED_P", "rules.DEAD_AIR_SEC"] }],
+  params: [prm("rules.FRUSTRATED_P", "Frustrated at", 0.5), prm("rules.DEAD_AIR_SEC", "Dead air seconds", 5, { type: "int", max: 30, step: 1 }), prm("jev.Q_TRUE_AT", "Q true", 0.55), prm("jev.Q_FALSE_AT", "Q false", 0.2),
+    prm("jev.OPT_TRUE_AT", "Opt true", 0.6), prm("jev.OPT_FALSE_AT", "Opt false", 0.3), prm("jev.PM_TRUE_AT", "PM true", 0.65), prm("jev.PM_FALSE_AT", "PM false", 0.35), prm("jev.N_DROP_AT", "Name drop", 0.35)],
+  questions: [{ id: "spec_fit", label: "Spec fit", ...Q, default: Q, overridden: false }] };
+const row = (label, split, right) => ({ label, split, n: 40, right, wrong: 40 - right - 5, unsure: 5, gemini_right: 28 });
+const TUNE = { labels: [row("question_fits", "dev", 31), row("question_fits", "test", 29)], current: [row("question_fits", "dev", 28), row("question_fits", "test", 29)], flips: { question_fits: 3 }, calls: 712 };
 const CON = { read_only: false, data_dir_name: "runs", busy_job_id: null, stages: [
   { id: "audit", label: "Audit", paid: true, args: [{ name: "calls", type: "call_ids", required: false, default: null }, { name: "limit", type: "int", required: false, default: null }] },
   { id: "judge", label: "Judge", paid: false, args: [{ name: "calls", type: "call_ids", required: false, default: null }] },

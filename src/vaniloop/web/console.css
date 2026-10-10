@@ -52,3 +52,14 @@
   .addrow{ flex-direction:column; }
   .op-card .btn{ align-self:stretch; justify-content:center; }
 }
+
+/* rubric and tune */
+.chg{ font:500 10px/1 var(--mono); text-transform:uppercase; letter-spacing:.14em; color:var(--night); background:var(--champagne); padding:4px 6px; border-radius:2px; align-self:center; }
+.chg[hidden]{ display:none; }
+.prm .addrow .inp{ max-width:140px; }
+.savebar{ position:sticky; top:0; z-index:5; padding:12px 0; margin:0 0 8px; background:linear-gradient(var(--night) 70%, transparent); }
+textarea.inp{ resize:vertical; min-height:60px; }
+.sliders{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:22px 32px; margin:0 0 24px; }
+.rng{ width:100%; accent-color:var(--champagne); }
+output.mono{ color:var(--champagne); margin-left:8px; }
+@media (max-width:860px){ .savebar{ top:56px; } .prm .addrow .inp{ max-width:none; } }
