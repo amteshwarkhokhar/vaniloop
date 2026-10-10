@@ -44,11 +44,11 @@ def test_submit_sends_file_and_id_then_shows_one_row_per_call():
 
 
 def test_read_only_leaves_no_enabled_control_in_operate():
-    """With read_only true every control in Run, Submit, Rubric, Tune and the stage Run bar is disabled.
+    """With read_only true every control in Run, Submit, Rubric, Tune, Tracker and the stage Run bar is disabled.
 
     If one stayed enabled the frozen demo folder could be written."""
     d = run("con-readonly")
-    for view in ("run", "submit", "audit", "rubric", "tune"):
+    for view in ("run", "submit", "audit", "rubric", "tune", "tracker"):
         tags = re.findall(r"<(?:button|input|select|textarea)\b[^>]*>", d[view])
         assert tags
         assert all(" disabled" in t for t in tags if "chk" not in t), (view, [t for t in tags if " disabled" not in t])
@@ -143,3 +143,38 @@ def test_editing_only_a_question_enables_save_and_sends_only_that_question():
     assert put["params"] == {} and list(put["questions"]) == ["spec_fit"]
     assert put["questions"]["spec_fit"]["true"]["examples"] == ["one", "two"]
     assert "value" not in put["questions"]["spec_fit"], "the PUT carries the question texts, not the API wrapper"
+
+
+def test_tracker_groups_causes_into_columns_and_escapes_hostile_text():
+    """Each state lands in its column, a regressed cause is red, and hostile names and event text show as text.
+
+    Without the grouping a cause could vanish from the board or sit in the wrong column. Unescaped text would run."""
+    d = run("con-tracker")
+    found = re.findall(r'<section class="col" aria-label="([^"]+)">(.*?)</section>', d["board"], re.S)
+    cols = {m[0]: m[1] for m in found}
+    assert list(cols) == ["Open", "In fix", "Ready to ship", "Shipped", "Tickets", "Watching", "Done or failed"]
+    assert "Cause c1" in cols["Open"] and "Cause c2" in cols["In fix"] and "Cause c3" in cols["Ready to ship"]
+    assert "Cause c4" in cols["Tickets"] and "Cause c5" in cols["Tickets"] and "Cause c9" in cols["Done or failed"]
+    assert '<span class="chip t-fatal">regressed</span>' in cols["Done or failed"]
+    assert "&#60;img src=x onerror=alert(1)&#62;" in d["board"] and "<img" not in d["board"]
+    assert "v2" in d["board"] and "current" in d["board"] and "from v1" in d["board"]
+
+
+def test_tracker_actions_post_the_contract_bodies_and_show_errors():
+    """Mark ticket sent needs a ref and posts the trimmed ref. Approve and ship asks first and shows the gate numbers.
+
+    A 400 and a 409 show their text in the card. Without the check a ship could run with one click and no sight of p."""
+    d = run("con-tracker")
+    assert "Enter the ticket id or link first." in d["empty"]
+    assert "ref is required" in d["bad"]
+    for part in ("p value <b>0.01</b>", "lift <b>0.25</b>", "guard <b>pass</b>"):
+        assert part in d["confirm"]
+    assert "gate no longer ships" in d["conflict"]
+    assert "ship" in d["dock"] and "done" in d["dock"], "the 202 job must reach the dock"
+    assert d["rereads"] >= 1 and "from v2" in d["after"], "a finished ship must reload the board and prompt versions"
+    assert d["posts"] == [
+        ["/api/tracker/c4/ticket", {"action": "sent", "ref": "T-1"}],
+        ["/api/tracker/c4/ticket", {"action": "sent", "ref": "T-1"}],
+        ["/api/tracker/c3/ship", {"confirm": True}],
+        ["/api/tracker/c3/ship", {"confirm": True}],
+    ]

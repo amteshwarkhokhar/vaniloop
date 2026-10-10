@@ -82,7 +82,7 @@
   }
   async function ended() {
     dockDraw(true);
-    await Promise.all([loadJobs(), C.sub.sid ? loadSub(C.sub.sid, false) : null, V.refresh()]);
+    await Promise.all([loadJobs(), C.sub.sid ? loadSub(C.sub.sid, false) : null, TR.data ? loadTracker() : null, V.refresh()]);
     if (D.job.status === "done" && C.chain.length) {
       const next = C.chain.shift();
       const r = await startJob(next, {}, false, true);
@@ -376,7 +376,51 @@
     redraw();
   }
 
-  V.ITEMS.push({ id: "run", group: "operate", name: "Run" }, { id: "submit", group: "operate", name: "Submit calls" }, { id: "rubric", group: "operate", name: "Rubric" }, { id: "tune", group: "operate", name: "Tune" });
+  // ---- issues tracker ----
+  const TR = { data: null, err: null, ref: {}, note: {}, ship: null, msg: {} };
+  const GROUPS = [["Open", ["open"]], ["In fix", ["in_fix", "gated_inconclusive"]], ["Ready to ship", ["ready_to_ship"]], ["Shipped", ["shipped"]], ["Tickets", ["ticket_open", "ticket_sent", "ticket_resolved"]], ["Watching", ["watching"]], ["Done or failed", ["closed", "rejected", "exhausted", "regressed"]]];
+  const STONE = { regressed: "fatal", rejected: "review", exhausted: "review", closed: "pass", shipped: "pass", ready_to_ship: "nonfatal", in_fix: "nonfatal", gated_inconclusive: "nonfatal" };
+  const schip = (st) => `<span class="chip t-${esc(V.own(STONE, st) || "review")}">${esc(str(st).replace(/_/g, " "))}</span>`;
+  async function loadTracker() {
+    const r = await call("GET", "/api/tracker");
+    if (r.ok && Array.isArray(r.data.causes)) { TR.data = r.data; TR.err = null; } else TR.err = errText(r);
+  }
+  const scalars = (d) => Object.entries(d && typeof d === "object" ? d : {}).filter(([, v]) => v == null || typeof v !== "object").map(([k, v]) => `<span>${esc(k.replace(/_/g, " "))} <b>${esc(v)}</b></span>`).join("");
+  const gated = (c) => [...(c.events || [])].reverse().find((e) => e && e.kind === "gated");
+  const tact = (c) => {
+    const id = esc(c.cause_id), m = TR.msg[c.cause_id], err = m ? `<p class="err" role="alert">${esc(m)}</p>` : "";
+    if (c.state === "ticket_open") return `<div class="addrow"><input class="inp" aria-label="Ticket id or link" placeholder="Ticket id or link" data-op="tref" data-id="${id}" value="${esc(TR.ref[c.cause_id] || "")}"${dis()}><button type="button" class="btn sm" data-op="t-sent" data-id="${id}"${dis()}>Mark ticket sent</button></div>${err}`;
+    if (c.state === "ticket_sent") return `<div class="addrow"><input class="inp" aria-label="Resolution note" placeholder="Note" data-op="tnote" data-id="${id}" value="${esc(TR.note[c.cause_id] || "")}"${dis()}><button type="button" class="btn sm" data-op="t-done" data-id="${id}"${dis()}>Mark resolved</button></div>${err}`;
+    if (c.state !== "ready_to_ship") return err;
+    if (TR.ship !== c.cause_id) return `<button type="button" class="btn sm" data-op="ship" data-id="${id}"${dis()}>Approve and ship</button>${err}`;
+    const g = gated(c);
+    return `<div class="confirm" role="alertdialog" aria-label="Confirm ship"><p><b>Ship this patch into a new prompt version?</b></p><p class="gate-f">${g ? scalars(g.detail) : "<span>no gate record</span>"}</p><button type="button" class="btn pri sm" data-op="ship-go" data-id="${id}"${dis()}>Confirm and ship</button> <button type="button" class="btn sm" data-op="ship-no"${dis()}>Cancel</button></div>${err}`;
+  };
+  const tcard = (c) => {
+    const ev = Array.isArray(c.events) ? c.events : [], k = c.counts || {};
+    return `<article class="card tcard rv"><h3>${esc(c.name)}</h3><p class="meta">${schip(c.state)}<span class="pill">${esc(c.type)}</span><span class="pill">owner ${esc(c.owner || "unassigned")}</span></p>` +
+      `<p class="pc"><b>${esc(k.fatal)}</b> fatal · <b>${esc(k.nonfatal)}</b> non-fatal · <b>${esc(k.symptoms)}</b> symptoms</p><p class="src">${esc(c.cause_id)} · ${esc(c.route)} · since ${esc(c.state_since_ist)}</p>${tact(c)}` +
+      `<details><summary>Timeline (${esc(ev.length)})</summary><ol class="tl">${ev.map((e) => `<li><span class="mono">${esc(e.ts_ist)}</span> <b>${esc(str(e.kind).replace(/_/g, " "))}</b>${e.run_id ? ` <span class="src">${esc(e.run_id)}</span>` : ""}<br><span class="gate-f">${scalars(e.detail)}</span></li>`).join("") || '<li class="src">No events.</li>'}</ol></details></article>`;
+  };
+  P.tracker = () => {
+    const d = TR.data;
+    if (!C.con) return V.head("Operate", "Issues <em>tracker</em>", "") + unavailable();
+    if (!d) return V.head("Operate", "Issues <em>tracker</em>", "") + (TR.err ? `<p class="empty">The tracker could not load (${esc(TR.err)}).</p>` : '<p class="empty">Loading.</p>');
+    const cols = GROUPS.map(([name, states]) => {
+      const cs = d.causes.filter((c) => states.includes(c.state));
+      return `<section class="col" aria-label="${esc(name)}"><h2 class="sec">${esc(name)} <span class="src">${esc(cs.length)}</span></h2>${cs.map(tcard).join("") || '<p class="src">None.</p>'}</section>`;
+    }).join("");
+    return V.head("Operate", "Issues <em>tracker</em>", "Each cause, where it stands, and what happened to it.") + banner() + `<div class="board">${cols}</div>` + V.sec("Prompt versions") +
+      `<ul class="items rv">${(d.prompt_versions || []).map((v) => `<li class="res"><div class="who"><b>${esc(v.version)}</b>${v.version === d.current_prompt_version ? ' <span class="chip t-pass">current</span>' : ""}<br>${esc(v.created_ist)}${v.base ? `<br>from ${esc(v.base)}` : ""}</div><div>${(v.causes || []).map((x) => `<span class="pill">${esc(x)}</span>`).join(" ") || '<span class="src">no causes</span>'}</div></li>`).join("") || '<li class="empty">None yet.</li>'}</ul>`;
+  };
+  const tpost = async (id, path, body) => {
+    const r = await call("POST", `/api/tracker/${encodeURIComponent(id)}/${path}`, body);
+    TR.msg[id] = r.ok ? null : errText(r);
+    if (r.ok) await loadTracker();
+    redraw();
+  };
+
+  V.ITEMS.push({ id: "run", group: "operate", name: "Run" }, { id: "submit", group: "operate", name: "Submit calls" }, { id: "rubric", group: "operate", name: "Rubric" }, { id: "tune", group: "operate", name: "Tune" }, { id: "tracker", group: "operate", name: "Issues tracker" });
   const enter = async () => { if (!C.con) await loadConsole(); await loadJobs(); redraw(); };
   V.enter = {
     run: async () => { await enter(); },
@@ -387,6 +431,7 @@
       redraw();
     },
     rubric: async () => { await enter(); RB.saved = false; await loadRubric(); redraw(); },
+    tracker: async () => { await enter(); await loadTracker(); redraw(); },
     tune: async () => { await enter(); await loadRubric(); redraw(); runTune(); },
   };
   const BARS = { audit: ["audit", ["judge", "regrade"]], issues: ["issues", []], fix: ["fix", []], gate: ["prove", []] };
@@ -417,6 +462,15 @@
     else if (op === "tune-save") await saveTune();
     else if (op === "reset-param") { const p = sp(t.dataset.id); if (p) { RB.edits[p.id] = String(p.default); delete RB.errs[p.id]; redraw(); const f = $(`p-${t.dataset.ctx}-${p.id}`); if (f) f.focus(); } }
     else if (op === "reset-q") { const q = RB.data.questions.find((x) => x.id === t.dataset.q); if (q && q.default) { RB.qedits[q.id] = qnorm({ id: q.id, ...q.default }); delete RB.errs[q.id]; redraw(); } }
+    else if (op === "ship") { TR.ship = t.dataset.id; redraw(); }
+    else if (op === "ship-no") { TR.ship = null; redraw(); }
+    else if (op === "ship-go") {
+      const id = t.dataset.id, r = await call("POST", `/api/tracker/${encodeURIComponent(id)}/ship`, { confirm: true });
+      if (r.status === 202 && r.data.job) { TR.ship = null; TR.msg[id] = null; track(r.data.job); } else TR.msg[id] = errText(r);
+      redraw();
+    }
+    else if (op === "t-sent") { const ref = str(TR.ref[t.dataset.id]).trim(); if (!ref) { TR.msg[t.dataset.id] = "Enter the ticket id or link first."; redraw(); } else await tpost(t.dataset.id, "ticket", { action: "sent", ref }); }
+    else if (op === "t-done") await tpost(t.dataset.id, "ticket", { action: "resolved", note: str(TR.note[t.dataset.id]) });
     else if (op === "rejudge") { C.chain = ["regrade", "issues"]; RB.saved = false; RB.msg = null; if (!(await startJob("judge", {}, false, true))) { C.chain = []; RB.msg = (C.msg.judge && C.msg.judge.err) || "Could not start judge."; } redraw(); }
     else if (op === "open-sub") { C.sub.sid = t.dataset.sid; C.sub.watch = null; C.sub.result = null; await loadSub(t.dataset.sid); }
   });
@@ -425,6 +479,8 @@
     if (!d) return;
     if (d.op === "arg") { (C.form[d.stage] = C.form[d.stage] || {})[d.arg] = t.type === "checkbox" ? !!t.checked : t.value; }
     else if (d.op === "id-draft") C.sub.draft = t.value;
+    else if (d.op === "tref") TR.ref[d.id] = t.value;
+    else if (d.op === "tnote") TR.note[d.id] = t.value;
     else if (d.op === "param") {
       RB.edits[d.id] = t.value;
       const p = sp(d.id), save = $("rb-save");
