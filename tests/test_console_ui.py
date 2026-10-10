@@ -287,27 +287,6 @@ def test_home_a_real_job_replaces_a_replay():
     assert 'class="st st-run" data-step="ingest"' not in d["home"], "the replay's first step must be gone"
 
 
-def test_pipeline_page_shows_every_step_and_one_call_with_its_faults_in_red():
-    """The Pipeline page lays out the five steps in one lane under the run waveform. Picking a call shows its
-    transcript with the fault turn marked in its tone, the evidence quote marked, the Jev label, and one pane per step.
-
-    The owner asked to see the real transcript with the fault in red and each step's output for the call. If this
-    broke, the page would show totals only, or unescaped call text."""
-    d = run("con-flow")
-    assert d["all"].count('<section class="pn') == 5 and 'class="wave"' in d["all"]
-    assert d["all"].count("<i class=") == 70, "ten waveform bars per loop step"
-    assert "Last run: done at 17:34:52 10 Oct IST" in d["all"] and d["all"].count('class="w-done"') == 70
-    assert 'data-pick="c1&#60;b&#62;"' in d["all"] and "<b>c1" not in d["all"]
-    c = d["call"]
-    heads = [c.index(f"<h2>{n}</h2>") for n in ("Transcript", "Ingest", "Audit", "Judge", "Issues", "Fix", "Test")]
-    assert heads == sorted(heads)
-    assert 'id="ft-2" class="tt bot fault t-fatal"' in c and '<mark class="t-fatal">Which colour</mark>' in c
-    assert "&#60;img src=x&#62;" in c and "<img" not in c
-    assert c.count("<mark") == 1, "an overlapping quote or one that only matches inside an entity marks nothing"
-    assert "✕ question does not fit" in c and "Wrong spec question" in c and "ask grade" in c
-    assert "old prompt failed 3 of 3 · new failed 1 of 3" in c and "c1.mp3" in c and "/x/y" not in c
-
-
 CALL_LINK = re.compile(r'href="/#/call/([^"]+)"')
 SCRIPT_ID = "%3Cscript%3Ealert(1)%3C%2Fscript%3E"
 
@@ -369,3 +348,52 @@ def test_issues_cause_lists_its_own_calls_and_a_failed_read_stays_in_its_section
     assert "could not load" not in d["auditCausesFail"] and len(CALL_LINK.findall(d["auditCausesFail"])) == 31
     assert "<details" not in d["issuesCausesFail"] and "Cause two" in d["issuesCausesFail"]
     assert "could not load" not in d["issuesCausesFail"]
+
+
+def test_test_page_shows_paired_replays_per_call_and_hides_statistics():
+    """The Test page shows a verdict sentence, a paired-replay row per call and the statistics in a closed disclosure.
+
+    It protects the one-glance approval view: the better/worse counts, one old and one new strip per call, the escaped
+    call id, and a single "N of M tests passed." line in place of the repeated "Nothing has passed" banner. Malformed
+    per_call rows (empty id, null, a number id) must be dropped. If it failed, a reviewer would again have to read
+    p-values to approve a fix, or a hostile call id could inject markup."""
+    p = run("con-gate")["panel"]
+    assert "Old prompt failed 50% of replays, new prompt 50%. 2 calls got better, 1 got worse." in p
+    assert p.count('class="trial"') == 6
+    assert p.count('class="trial" role="img" data-l="Old"') == 3, "a strip is an image with a text label on phones"
+    squares = len(re.findall(r'<i class="(?:bad|good)">', p))
+    assert 'prompt: 45 of 50 replays failed"' in p and squares == 4 * 3 + 2 * 40, (
+        "k above 40 draws 40 scaled squares but speaks the true counts"
+    )
+    for label in ("3 of 3 replays failed", "1 of 3 replays failed", "0 of 3 replays failed", "2 of 3 replays failed"):
+        assert f'prompt: {label}"' in p, "the strip label names the prompt and the count"
+    assert p.count('class="pairs"') == 1 and p.count("<li>") == 3
+    assert "better</span>" in p and "worse</span>" in p
+    assert "<img" not in p and "g&#60;img src=x onerror=1&#62;" in p
+    assert 'href="/#/call/g%3Cimg%20src%3Dx%20onerror%3D1%3E"' in p
+    assert '<details class="gate-d">' in p and '<details class="gate-d" open' not in p
+    assert "0 of 2 tests passed." in p and "1 of 2 tests passed." not in p
+    assert "Nothing has passed" not in p
+    assert "Cause one" in p and "C-09" in p
+    assert p.count('class="verdict"') == 2
+
+
+def test_pipeline_page_shows_every_step_and_one_call_with_its_faults_in_red():
+    """The Pipeline page lays out the five steps in one lane under the run waveform. Picking a call shows its
+    transcript with the fault turn marked in its tone, the evidence quote marked, the Jev label, and one pane per step.
+
+    The owner asked to see the real transcript with the fault in red and each step's output for the call. If this
+    broke, the page would show totals only, or unescaped call text."""
+    d = run("con-flow")
+    assert d["all"].count('<section class="pn') == 5 and 'class="wave"' in d["all"]
+    assert d["all"].count("<i class=") == 70, "ten waveform bars per loop step"
+    assert "Last run: done at 17:34:52 10 Oct IST" in d["all"] and d["all"].count('class="w-done"') == 70
+    assert 'data-pick="c1&#60;b&#62;"' in d["all"] and "<b>c1" not in d["all"]
+    c = d["call"]
+    heads = [c.index(f"<h2>{n}</h2>") for n in ("Transcript", "Ingest", "Audit", "Judge", "Issues", "Fix", "Test")]
+    assert heads == sorted(heads)
+    assert 'id="ft-2" class="tt bot fault t-fatal"' in c and '<mark class="t-fatal">Which colour</mark>' in c
+    assert "&#60;img src=x&#62;" in c and "<img" not in c
+    assert c.count("<mark") == 1, "an overlapping quote or one that only matches inside an entity marks nothing"
+    assert "✕ question does not fit" in c and "Wrong spec question" in c and "ask grade" in c
+    assert "old prompt failed 3 of 3 · new failed 1 of 3" in c and "c1.mp3" in c and "/x/y" not in c

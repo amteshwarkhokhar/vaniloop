@@ -126,6 +126,15 @@ const SC = {
     out.panel = ids.panel.innerHTML;
     return out;
   },
+  async "con-gate"() {
+    const g = (cause_id, decision, extra = {}) => ({ cause_id, attempt: 1, decision, old_fail_rate: 0.5, new_fail_rate: 0.5, lift: 0, p_value: 0.4, alpha: 0.05, n_calls: 2, k_seeds: 3, reason: "Plain reason.", holdout: true, guard_breaks: [], guard_flaky: [], ...extra });
+    routes["GET /api/stage/gate"] = [200, { screens: [], gates: [
+      g("C-01", "reject", { per_call: [{ call_id: "g1", k: 3, old_fails: 3, new_fails: 1 }, { call_id: "g-big", k: 50, old_fails: 45, new_fails: 41 }, { call_id: "g<img src=x onerror=1>", k: 3, old_fails: 0, new_fails: 2 }, { call_id: "", k: 3 }, null, { call_id: 7 }] }),
+      g("C-09", "inconclusive")] }];
+    await sandbox.window.VL.refresh();
+    await click({ go: "gate" });
+    return { panel: ids.panel.innerHTML };
+  },
   async "con-readonly"() {
     const out = {};
     routes["GET /api/rubric"] = [200, RUB]; routes["POST /api/tune"] = [200, TUNE]; routes["GET /api/tracker"] = [200, TRK];
