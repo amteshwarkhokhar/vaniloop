@@ -16,8 +16,9 @@ import os
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
+from vaniloop import fix, gate, jev, llm, prove, rules
 from vaniloop.jsonl import dedupe_by_call_id, read_jsonl
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +30,22 @@ VERDICTS = ("Fatal", "NonFatal", "NeedsReview", "Pass")
 SEVERITY = {v: i for i, v in enumerate(VERDICTS)}
 ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 LIST_FIELDS = ("findings", "turns", "silences")
+STAGES = ("ingest", "audit", "issues", "fix", "gate", "review")
+JUDGES = ("jev", "gemini")
+REVIEW_TEXT_CHARS = 200
+DATA_FILES = (
+    "calls",
+    "ledgers",
+    "audits",
+    "audits_gemini",
+    "causes",
+    "patches",
+    "gates",
+    "replays",
+    "costs",
+    "jev_review",
+)
+DATA_FILE_EXT = {"causes": "json", "patches": "json"}
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 
 
@@ -220,6 +237,262 @@ def gates(d: Path) -> list[dict]:
     return read_jsonl(d / "gates.jsonl")
 
 
+def _leaf(value, source: str) -> dict:
+    """One config value with the module and constant (or file) that sets it."""
+    return {"value": value, "source": source}
+
+
+def _stamp(path: Path) -> str:
+    stamp = datetime.fromtimestamp(path.stat().st_mtime, IST)
+    return f"{stamp:%H:%M} {stamp.day:02d} {stamp:%b}"
+
+
+def active_judge(d: Path) -> str:
+    """Jev graded when audits_gemini.jsonl exists: that file is the kept Gemini run, audits.jsonl then holds Jev's."""
+    return "jev" if (d / "audits_gemini.jsonl").exists() else "gemini"
+
+
+def _data_files(d: Path) -> list[dict]:
+    out = []
+    for name in DATA_FILES:
+        path = d / f"{name}.{DATA_FILE_EXT.get(name, 'jsonl')}"
+        if not path.is_file():
+            out.append({"name": path.name, "rows": None, "updated_ist": None})
+            continue
+        if path.suffix == ".jsonl":
+            rows = len(read_jsonl(path))
+        else:
+            rows = len(read_json_doc(path).get(name, []))
+        out.append({"name": path.name, "rows": rows, "updated_ist": _stamp(path)})
+    return out
+
+
+def read_json_doc(path: Path) -> dict:
+    """A .json run file as a dict; a missing, unreadable or non-object file gives {}."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def config(d: Path) -> dict:
+    """Every configurable part, each value with its source. Model names only: no key, no URL."""
+    active = active_judge(d)
+    gemini_file, audits_file = (d / "audits_gemini.jsonl").exists(), (d / "audits.jsonl").exists()
+    available = [j for j, ok in (("jev", gemini_file and audits_file), ("gemini", gemini_file or audits_file)) if ok]
+    rows = [r for r in gates(d) if isinstance(r, dict)]
+    last = rows[-1] if rows else None
+    last_run = None
+    if last is not None:
+        last_run = {
+            "n": _leaf(last.get("n_calls"), "gates.jsonl n_calls"),
+            "k": _leaf(last.get("k_seeds"), "gates.jsonl k_seeds"),
+            "holdout": _leaf(last.get("holdout") is True, "gates.jsonl holdout"),
+            "screen": _leaf(last.get("screened") is not None, "gates.jsonl screened"),
+        }
+    return {
+        "judge": {
+            "active": _leaf(active, "audits_gemini.jsonl present"),
+            "available": _leaf(available, "audits.jsonl, audits_gemini.jsonl present"),
+            "jev_model": _leaf(llm.jev_model(), "llm.jev_model"),
+            "jev_version": _leaf(jev.JEV_VERSION, "jev.JEV_VERSION"),
+            "structure_model": _leaf(llm.model_name(), "llm.model_name"),
+            "thresholds": {
+                "true_at": _leaf(jev.TRUE_AT, "jev.TRUE_AT"),
+                "false_at": _leaf(jev.FALSE_AT, "jev.FALSE_AT"),
+            },
+        },
+        "audit": {
+            "frustrated_p": _leaf(rules.FRUSTRATED_P, "rules.FRUSTRATED_P"),
+            "loop_irritation_turns": _leaf(rules.LOOP_IRRITATION_TURNS, "rules.LOOP_IRRITATION_TURNS"),
+            "dead_air_sec": _leaf(rules.DEAD_AIR_SEC, "rules.DEAD_AIR_SEC"),
+            "timing": {
+                "min_coverage": _leaf(rules.TIMING_MIN_COVERAGE, "rules.TIMING_MIN_COVERAGE"),
+                "max_back_to_back": _leaf(rules.TIMING_MAX_BACK_TO_BACK, "rules.TIMING_MAX_BACK_TO_BACK"),
+                "max_zero_turns": _leaf(rules.TIMING_MAX_ZERO_TURNS, "rules.TIMING_MAX_ZERO_TURNS"),
+            },
+        },
+        "fix_loop": {
+            "max_attempts": _leaf(fix.MAX_ATTEMPTS, "fix.MAX_ATTEMPTS"),
+            "alpha": _leaf(gate.DEFAULT_ALPHA, "gate.DEFAULT_ALPHA"),
+            "alpha_per_attempt": _leaf(
+                gate.DEFAULT_ALPHA / prove.MAX_ATTEMPTS, "gate.DEFAULT_ALPHA / prove.MAX_ATTEMPTS"
+            ),
+            "screen_seeds": _leaf(prove.SCREEN_SEEDS, "prove.SCREEN_SEEDS"),
+            "screen_min_fails": _leaf(prove.SCREEN_MIN_FAILS, "prove.SCREEN_MIN_FAILS"),
+            "min_calls": _leaf(gate.MIN_CALLS, "gate.MIN_CALLS"),
+            "last_run": last_run,
+        },
+        "data": {"folder": _leaf(d.name, "web.data_dir"), "files": _data_files(d)},
+    }
+
+
+def _audits_for(d: Path, judge: str | None) -> tuple[str, list[dict]]:
+    """The judge label and its audit rows. Jev is audits.jsonl when audits_gemini.jsonl exists. Gemini is that
+    file, or audits.jsonl alone when no Jev run was kept. A judge with no file gives no rows."""
+    active = active_judge(d)
+    judge = judge if judge in JUDGES else active
+    if judge == "gemini" and active == "jev":
+        path = d / "audits_gemini.jsonl"
+    elif judge == active:
+        path = d / "audits.jsonl"
+    else:
+        return judge, []
+    return judge, dedupe_by_call_id(_valid(read_jsonl(path)))
+
+
+def stage_ingest(d: Path) -> dict:
+    rows = list(_calls(d).values())
+    secs = sorted(
+        float(r["duration_sec"])
+        for r in rows
+        if isinstance(r.get("duration_sec"), (int, float)) and not isinstance(r.get("duration_sec"), bool)
+    )
+
+    def pick(q: float) -> float | None:
+        return secs[min(len(secs) - 1, math.ceil(q * len(secs)) - 1)] if secs else None
+
+    return {
+        "calls": len(rows),
+        "with_audio": sum(1 for r in rows if r.get("audio_path")),
+        "minutes_total": round(sum(secs) / 60, 2),
+        "median_sec": pick(0.5),
+        "p90_sec": pick(0.9),
+        "short_calls": sum(1 for s in secs if s < rules.SHORT_CALL_SEC),
+    }
+
+
+def stage_audit(d: Path, judge: str | None) -> dict:
+    judge, audits = _audits_for(d, judge)
+    verdicts = dict.fromkeys(VERDICTS, 0)
+    scopes: dict[str, int] = {}
+    by_parameter: dict[str, dict[str, int]] = {}
+    flags: dict[str, int] = {}
+    for a in audits:
+        if a.get("verdict") in verdicts:
+            verdicts[a["verdict"]] += 1
+        scope = a.get("scope") or "unclear"
+        scopes[scope] = scopes.get(scope, 0) + 1
+        for f in a.get("findings") or []:
+            if isinstance(f, dict) and f.get("parameter"):
+                counts = by_parameter.setdefault(f["parameter"], {})
+                counts[f.get("status") or ""] = counts.get(f.get("status") or "", 0) + 1
+        for flag in a.get("flags") or []:
+            if isinstance(flag, str):
+                flags[flag] = flags.get(flag, 0) + 1
+    return {
+        "judge": judge,
+        "total": len(audits),
+        "verdicts": verdicts,
+        "scopes": scopes,
+        "by_parameter": by_parameter,
+        "flags": flags,
+    }
+
+
+def stage_issues(d: Path) -> dict:
+    keys = ("cause_id", "name", "parameter", "status", "type", "owner", "priority")
+    out = []
+    for c in causes(d)["causes"]:
+        if not isinstance(c, dict):
+            continue
+        row = {k: c.get(k) for k in keys}
+        row["fatal"] = len(c.get("fatal_calls") or [])
+        row["nonfatal"] = len(c.get("nonfatal_calls") or [])
+        row["symptoms"] = len(c.get("symptom_calls") or [])
+        out.append(row)
+    return {"causes": out}
+
+
+def _patch_row(p: dict, *, history: bool = False) -> dict:
+    row = {k: p.get(k) for k in ("cause_id", "attempt", "old_text", "new_text", "rationale")}
+    if history:
+        row["gate_decision"] = p.get("gate_decision", p.get("decision"))
+    return row
+
+
+def stage_fix(d: Path) -> dict:
+    doc = read_json_doc(d / "patches.json")
+    patches, history = doc.get("patches"), doc.get("history")
+    return {
+        "patches": [_patch_row(p) for p in patches if isinstance(p, dict)] if isinstance(patches, list) else [],
+        "history": [_patch_row(p, history=True) for p in history if isinstance(p, dict)]
+        if isinstance(history, list)
+        else [],
+        "tickets": [
+            c["cause_id"]
+            for c in causes(d)["causes"]
+            if isinstance(c, dict) and c.get("type") in fix.TICKET_TYPES and c.get("cause_id")
+        ],
+    }
+
+
+def stage_gate(d: Path) -> dict:
+    return {"gates": gates(d), "screens": read_jsonl(d / "screens.jsonl")}
+
+
+def _cut(value):
+    """Cut every string in a review row to REVIEW_TEXT_CHARS."""
+    if isinstance(value, str):
+        return value[:REVIEW_TEXT_CHARS]
+    if isinstance(value, list):
+        return [_cut(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _cut(v) for k, v in value.items()}
+    return value
+
+
+def _outcome(label: dict) -> str:
+    """both_right, jev_only, gemini_only or both_wrong from the label's jev_ok and gemini_ok; else unscored."""
+    jev_ok, gemini_ok = label.get("jev_ok"), label.get("gemini_ok")
+    if not isinstance(jev_ok, bool) or not isinstance(gemini_ok, bool):
+        return "unscored"
+    return {(True, True): "both_right", (True, False): "jev_only", (False, True): "gemini_only"}.get(
+        (jev_ok, gemini_ok), "both_wrong"
+    )
+
+
+def stage_review(d: Path) -> dict:
+    """Jev vs Gemini review rows. totals count labels by outcome per kind. accuracy is per kind and per group
+    (control or contested): labels where each judge was right, and the labels scored (n)."""
+    items = [r for r in read_jsonl(d / "jev_review.jsonl") if isinstance(r, dict)]
+    totals: dict[str, dict[str, int]] = {}
+    accuracy: dict[str, dict[str, dict[str, int]]] = {}
+    for row in items:
+        kind = row.get("kind") if isinstance(row.get("kind"), str) else "unknown"
+        group = "control" if row.get("control") is True else "contested"
+        acc = accuracy.setdefault(kind, {}).setdefault(group, {"jev_right": 0, "gemini_right": 0, "n": 0})
+        for label in row.get("labels") if isinstance(row.get("labels"), list) else []:
+            if not isinstance(label, dict):
+                continue
+            outcome = _outcome(label)
+            totals.setdefault(kind, {})
+            totals[kind][outcome] = totals[kind].get(outcome, 0) + 1
+            if outcome != "unscored":
+                acc["n"] += 1
+                acc["jev_right"] += label["jev_ok"]
+                acc["gemini_right"] += label["gemini_ok"]
+    return {"items": [_cut(r) for r in items], "totals": totals, "accuracy": accuracy}
+
+
+def stage(d: Path, name: str, judge: str | None = None) -> dict | None:
+    """The result of one pipeline stage, or None for an unknown name."""
+    if name == "ingest":
+        return stage_ingest(d)
+    if name == "audit":
+        return stage_audit(d, judge)
+    if name == "issues":
+        return stage_issues(d)
+    if name == "fix":
+        return stage_fix(d)
+    if name == "gate":
+        return stage_gate(d)
+    if name == "review":
+        return stage_review(d)
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "vaniloop-web"
     data: Path = Path("runs")
@@ -260,7 +533,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(hosts) != 1 or not host_allowed(hosts[0]):
             self._json({"error": "forbidden host"}, 403)
             return
-        path = unquote(urlsplit(self.path).path)
+        parts = urlsplit(self.path)
+        path = unquote(parts.path)
         d = self.data
         if path in ("/", "/index.html"):
             self._static("index.html")
@@ -280,6 +554,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(causes(d))
         elif path == "/api/gates":
             self._json(gates(d))
+        elif path == "/api/config":
+            self._json(config(d))
+        elif path.startswith("/api/stage/"):
+            judge = parse_qs(parts.query).get("judge", [None])[0]
+            result = stage(d, path[len("/api/stage/") :], judge)
+            if result is None:
+                self._json({"error": "unknown stage"}, 404)
+            else:
+                self._json(result)
+        elif path == "/dash":
+            self._static("dash.html")
         else:
             self._json({"error": "not found"}, 404)
 
