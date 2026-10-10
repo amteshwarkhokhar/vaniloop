@@ -75,7 +75,7 @@ def test_jev_labels_replace_gemini_and_structure_is_kept(transport):
 
     If it failed, Gemini's labels would still decide Fatals, or Jev would overwrite slots, values, declined or scope.
     """
-    transport["answers"] = {"q2": 0.1, "o2": 0.2, "pm": 0.9, "f1": 0.3, "f3": 0.8}
+    transport["answers"] = {"q2": 0.1, "o2": 0.2, "n2": 0.9, "pm": 0.9, "f1": 0.3, "f3": 0.8}
     led, out = _ledger(), jev.judge_ledger(_call(), _ledger())
     spec = next(b for b in out.bot_turns if b.idx == 2)
     assert (spec.question_fits_product, spec.fits_confirmed_product) == (False, False)
@@ -128,11 +128,12 @@ def test_every_question_is_complete_on_its_own(transport):
     If it failed, Jev would answer a question about "it" with no product or no turn to read.
     """
     qs = jev.build_questions(_call(), _ledger())
-    assert set(qs) == {"q2", "o2", "pm", "f1", "f3"}
+    assert set(qs) == {"q2", "n2", "o2", "pm", "f1", "f3"}
     for qid, q in qs.items():
         assert q["type"] == "noul" and q["criteria"]["true"] and q["criteria"]["false"]
         assert qid not in q["instructions"]
-    assert "laptop" in qs["q2"]["instructions"] and "Laptop ka brand kaunsa chahiye" in qs["q2"]["instructions"]
+    assert "laptop" in qs["q2"]["instructions"] and '"brand"' in qs["q2"]["instructions"]  # the spec name (#113)
+    assert "Laptop ka brand kaunsa chahiye" in qs["o2"]["instructions"]
     assert "DJI, MI" in qs["o2"]["instructions"]
     assert "drone camera" in qs["pm"]["instructions"] and '"laptop"' in qs["pm"]["instructions"]
     assert "Nahi, mujhe laptop chahiye." in qs["f1"]["instructions"]
@@ -149,8 +150,8 @@ def test_spec_turn_is_judged_against_the_product_after_the_change(transport):
     led = _ledger()
     led.bot_turns.insert(1, BotTurnLabel(idx=0, slot="spec", options_offered=[]))  # before the change at turn 1
     qs = jev.build_questions(_call(), led)
-    assert 'wants the product "drone camera"' in qs["q0"]["instructions"]
-    assert 'wants the product "laptop"' in qs["q2"]["instructions"]
+    assert '"drone camera"' in qs["q0"]["instructions"] and '"laptop"' not in qs["q0"]["instructions"]
+    assert '"laptop"' in qs["q2"]["instructions"] and '"drone camera"' not in qs["q2"]["instructions"]
     assert "o0" not in qs  # no options: the question alone is used for both labels
 
 
@@ -460,3 +461,66 @@ def test_judge_skips_a_malformed_ledger_row_and_goes_on(transport, tmp_path):
     errs = tmp_path / "e.jsonl"
     r = pipeline.run_judge(calls_path=calls, ledgers_path=ledgers, out_path=out, errors_path=errs, workers=1)
     assert r == {"judged": 1, "skipped": 0, "errors": 1} and "bad_row" in errs.read_text()
+
+
+def test_question_alone_is_asked_about_the_spec_name_not_the_utterance():
+    """question_fits_product judges the question without its options, so Jev must get the spec name alone.
+
+    With the whole utterance ("Voltage, 60V or 48V?") Jev judged the options too: on 42 real turns where Gemini said
+    the question fits, Jev said it did not, and a pilot asking about the spec name alone agreed with Gemini on 35.
+    If this failed, wrong options would make category_isq Fatal instead of Non-fatal.
+    """
+    call = CallRecord(
+        call_id="syn_spec",
+        duration_sec=2,
+        turns=[Turn(idx=0, speaker="bot", start_sec=0, end_sec=1, text="Voltage mein 60V chahiye ya 48V?")],
+    )
+    led = Ledger.model_validate(
+        {
+            "call_id": "syn_spec",
+            "scope": "bl_collection",
+            "initial_product": "bike switch",
+            "bot_turns": [{"idx": 0, "slot": "spec", "spec_name": "voltage", "options_offered": ["60V", "48V"]}],
+        }
+    )
+    q = jev.build_questions(call, led)
+    assert '"voltage"' in q["q0"]["instructions"] and "60V" not in q["q0"]["instructions"]
+    assert "60V" in q["o0"]["instructions"]  # the options stay in the question-with-options label
+    assert jev.JEV_VERSION == "3"
+
+
+def test_spec_name_answer_counts_only_when_jev_confirms_the_turn_asks_it(transport):
+    """The question-alone label trusts Gemini's spec_name only when Jev confirms the turn asks about it.
+
+    If this failed, a spec name Gemini mislabelled as something generic ("performance" for "flight time" on a dome
+    camera) would make a wrong question pass (Codex review on #114).
+    """
+    led = _ledger()
+    led = led.model_copy(
+        update={"bot_turns": [b.model_copy(update={"spec_name": "brand"}) if b.idx == 2 else b for b in led.bot_turns]}
+    )
+    transport["answers"].update({"q2": 0.9, "o2": 0.9, "n2": 0.1})
+    b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    assert b.question_fits_product is None and b.fits_confirmed_product is None
+    transport["answers"]["n2"] = 0.9
+    jev.JEV_VERSION, old = "3-confirmed", jev.JEV_VERSION  # a fresh cache key for the second answer set
+    try:
+        b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    finally:
+        jev.JEV_VERSION = old
+    assert b.question_fits_product is True and b.fits_confirmed_product is True
+
+
+def test_spec_name_answer_without_its_check_is_not_used(transport, monkeypatch):
+    """A spec-name answer with no consistency answer at all must stay unjudged, not trusted.
+
+    If this failed, a response that dropped the n<idx> answer would let a mislabelled spec name pass (Codex round 2
+    on #114).
+    """
+    led = _ledger()
+    led = led.model_copy(
+        update={"bot_turns": [b.model_copy(update={"spec_name": "brand"}) if b.idx == 2 else b for b in led.bot_turns]}
+    )
+    monkeypatch.setattr(jev, "complete_jev", lambda state, questions, cache_tag="": {"q2": 0.9, "o2": 0.9})
+    b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    assert b.question_fits_product is None and b.fits_confirmed_product is None
