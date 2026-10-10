@@ -346,9 +346,13 @@ def test_test_page_shows_paired_replays_per_call_and_hides_statistics():
     per_call rows (empty id, null, a number id) must be dropped. If it failed, a reviewer would again have to read
     p-values to approve a fix, or a hostile call id could inject markup."""
     p = run("con-gate")["panel"]
-    assert "1 call got better, 1 got worse." in p
-    assert p.count('class="trial"') == 4
-    assert p.count('class="trial" role="img" data-l="Old"') == 2, "a strip is an image with a text label on phones"
+    assert "Old prompt failed 50% of replays, new prompt 50%. 2 calls got better, 1 got worse." in p
+    assert p.count('class="trial"') == 6
+    assert p.count('class="trial" role="img" data-l="Old"') == 3, "a strip is an image with a text label on phones"
+    squares = len(re.findall(r'<i class="(?:bad|good)">', p))
+    assert 'prompt: 45 of 50 replays failed"' in p and squares == 4 * 3 + 2 * 40, (
+        "k above 40 draws 40 scaled squares but speaks the true counts"
+    )
     for label in ("3 of 3 replays failed", "1 of 3 replays failed", "0 of 3 replays failed", "2 of 3 replays failed"):
         assert f'prompt: {label}"' in p, "the strip label names the prompt and the count"
     assert p.count('class="pairs"') == 1 and p.count("<li>") == 2

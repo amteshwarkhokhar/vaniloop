@@ -237,19 +237,21 @@
     const rate = (l, v, t) => `<div class="rate"><span>${l}</span><span class="tr"><i class="t-${t}" style="width:${Math.max(1, (v || 0) * 100)}%"></i></span><b>${pct(v)}</b></div>`;
     // per_call comes from a file: keep only rows with a non-empty string id, clamp k to 1..40 and fails to 0..k.
     const pairs = (g) => (Array.isArray(g.per_call) ? g.per_call : []).filter((c) => c && typeof c === "object" && typeof c.call_id === "string" && c.call_id).map((c) => {
-      const k = Math.min(40, Math.max(1, Math.round(num(c.k) || 1))), f = (v) => Math.min(k, Math.max(0, Math.round(num(v) || 0)));
-      return { id: c.call_id, k, o: f(c.old_fails), n: f(c.new_fails) };
+      // ro, rn and rk are the true counts (compared and spoken); at most 40 squares are drawn, scaled when k is larger.
+      const rk = Math.max(1, Math.round(num(c.k) || 1)), k = Math.min(40, rk), raw = (v) => Math.min(rk, Math.max(0, Math.round(num(v) || 0)));
+      const ro = raw(c.old_fails), rn = raw(c.new_fails), f = (v) => Math.round((v / rk) * k);
+      return { id: c.call_id, k, rk, ro, rn, o: f(ro), n: f(rn) };
     });
-    const strip = (f, k, l) => `<span class="trial" role="img" data-l="${l}" aria-label="${l} prompt: ${f} of ${k} replays failed">${Array.from({ length: k }, (_, i) => `<i class="${i < f ? "bad" : "good"}"></i>`).join("")}</span>`;
+    const strip = (f, k, l, rf, rk) => `<span class="trial" role="img" data-l="${l}" aria-label="${l} prompt: ${rf} of ${rk} replays failed">${Array.from({ length: k }, (_, i) => `<i class="${i < f ? "bad" : "good"}"></i>`).join("")}</span>`;
     const calls = (n) => `${n} ${n === 1 ? "call" : "calls"}`;
     const verdict = (g, ps) => {
-      const better = ps.filter((p) => p.n < p.o).length, worse = ps.filter((p) => p.n > p.o).length;
+      const better = ps.filter((p) => p.rn < p.ro).length, worse = ps.filter((p) => p.rn > p.ro).length;
       return `<p class="verdict">Old prompt failed ${pct(g.old_fail_rate)} of replays, new prompt ${pct(g.new_fail_rate)}.${ps.length ? ` ${calls(better)} got better, ${worse} got worse.` : ""}</p>`;
     };
     const table = (ps) => !ps.length ? "" :
       `<div class="pairs-h label"><span>Call</span><span>Old prompt</span><span>New prompt</span><span></span></div><ul class="pairs">${ps.map((p) => {
-        const [t, w] = p.n < p.o ? ["pass", "better"] : p.n > p.o ? ["fatal", "worse"] : ["review", "same"];
-        return `<li><a class="cid" href="/#/call/${esc(encodeURIComponent(p.id))}">${esc(p.id)}</a>${strip(p.o, p.k, "Old")}${strip(p.n, p.k, "New")}${badge(t, w)}</li>`;
+        const [t, w] = p.rn < p.ro ? ["pass", "better"] : p.rn > p.ro ? ["fatal", "worse"] : ["review", "same"];
+        return `<li><a class="cid" href="/#/call/${esc(encodeURIComponent(p.id))}">${esc(p.id)}</a>${strip(p.o, p.k, "Old", p.ro, p.rk)}${strip(p.n, p.k, "New", p.rn, p.rk)}${badge(t, w)}</li>`;
       }).join("")}</ul>`;
     const stats = (g, s) => {
       const cost = num(g.cost_usd) != null ? g.cost_usd : s ? s.cost_usd : null, list = (v) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
