@@ -137,3 +137,37 @@ def test_submit_rejects_unsafe_call_ids(tmp_path, monkeypatch, capsys):
     assert [a["call_id"] for a in rows(ws / "audits.jsonl")] == ["up_json"]
     assert sorted(e["call_id"] for e in rows(ws / "errors.jsonl")) == ["../x", "evil"]
     assert "SUBMIT_DONE calls=1 errors=2" in capsys.readouterr().out
+
+
+def test_submit_ignores_a_stale_jev_ledger(tmp_path, monkeypatch, capsys):
+    """A second submit with a failing Jev and a forced refresh must not count the first run's Jev ledger as current.
+
+    A bug would regrade from the stale ledger and report calls=1 although Jev did not judge the call this time.
+    """
+    ws, inbox = setup_submit(tmp_path, monkeypatch)
+    pipeline.main(["--runs", str(ws), "submit", "--inbox", str(inbox)])
+    assert "SUBMIT_DONE calls=1 errors=0" in capsys.readouterr().out
+
+    def boom(call, led):
+        raise RuntimeError("jev down")
+
+    monkeypatch.setattr(pipeline, "judge_ledger", boom)
+    monkeypatch.setenv("VANILOOP_CACHE", "refresh")
+    monkeypatch.setattr(pipeline, "fingerprint", lambda call, led: "changed")  # the ledger the refresh would judge
+    pipeline.main(["--runs", str(ws), "submit", "--inbox", str(inbox)])
+    out = capsys.readouterr().out
+    assert "SUBMIT_DONE calls=0" in out
+    assert any("stale or missing" in e["error"] for e in rows(ws / "errors.jsonl"))
+    assert rows(ws / "audits.jsonl") == []
+
+
+def test_check_id_rejects_a_trailing_newline():
+    """_check_id must reject an id that ends in a newline.
+
+    A bug (regex `$`) would accept it and name a file with a newline in its name.
+    """
+    import pytest
+
+    with pytest.raises(ValueError):
+        pipeline._check_id("valid\n")
+    pipeline._check_id("valid")

@@ -323,7 +323,7 @@ CALL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,120}$")
 
 def _check_id(call_id: str) -> None:
     """Reject a call id that is not a plain file-name token. It names files in the workspace and inbox."""
-    if not CALL_ID_RE.match(call_id) or ".." in call_id:
+    if not CALL_ID_RE.fullmatch(call_id) or ".." in call_id:
         raise ValueError(f"invalid call id {call_id!r}")
 
 
@@ -410,12 +410,24 @@ def run_submit(runs: Path, inbox: Path, calls: list[str] | None = None, from_run
             except SystemExit as e:  # the audit lock is held by another run
                 fail("-", f"{name} {e}")
         _step("regrade", 1, 1, "all")
-        have_jev = {r.get("call_id") for r in read_jsonl(p["ledgers_jev"])}
-        try:
-            run_regrade(p["calls"], p["ledgers_jev"], p["audits"], only=set(ids))
-        except (SystemExit, Exception) as e:  # e.g. every judge call failed: nothing to grade
-            fail("-", f"regrade {type(e).__name__}: {e}"[:300])
-        _drop_audits(p["audits"], {c for c in ids if c not in have_jev})  # no Jev ledger: no final grade
+        jev = {r["call_id"]: r for r in read_jsonl(p["ledgers_jev"]) if "call_id" in r}  # last row wins
+        gem = {r["call_id"]: r for r in read_jsonl(p["ledgers"]) if "call_id" in r}
+        by_id = {r.call_id: r for r in records}
+        current = set()
+        for c in ids:  # a Jev ledger counts only if it was made from this call and this Gemini ledger
+            try:
+                if jev[c].get("jev_fp") == fingerprint(by_id[c], Ledger.model_validate(gem[c])):
+                    current.add(c)
+                    continue
+            except Exception:
+                pass
+            fail(c, "jev ledger stale or missing")
+        if current:
+            try:
+                run_regrade(p["calls"], p["ledgers_jev"], p["audits"], only=current)
+            except (SystemExit, Exception) as e:
+                fail("-", f"regrade {type(e).__name__}: {e}"[:300])
+        _drop_audits(p["audits"], set(ids) - current)  # no current Jev ledger: no final grade
     audited = {r.get("call_id") for r in read_jsonl(p["audits"])}
     n_calls = sum(c in audited for c in ids)
     errors = len(read_jsonl(p["errors"])) - errors_before
