@@ -8,8 +8,9 @@
   const POLL_MS = 1000;
   const C = { con: null, err: null, jobs: [], form: {}, msg: {}, confirm: null, pre: null, chain: [], calls: [], sub: { files: [], ids: [], draft: "", msg: null, sid: null, result: null, list: [], busy: false } };
   const D = { job: null, lines: [], next: 0, open: false, timer: null, err: null };
-  const TONE = { running: "nonfatal", done: "pass", failed: "fatal", cancelled: "review" };
-  const jchip = (s) => `<span class="chip t-${esc(V.own(TONE, s) || "review")}">${esc(s)}</span>`;
+  const JOB = { running: ["Running", "nonfatal", "◐"], done: ["Done", "pass", "✓"], failed: ["Failed", "fatal", "✕"], cancelled: ["Stopped", "review", "■"] };
+  const jchip = (s) => { const [w, t, g] = V.own(JOB, s) || [str(s), "review", "○"]; return V.badge(t, w, g); };
+  const NAME = { audit: "Grade calls", judge: "Label with Jev", regrade: "Regrade with Jev labels", issues: "Group into causes", agreement: "Compare the judges", fix: "Write patches", prove: "Test a patch", ship: "Ship a passed patch", submit: "Grade submitted calls", loop: "The whole loop" };
   const ro = () => !!(C.con && C.con.read_only);
   const dis = () => (ro() ? " disabled" : "");
   const redraw = () => { const it = V.ITEMS.find((i) => i.id === S.now); if (it && it.group === "operate") V.show(); };
@@ -142,7 +143,9 @@
         for (const a of s.args) if (!(a.name in f) && a.default != null) f[a.name] = a.default;
       }
       if (C.con.busy_job_id && !D.job) await adopt(C.con.busy_job_id);
+      await loadTracker(); // the sidebar counts what waits for you
     } else C.err = errText(r);
+    $("side-foot").innerHTML = C.con ? `Data folder: <span class="mono">${esc(C.con.data_dir_name)}</span>${ro() ? " " + V.badge("nonfatal", "Read-only", "–") : ""}` : "";
     V.nav();
     redraw();
     return !!C.con;
@@ -150,7 +153,7 @@
 
   // ---- views ----
   const unavailable = () => `<p class="empty">The console API is not available (${esc(C.err || "loading")}).</p>`;
-  const banner = () => (ro() ? `<p class="note ro rv" role="status"><b>This data folder is read-only.</b> It is the demo freeze, so every control here is off. To run stages, start the console on runs/ with <span class="mono">VANILOOP_DATA=runs uv run python -m vaniloop.web</span>.</p>` : "");
+  const banner = () => (ro() ? `<p class="note ro" role="status"><b>This data folder is read-only.</b> It is the demo freeze, so every control here is off. To run, start the console on runs/: <span class="mono">VANILOOP_DATA=runs uv run python -m vaniloop.web</span></p>` : "");
   const field = (stage, a, cause) => {
     const v = (C.form[stage] || {})[a.name], id = `f-${stage}-${a.name}`, base = `data-op="arg" data-stage="${esc(stage)}" data-arg="${esc(a.name)}"`;
     const label = `<label class="label" for="${esc(id)}">${esc(a.name.replace(/_/g, " "))}${a.required ? " *" : ""}</label>`;
@@ -165,7 +168,7 @@
     const est = C.confirm && num(C.confirm.estimate) != null ? `Estimate ${usd(C.confirm.estimate)}.` : "Estimate not known.";
     return `<div class="card op-card rv${hl ? " hl" : ""}" data-card="${esc(s.id)}"><h3>${esc(s.label || s.id)}</h3><p class="label">${s.paid ? "Paid stage" : "Free stage"} · <span class="mono">${esc(s.id)}</span></p>` +
       `<div class="flds">${s.args.map((a) => field(s.id, a)).join("") || '<p class="lede">No arguments.</p>'}</div>` +
-      (hl && C.pre.chain.length ? `<p class="lede">After it ends, the console runs ${esc(C.pre.chain.join(", "))}.</p>` : "") +
+      (hl && C.pre.chain.length ? `<p class="lede">After it ends, the console runs ${esc(C.pre.chain.map((id) => V.own(NAME, id) || id).join(", then "))}.</p>` : "") +
       (cf ? `<div class="confirm" role="alertdialog" aria-label="Confirm paid stage"><p><b>This calls Gemini and spends money.</b> ${esc(est)}</p><button type="button" class="btn pri" data-op="confirm" data-stage="${esc(s.id)}"${dis()}>Confirm and run</button> <button type="button" class="btn" data-op="unconfirm"${dis()}>Cancel</button></div>`
         : `<button type="button" class="btn pri" data-op="run" data-stage="${esc(s.id)}"${dis()}>Run ${esc(s.label || s.id)}</button>`) +
       (m && m.err ? `<p class="err" role="alert">${esc(m.err)}</p>` : "") + `</div>`;
@@ -174,10 +177,10 @@
     `<div class="tw rv"><table><thead><tr><th>Stage</th><th>Status</th><th>Started</th><th>Ended</th><th class="r">Exit</th><th class="r">Cost</th></tr></thead><tbody>${C.jobs.map((j) => `<tr><td class="m">${esc(j.stage)}</td><td>${jchip(j.status)}</td><td class="m">${esc(j.started_ist)}</td><td class="m">${esc(j.ended_ist || "–")}</td><td class="m r">${esc(j.exit_code == null ? "–" : j.exit_code)}</td><td class="m r">${esc(usd(j.cost_usd))}</td></tr>`).join("") || '<tr><td colspan="6" class="src">No jobs yet.</td></tr>'}</tbody></table></div>`;
   const causes = () => { const r = S.stage.issues; return r && r.v && Array.isArray(r.v.causes) ? r.v.causes : []; };
   P.run = () => {
-    if (!C.con) return V.head("Operate", "Run a <em>stage</em>", "") + unavailable();
-    return V.head("Operate", "Run a <em>stage</em>", `One job runs at a time. Data folder: ${C.con.data_dir_name}.`) + banner() +
+    if (!C.con) return V.head("Run one step", "") + unavailable();
+    return V.head("Run one step", "Run one stage by itself, with its own options. One job runs at a time.") + banner() +
       `<datalist id="cause-ids">${causes().map((c) => `<option value="${esc(c.cause_id)}">`).join("")}</datalist>` +
-      `<div class="cards">${C.con.stages.filter((s) => s.id !== "submit").map(card).join("")}</div>` + V.sec("Job history") + jobsTable();
+      `<div class="cards">${C.con.stages.filter((s) => s.id !== "submit" && s.id !== "loop").map(card).join("")}</div>` + V.sec("Job history") + jobsTable();
   };
 
   // ---- submit ----
@@ -235,18 +238,18 @@
     findings(c).map((f) => `<p class="finding">${chip(f.status)} <b>${esc(V.own(V.NAMES, f.parameter) || f.parameter)}</b>${f.onset_turn != null ? ` · turn ${esc(f.onset_turn)}` : ""}<br><span class="src">${esc(f.reason)}</span></p>`).join("") +
     (Array.isArray(c.flags) && c.flags.length ? `<p class="chips">${c.flags.map((x) => `<span class="pill">${esc(str(x).replace(/_/g, " "))}</span>`).join("")}</p>` : "") + `</div></li>`;
   P.submit = () => {
-    if (!C.con) return V.head("Operate", "Submit <em>calls</em>", "") + unavailable();
+    if (!C.con) return V.head("Submit calls", "") + unavailable();
     const sub = C.sub, m = sub.msg;
     const chips = (list, kind) => list.map((x, i) => `<span class="pill">${esc(kind === "f" ? x.name : x)}<button type="button" class="x" data-op="rm-${kind}" data-i="${i}" aria-label="Remove ${esc(kind === "f" ? x.name : x)}"${dis()}>×</button></span>`).join("");
-    return V.head("Operate", "Submit <em>calls</em>", "Audio and transcripts, or ids of calls already read in. Each gets a verdict.") + banner() +
+    return V.head("Submit calls", "Add audio, transcripts or the ids of calls already read in, and get a grade for each call. Grading uses Gemini and costs money.") + banner() +
       `<div class="card rv"><div class="drop" data-drop="1"><label class="label" for="sub-files">Drop or pick mp3 and transcript json files</label><input id="sub-files" class="inp" type="file" multiple accept=".mp3,.json" data-op="files"${dis()}></div>` +
       `<div class="fld"><label class="label" for="sub-id">Call ids</label><div class="addrow"><input class="inp" id="sub-id" list="sub-ids" autocomplete="off" data-op="id-draft" value="${esc(sub.draft)}" placeholder="type or paste ids"${dis()}><button type="button" class="btn" data-op="add-id"${dis()}>Add</button></div>` +
       `<datalist id="sub-ids">${C.calls.slice(0, 500).map((id) => `<option value="${esc(id)}">`).join("")}</datalist></div>` +
       `<div class="chips">${chips(sub.files, "f")}${chips(sub.ids, "i")}</div>` +
-      `<p class="lede">Sending audits the calls with Gemini and spends money.</p><button type="button" class="btn pri" data-op="send"${sub.busy ? " disabled" : dis()}>Send for audit</button>` +
+      `<button type="button" class="btn pri" data-op="send"${sub.busy ? " disabled" : dis()}>Grade these calls</button>` +
       (m ? `<p class="${m.err ? "err" : "ok"}" role="${m.err ? "alert" : "status"}">${esc(m.err || m.ok)}</p>` : "") + `</div>` +
-      (sub.result ? V.sec(`Results · ${sub.sid}`) + `<ul class="items res-list rv">${(sub.result.calls || []).map(resultRow).join("") || '<li class="empty">No results yet.</li>'}</ul>` : "") +
-      V.sec("Past submissions") + `<div class="tw rv"><table><tbody>${sub.list.map((s) => `<tr><td class="m">${esc(s.submission_id)}</td><td class="m">${esc(s.created_ist)}</td><td class="m r">${esc(s.calls)} calls</td><td class="r"><button type="button" class="btn sm" data-op="open-sub" data-sid="${esc(s.submission_id)}"${dis()}>Open</button></td></tr>`).join("") || '<tr><td class="src">None yet.</td></tr>'}</tbody></table></div>`;
+      (sub.result ? V.sec("Grades for this batch") + `<ul class="items res-list">${(sub.result.calls || []).map(resultRow).join("") || '<li class="empty">No results yet.</li>'}</ul>` : "") +
+      V.sec("Earlier batches") + `<div class="tw"><table><tbody>${sub.list.map((s) => `<tr><td class="m">${esc(s.submission_id)}</td><td class="m">${esc(s.created_ist)}</td><td class="m r">${esc(s.calls)} calls</td><td class="r"><button type="button" class="btn sm" data-op="open-sub" data-sid="${esc(s.submission_id)}"${dis()}>Open</button></td></tr>`).join("") || '<tr><td class="src">None yet.</td></tr>'}</tbody></table></div>`;
   };
 
   // ---- rubric ----
@@ -283,9 +286,9 @@
       `<button type="button" class="btn sm" data-op="reset-q" data-q="${esc(q.id)}"${q.overridden || qdirty(q) ? dis() : " disabled"}>Reset</button></div>`;
   };
   P.rubric = () => {
-    if (!C.con) return V.head("Operate", "Audit <em>rubric</em>", "") + unavailable();
+    if (!C.con) return V.head("Rubric", "") + unavailable();
     const d = RB.data;
-    if (!d) return V.head("Operate", "Audit <em>rubric</em>", "") + (RB.err ? `<p class="empty">The rubric could not load (${esc(RB.err)}).</p>` : '<p class="empty">Loading.</p>');
+    if (!d) return V.head("Rubric", "") + (RB.err ? `<p class="empty">The rubric could not load (${esc(RB.err)}).</p>` : '<p class="empty">Loading.</p>');
     const byId = Object.fromEntries(d.params.map((p) => [p.id, p])), used = new Set();
     const check = (c) => {
       const ps = (c.params || []).map((id) => byId[id]).filter(Boolean);
@@ -294,8 +297,8 @@
         `<p class="lede">${esc(c.what)}</p><p class="why"><b>Fatal when</b> ${esc(c.fatal_when)}</p><p class="why"><b>Non-fatal when</b> ${esc(c.nonfatal_when)}</p><div class="flds">${ps.map((p) => paramField(p, c.id)).join("")}</div></div>`;
     };
     const cards = d.checks.map(check).join(""), rest = d.params.filter((p) => !used.has(p.id));
-    return V.head("Operate", "Audit <em>rubric</em>", `Each check and the numbers it grades with. Jev version ${d.jev_version_effective || ""}.`) + banner() + savedBanner() +
-      `<div class="savebar"><button type="button" class="btn pri" id="rb-save" data-op="save-rubric"${anyDirty() ? dis() : " disabled"}>Save rubric</button></div>` +
+    return V.head("Rubric", "The checks each call is graded on, and the numbers each check uses. A change counts only after Jev labels again and the calls are regraded.") + banner() + savedBanner() +
+      `<div class="savebar"><button type="button" class="btn pri" id="rb-save" data-op="save-rubric"${anyDirty() ? dis() : " disabled"}>Save rubric</button> <span class="src">Save turns on after you change a number or a question.</span></div>` +
       V.sec("Checks") + `<div class="cards">${cards}${rest.length ? `<div class="card op-card rv"><h3>Other numbers</h3><div class="flds">${rest.map((p) => paramField(p, "other")).join("")}</div></div>` : ""}</div>` +
       V.sec("Jev questions") + `<div class="cards">${(d.questions || []).map(qCard).join("")}</div>`;
   };
@@ -359,13 +362,13 @@
     }).join("")}</tbody></table></div><p class="lede">Changes against the current values show in colour. Labels that would flip over all ${esc(r.calls)} calls:</p><div class="chips">${Object.entries(r.flips || {}).map(([k, n]) => `<span class="pill">${esc(V.own(LBL, k) || k)}<b>${esc(n)}</b></span>`).join("")}</div>`;
   };
   P.tune = () => {
-    if (!C.con) return V.head("Operate", "Tune the <em>thresholds</em>", "") + unavailable();
-    if (!RB.data) return V.head("Operate", "Tune the <em>thresholds</em>", "") + (RB.err ? `<p class="empty">The rubric could not load (${esc(RB.err)}).</p>` : '<p class="empty">Loading.</p>');
+    if (!C.con) return V.head("Tune", "") + unavailable();
+    if (!RB.data) return V.head("Tune", "") + (RB.err ? `<p class="empty">The rubric could not load (${esc(RB.err)}).</p>` : '<p class="empty">Loading.</p>');
     const slider = ([k, label, id]) => {
       const p = sp(id) || { min: 0, max: 1, step: 0.01 }, v = tval(k, id);
       return `<div class="fld"><label class="label" for="s-${esc(k)}">${esc(label)} <output id="o-${esc(k)}" class="mono">${esc(v)}</output></label><input id="s-${esc(k)}" type="range" class="rng" data-op="tune" data-key="${esc(k)}" min="${esc(p.min)}" max="${esc(p.max)}" step="${esc(p.step)}" value="${esc(v)}"${dis()}></div>`;
     };
-    return V.head("Operate", "Tune the <em>thresholds</em>", "Move a slider to re-score the reviewed calls. Nothing is saved until you press Save to rubric.") + banner() + savedBanner() +
+    return V.head("Tune", "Move a slider to see how the reviewed calls would be graded. Nothing is saved until you press Save to rubric.") + banner() + savedBanner() +
       `<div class="card rv"><div class="sliders">${SL.map(slider).join("")}</div><button type="button" class="btn pri" data-op="tune-save"${dis()}>Save to rubric</button></div>` + V.sec("Against the reviewed truth") + `<div id="tune-res">${tuneRes()}</div>`;
   };
   async function saveTune() {
@@ -380,7 +383,7 @@
   const TR = { data: null, err: null, ref: {}, note: {}, ship: null, msg: {} };
   const GROUPS = [["Open", ["open"]], ["In fix", ["in_fix", "gated_inconclusive"]], ["Ready to ship", ["ready_to_ship"]], ["Shipped", ["shipped"]], ["Tickets", ["ticket_open", "ticket_sent", "ticket_resolved"]], ["Watching", ["watching"]], ["Done or failed", ["closed", "rejected", "exhausted", "regressed"]]];
   const STONE = { regressed: "fatal", rejected: "review", exhausted: "review", closed: "pass", shipped: "pass", ready_to_ship: "nonfatal", in_fix: "nonfatal", gated_inconclusive: "nonfatal" };
-  const schip = (st) => `<span class="chip t-${esc(V.own(STONE, st) || "review")}">${esc(str(st).replace(/_/g, " "))}</span>`;
+  const schip = (st) => V.badge(V.own(STONE, st) || "review", str(st).replace(/_/g, " "));
   async function loadTracker() {
     const r = await call("GET", "/api/tracker");
     if (r.ok && Array.isArray(r.data.causes)) { TR.data = r.data; TR.err = null; } else TR.err = errText(r);
@@ -409,13 +412,13 @@
   };
   P.tracker = () => {
     const d = TR.data;
-    if (!C.con) return V.head("Operate", "Issues <em>tracker</em>", "") + unavailable();
-    if (!d) return V.head("Operate", "Issues <em>tracker</em>", "") + (TR.err ? `<p class="empty">The tracker could not load (${esc(TR.err)}).</p>` : '<p class="empty">Loading.</p>');
+    if (!C.con) return V.head("Tracker", "") + unavailable();
+    if (!d) return V.head("Tracker", "") + (TR.err ? `<p class="empty">The tracker could not load (${esc(TR.err)}).</p>` : '<p class="empty">Loading.</p>');
     const cols = GROUPS.map(([name, states]) => {
       const cs = d.causes.filter((c) => states.includes(c.state));
       return `<section class="col" aria-label="${esc(name)}"><h2 class="sec">${esc(name)} <span class="src">${esc(cs.length)}</span></h2>${cs.map(tcard).join("") || '<p class="src">None.</p>'}</section>`;
     }).join("");
-    return V.head("Operate", "Issues <em>tracker</em>", "Each cause, where it stands, and what happened to it.") + banner() + `<div class="board">${cols}</div>` + V.sec("Prompt versions") +
+    return V.head("Tracker", "Every cause, where it stands, and what waits for you. Fixes that passed wait here for your approval.") + banner() + `<div class="board">${cols}</div>` + V.sec("Prompt versions") +
       `<ul class="items rv">${(d.prompt_versions || []).map((v) => `<li class="res"><div class="who"><b>${esc(v.version)}</b>${v.version === d.current_prompt_version ? ' <span class="chip t-pass">current</span>' : ""}<br>${esc(v.created_ist)}${v.base ? `<br>from ${esc(v.base)}` : ""}</div><div>${(v.causes || []).map((x) => `<span class="pill">${esc(x)}</span>`).join(" ") || '<span class="src">no causes</span>'}</div></li>`).join("") || '<li class="empty">None yet.</li>'}</ul>`;
   };
   const tpost = async (id, path, body) => {
@@ -425,7 +428,9 @@
     redraw();
   };
 
-  V.ITEMS.push({ id: "run", group: "operate", name: "Run" }, { id: "submit", group: "operate", name: "Submit calls" }, { id: "rubric", group: "operate", name: "Rubric" }, { id: "tune", group: "operate", name: "Tune" }, { id: "tracker", group: "operate", name: "Issues tracker" });
+  V.ITEMS.push({ id: "run", group: "operate", name: "Run one step", side: "tools" }, { id: "submit", group: "operate", name: "Submit calls", side: "tab", step: 1, tab: "Submit calls" }, { id: "rubric", group: "operate", name: "Rubric", side: "tab", step: 2, tab: "Rubric" },
+    { id: "tune", group: "operate", name: "Tune", side: "tab", step: 2, tab: "Tune" }, { id: "tracker", group: "operate", name: "Tracker", side: "needs" });
+  V.vals = () => { const n = TR.data && TR.data.causes.filter((c) => c.state === "ready_to_ship" || c.state === "ticket_open").length; return { tracker: n == null ? "" : n ? `${n} waiting` : "None waiting" }; };
   const enter = async () => { if (!C.con) await loadConsole(); await loadJobs(); redraw(); };
   V.enter = {
     run: async () => { await enter(); },

@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='4' fill='%23CDB58A'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;1,6..96,400&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/dash.css">
 <link rel="stylesheet" href="/static/console.css">
@@ -15,24 +15,21 @@
 <script defer src="/static/console.js"></script>
 </head>
 <body>
+<a class="skip" href="#panel">Skip to the page</a>
 <div class="shell">
   <header class="bar">
-    <a class="mark" href="/#/" aria-label="vaniloop, all calls">vaniloop<i aria-hidden="true"></i></a>
+    <a class="mark" href="#/ingest">vaniloop<i aria-hidden="true"></i></a>
     <button class="menu" type="button" aria-expanded="false" aria-controls="side"><span id="menu-now">Menu</span><b aria-hidden="true"></b></button>
   </header>
   <aside id="side" class="side" aria-label="Pipeline">
-    <a class="mark big" href="/#/" aria-label="vaniloop, all calls">vaniloop<i aria-hidden="true"></i></a>
-    <p class="label side-sub">Dashboard</p>
-    <div id="judge-wrap" class="judge" hidden>
-      <p class="label">Judge</p>
-      <div class="seg" role="group" aria-label="Judge" id="judge"></div>
-    </div>
+    <a class="mark big" href="#/ingest">vaniloop<i aria-hidden="true"></i></a>
+    <p class="side-sub">VANI call quality</p>
     <nav id="nav" aria-label="Panels"></nav>
-    <a class="back" href="/#/">All calls <span aria-hidden="true">→</span></a>
+    <p id="side-foot" class="side-foot"></p>
   </aside>
   <main id="panel" tabindex="-1"></main>
 </div>
-<div id="dock" class="dock" role="region" aria-label="Job dock" hidden>
+<div id="dock" class="dock" role="region" aria-label="Current job" hidden>
   <div class="dock-bar"><span id="dock-info" class="dock-info" role="status"></span><span id="dock-actions" class="dock-actions"></span></div>
   <pre id="dock-log" class="dock-log" tabindex="0" aria-label="Job log" hidden></pre>
 </div>

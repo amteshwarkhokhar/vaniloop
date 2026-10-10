@@ -16,7 +16,7 @@
 .owner{ color:var(--ivory); white-space:normal; line-height:1.3; }
 .owner::before{ display:none; }
 .ev{ font-size:13px; line-height:1.45; color:var(--ash); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.count{ font:500 32px/1 var(--display); font-variant-numeric:lining-nums tabular-nums; font-variation-settings:"opsz" 14; text-align:right; }
+.count{ font:600 32px/1 var(--body); font-variant-numeric:tabular-nums; text-align:right; }
 .split{ display:flex; gap:2px; height:3px; }
 .split i{ display:block; height:100%; background:var(--tone); border-radius:1px; }
 .cstatus{ font-size:10px; }

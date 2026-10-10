@@ -1,7 +1,6 @@
-// vaniloop dashboard: a pipeline sidebar and one panel per item. Every data string goes through esc().
+// vaniloop dashboard: a step sidebar, tabs on each step and one panel per page. Every data string goes through esc().
 (() => {
   "use strict";
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)");
   const str = (s) => (s == null || typeof s === "object" || typeof s === "function" ? "" : String(s));
   const esc = (s) => str(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   const $ = (id) => document.getElementById(id);
@@ -18,22 +17,23 @@
   const own = (d, k) => (typeof k === "string" && Object.hasOwn(d, k) ? d[k] : undefined);
   const tone = (v) => own(TONE, v) || "review";
   const word = (v) => own(WORD, v) || str(v);
-  const chip = (v) => `<span class="chip t-${esc(tone(v))}">${esc(word(v))}</span>`;
-  const DECISION = { ship: ["Shipped", "pass"], reject: ["Rejected", "fatal"], inconclusive: ["Inconclusive", "review"] };
-  const dchip = (d) => { const [w, t] = own(DECISION, d) || [str(d), "review"]; return `<span class="chip t-${t}">${esc(w)}</span>`; };
+  // A badge is a word and a glyph, so colour is never the only signal.
+  const GLYPH = { pass: "✓", fatal: "✕", nonfatal: "◐", review: "○" };
+  const badge = (t, w, g) => `<span class="chip t-${esc(t)}"><span aria-hidden="true">${esc(g || own(GLYPH, t))}</span> ${esc(w)}</span>`;
+  const chip = (v) => badge(tone(v), word(v));
+  const DECISION = { ship: ["Passed", "pass"], reject: ["Did not pass", "fatal"], inconclusive: ["Unclear", "review"] };
+  const dchip = (d) => { const [w, t] = own(DECISION, d) || [str(d), "review"]; return badge(t, w); };
+  const cap = (s) => str(s).replace(/^./, (c) => c.toUpperCase());
 
+  // side: where the sidebar lists the page (step, needs, tools) or "tab" for a tab on its step. group keeps show() and redraw() as they were.
   const ITEMS = [
-    { id: "judge", group: "config", name: "Judge" },
-    { id: "thresholds", group: "config", name: "Thresholds" },
-    { id: "fixloop", group: "config", name: "Fix loop" },
-    { id: "data", group: "config", name: "Data" },
-    { id: "ingest", group: "stage", name: "Ingest" },
-    { id: "audit", group: "stage", name: "Audit" },
-    { id: "issues", group: "stage", name: "Issues" },
-    { id: "fix", group: "stage", name: "Fix" },
-    { id: "gate", group: "stage", name: "Gate" },
-    { id: "review", group: "stage", name: "Jev review" },
+    { id: "ingest", group: "stage", name: "Ingest", side: "step", step: 1, tab: "Overview" }, { id: "data", group: "config", name: "Data files", side: "tab", step: 1, tab: "Data files" },
+    { id: "audit", group: "stage", name: "Audit", side: "step", step: 2, tab: "Results" }, { id: "judge", group: "config", name: "Judges", side: "tab", step: 2, tab: "Judges" },
+    { id: "thresholds", group: "config", name: "All constants", side: "tab", step: 2, tab: "All constants" }, { id: "review", group: "stage", name: "Judge accuracy", side: "tab", step: 2, tab: "Judge accuracy" },
+    { id: "issues", group: "stage", name: "Issues", side: "step", step: 3 }, { id: "fix", group: "stage", name: "Fix", side: "step", step: 4 },
+    { id: "gate", group: "stage", name: "Test", side: "step", step: 5, tab: "Results" }, { id: "fixloop", group: "config", name: "Test settings", side: "tab", step: 5, tab: "Test settings" },
   ];
+  const TABS = { 1: ["ingest", "submit", "data"], 2: ["audit", "rubric", "tune", "judge", "thresholds", "review"], 5: ["gate", "fixloop"] };
   const S = { cfg: null, stage: {}, judge: null, avail: [], now: "ingest", filt: { kind: "all", verdict: "all", fatal: false } };
 
   async function get(path) {
@@ -47,43 +47,26 @@
 
   function heads() {
     const s = S.stage, g = (k) => (s[k] && !s[k].e ? s[k].v : null);
-    const ing = g("ingest"), au = g("audit"), is = g("issues"), fx = g("fix"), ga = g("gate"), rv = g("review");
+    const ing = g("ingest"), au = g("audit"), is = g("issues"), fx = g("fix"), ga = g("gate");
     const shipped = ga ? ga.gates.filter((x) => x.decision === "ship").length : 0;
-    const cfg = S.cfg;
     return {
-      judge: cfg ? S.judge : null,
-      thresholds: cfg ? `${flat(cfg.audit).length} set` : null,
-      fixloop: cfg ? `α ${leaf(cfg.fix_loop.alpha_per_attempt)}` : null,
-      data: cfg ? `${cfg.data.files.filter((f) => f.rows != null).length}/${cfg.data.files.length} files` : null,
+      ...(window.VL && window.VL.vals ? window.VL.vals() : {}),
       ingest: ing && `${fmt(ing.calls)} calls`,
-      audit: au && `${fmt(au.verdicts.Fatal || 0)} Fatal`,
+      audit: au && `${fmt(au.verdicts.Fatal || 0)} fatal`,
       issues: is && `${fmt(is.causes.length)} causes`,
       fix: fx && `${fmt(fx.patches.length)} patches`,
-      gate: ga && `${fmt(ga.gates.length)} gates · ${fmt(shipped)} shipped`,
-      review: rv && `${fmt(Object.values(rv.totals).reduce((a, t) => a + sum(t), 0))} reviewed`,
+      gate: ga && `${fmt(shipped)} of ${fmt(ga.gates.length)} passed`,
     };
   }
 
   function nav() {
-    const h = heads();
-    const one = (it) => {
-      const cur = it.id === S.now ? ' aria-current="page"' : "";
-      const hd = h[it.id];
-      if (it.group !== "stage")
-        return `<button class="item" type="button" data-go="${it.id}"${cur}><span>${esc(it.name)}</span><span class="val">${esc(hd)}</span></button>`;
-      return `<button class="node" type="button" data-go="${it.id}"${cur}><span class="nm">${esc(it.name)}</span><span class="hd${hd ? "" : " none"}">${esc(hd || "no data yet")}</span></button>`;
+    const h = heads(), cur = ITEMS.find((i) => i.id === S.now) || {};
+    const row = (it) => {
+      const step = it.side === "step", on = it.id === S.now ? "page" : step && it.step === cur.step ? "step" : "";
+      return `<button class="item" type="button" data-go="${it.id}"${on ? ` aria-current="${on}"` : ""}>${step ? `<span class="num">${it.step}</span>` : ""}<span class="nm">${esc(it.name)}</span><span class="val">${esc(step && !h[it.id] ? "no data yet" : h[it.id])}</span></button>`;
     };
-    $("nav").innerHTML =
-      (ITEMS.some((i) => i.group === "operate") ? `<p class="label grp">Operate</p>${ITEMS.filter((i) => i.group === "operate").map(one).join("")}` : "") +
-      `<p class="label grp">Configure</p>${ITEMS.filter((i) => i.group === "config").map(one).join("")}` +
-      `<p class="label grp">Pipeline</p><div class="rail">${ITEMS.filter((i) => i.group === "stage").map(one).join("")}</div>`;
-  }
-
-  function judgeToggle() {
-    $("judge-wrap").hidden = S.avail.length < 2;
-    $("judge").innerHTML = S.avail
-      .map((j) => `<button type="button" data-judge="${esc(j)}" aria-pressed="${j === S.judge}">${esc(j)}</button>`)
-      .join("");
+    const of = (side) => ITEMS.filter((i) => i.side === side).map(row).join("");
+    $("nav").innerHTML = `<p class="grp">Steps</p>${of("step")}<p class="grp">Needs you</p>${of("needs")}<p class="grp">Tools</p>${of("tools")}<a class="item" href="/#/"><span class="nm">All calls</span><span aria-hidden="true">→</span></a>`;
   }
 
   function flat(o, path = []) {
@@ -92,10 +75,16 @@
     return Object.entries(o).flatMap(([k, v]) => flat(v, [...path, k]));
   }
   const bn = (n, label, t = "", dec = 0, unit = "") =>
-    `<div class="bn ${t ? `t-${t}` : ""}"><span class="n">${num(n) == null ? "–" : `<span data-count="${n}" data-dec="${dec}">${fmt(n, dec)}</span>`}${unit ? `<small>${esc(unit)}</small>` : ""}</span><p class="label">${esc(label)}</p></div>`;
-  const head = (eyebrow, title, lede) =>
-    `<p class="label eyebrow rv">${esc(eyebrow)}</p><h1 class="ptitle rv" tabindex="-1">${title}</h1>${lede ? `<p class="lede rv">${esc(lede)}</p>` : ""}`;
-  const sec = (t) => `<h2 class="sec rv">${esc(t)}</h2>`;
+    `<div class="bn ${t ? `t-${t}` : ""}"><span class="n">${fmt(n, dec)}${unit ? `<small>${esc(unit)}</small>` : ""}</span><p class="label">${esc(label)}</p></div>`;
+  // The page head: "Step n of 5", the title, one sentence, the tabs of its step, then the stage bar. The title is plain text.
+  const head = (title, lede) => {
+    const it = ITEMS.find((i) => i.id === S.now) || {}, tabs = (TABS[it.step] || []).map((id) => ITEMS.find((i) => i.id === id)).filter(Boolean);
+    const step = ITEMS.find((i) => i.side === "step" && i.step === it.step) || it;
+    return (it.step ? `<p class="kicker">Step ${esc(it.step)} of 5</p>` : "") + `<h1 class="ptitle" tabindex="-1">${esc(title)}</h1>${lede ? `<p class="lede">${esc(lede)}</p>` : ""}` +
+      (tabs.length > 1 ? `<nav class="tabs" aria-label="${esc(step.name)} pages">${tabs.map((t) => `<a href="#/${t.id}"${t.id === it.id ? ' aria-current="page"' : ""}>${esc(t.tab)}</a>`).join("")}</nav>` : "") +
+      (window.VL && window.VL.stageBar ? window.VL.stageBar(it.id) : "");
+  };
+  const sec = (t) => `<h2 class="sec">${esc(t)}</h2>`;
   const failed = (e) => `<p class="empty">This panel could not load (${esc(e.message)}).</p>`;
 
   const P = {};
@@ -114,14 +103,14 @@
       .join("");
     const drop = th.name_check_drop_at ? leaf(th.name_check_drop_at) : null;
     return (
-      head("Configure", "Who <em>judges</em>", "Two models share the audit. One reads the transcript, the other makes the judgement calls.") +
+      head("Judges", "Gemini lays out each call, and Jev answers each true-or-false question about it.") + sec("Who does what") +
       `<div class="roles rv"><div class="card role"><p class="label">Structure</p><p class="big">${esc(leaf(j.structure_model))}</p><p class="lede">Gemini reads the call and lays out its turns, specs and quantities.</p></div>` +
       `<div class="card role"><p class="label">Judgement</p><p class="big">${esc(leaf(j.jev_model))}</p><p class="lede">Jev, version <span class="mono">${esc(leaf(j.jev_version))}</span>, labels each judgement as true, false or unsure.</p></div></div>` +
-      sec("Probability bands") +
+      sec("Where Jev says true or false") +
       `<p class="lede rv">Each label has its own band, tuned on the reviewed calls. Below the low mark Jev says false. Above the high mark it says true. Between, the label stays unsure and the call goes to review.</p>` +
       bands +
       (drop !== null ? `<p class="lede rv">A spec turn's question label is dropped to unsure when Jev's check that the turn asks that spec is at or below <span class="mono">${esc(drop)}</span>.</p>` : "") +
-      sec("Active") +
+      sec("Which grades the pages show") +
       `<p class="lede rv">Showing <b class="mono">${esc(S.judge)}</b> numbers. <span class="mono">${esc(S.cfg.judge.active.source)}</span></p>`
     );
   };
@@ -129,36 +118,37 @@
     `<div class="tw rv"><table><thead><tr><th>Setting</th><th class="m">Value</th><th>Source</th></tr></thead><tbody>${items
       .map((r) => `<tr><td>${esc(r.key)}</td><td class="m">${esc(r.value)}</td><td class="src">${esc(r.source)}</td></tr>`)
       .join("")}</tbody></table></div>`;
-  P.thresholds = () => head("Configure", "Audit <em>thresholds</em>", "Each constant the Python rules grade with, and where it lives.") + rows(flat(S.cfg.audit));
+  P.thresholds = () => head("All constants", "Every number the Python rules grade with, and the file it lives in.") + rows(flat(S.cfg.audit));
   P.fixloop = () => {
     const fl = S.cfg.fix_loop, last = flat(fl.last_run);
     return (
-      head("Configure", "The <em>fix loop</em>", "How many tries a cause gets, and the bar a patch must clear.") +
+      head("Test settings", "How many tries each cause gets, and how sure a test must be before a patch passes.") +
       rows(flat({ ...fl, last_run: undefined })) + sec("Last run") +
-      (last.length ? rows(last.map((r) => ({ ...r, key: r.key.replace(/^last run › /, "") }))) : `<p class="note rv">No gate has run yet.</p>`)
+      (last.length ? rows(last.map((r) => ({ ...r, key: r.key.replace(/^last run › /, "") }))) : `<p class="note">No test has run yet.</p>`)
     );
   };
   P.data = () => {
     const d = S.cfg.data;
     return (
-      head("Configure", "The <em>data</em>", `Folder ${leaf(d.folder)}. Times in IST.`) +
+      head("Data files", "The files in this data folder, with their row counts and the time each one changed, in IST.") +
       `<div class="tw rv"><table><thead><tr><th>File</th><th class="r">Rows</th><th class="r">Updated</th></tr></thead><tbody>${d.files
         .map((f) => `<tr><td class="m">${esc(f.name)}</td><td class="m r">${f.rows == null ? '<span class="src">not made yet</span>' : esc(fmt(f.rows))}</td><td class="m r">${esc(f.updated_ist || "–")}</td></tr>`)
         .join("")}</tbody></table></div>`
     );
   };
   P.ingest = (d) =>
-    head("Stage 1 · Ingest", "Calls, <em>read in</em>", "Transcripts and audio turned into call records.") +
-    `<div class="big-nums rv">${bn(d.calls, "Calls")}${bn(d.with_audio, "With audio")}${bn(d.minutes_total, "Minutes", "", 1)}${bn(d.median_sec, "Median", "", 1, "s")}${bn(d.p90_sec, "90th percentile", "", 1, "s")}${bn(d.short_calls, "Short calls")}</div>`;
+    head("Ingest", "The calls this folder holds, read in from transcripts and audio.") +
+    `<p class="note">New files are read in from the command line with <span class="mono">uv run python -m vaniloop.ingest</span>. To grade a few calls from here, use <a href="#/submit">Submit calls</a>.</p>` +
+    `<div class="big-nums" style="margin-top:24px">${bn(d.calls, "Calls")}${bn(d.with_audio, "With audio")}${bn(d.minutes_total, "Minutes", "", 1)}${bn(d.median_sec, "Median", "", 1, "s")}${bn(d.p90_sec, "90th percentile", "", 1, "s")}${bn(d.short_calls, "Short calls")}</div>`;
   P.audit = (d) => {
     const order = ["Fatal", "NonFatal", "NeedsReview", "Pass"], v = d.verdicts, tot = d.total || 1;
     const checks = Object.entries(d.by_parameter);
+    const pick = S.avail.length > 1 ? `<div class="pick"><span class="label" id="pick-l">Show grades from</span><div class="seg" role="group" aria-labelledby="pick-l">${S.avail.map((j) => `<button type="button" data-view data-judge="${esc(j)}" aria-pressed="${j === S.judge}">${esc(cap(j))}</button>`).join("")}</div></div>` : "";
     return (
-      head("Stage 2 · Audit", `<em>${esc(d.judge)}</em> judged ${esc(fmt(d.total))} calls`, "Python rules grade. The model only labels.") +
-      `<div class="vbar rv" role="img" aria-label="Verdicts">${order.filter((k) => v[k]).map((k) => `<span class="t-${tone(k)}" style="width:${(100 * v[k]) / tot}%"></span>`).join("")}</div>` +
-      `<div class="legend rv">${order.map((k) => `<span class="chip t-${tone(k)}">${esc(word(k))} <b>${esc(v[k] || 0)}</b></span>`).join("")}</div>` +
-      `<div class="big-nums rv" style="margin-top:36px">${order.map((k) => bn(v[k] || 0, word(k), tone(k))).join("")}</div>` +
-      sec("Scope") + `<div class="chips rv">${Object.entries(d.scopes).map(([k, n]) => `<span class="pill">${esc(k === "bl_collection" ? "lead call" : k.replace(/_/g, " "))}<b>${esc(n)}</b></span>`).join("")}</div>` +
+      head("Audit", `${cap(d.judge)} graded ${fmt(d.total)} calls. A model labels each turn, and Python rules give the grade.`) + pick +
+      `<div class="vbar" role="img" aria-label="Verdicts">${order.filter((k) => v[k]).map((k) => `<span class="t-${tone(k)}" style="width:${(100 * v[k]) / tot}%"></span>`).join("")}</div>` +
+      `<div class="big-nums" style="margin-top:24px">${order.map((k) => bn(v[k] || 0, word(k), tone(k))).join("")}</div>` +
+      sec("Call types") + `<div class="chips">${Object.entries(d.scopes).map(([k, n]) => `<span class="pill">${esc(k === "bl_collection" ? "lead call" : k.replace(/_/g, " "))}<b>${esc(n)}</b></span>`).join("")}</div>` +
       sec("Checks") +
       `<div class="tw rv"><table><thead><tr><th>Check</th>${order.concat("Unknown").map((k) => `<th class="r">${esc(word(k))}</th>`).join("")}</tr></thead><tbody>${checks
         .map(([p, c]) => `<tr><td>${esc(own(NAMES, p) || p)}</td>${order.concat("Unknown").map((k) => `<td class="r">${c[k] ? `<span class="cell t-${tone(k)}">${esc(c[k])}</span>` : '<span class="cell z">0</span>'}</td>`).join("")}</tr>`)
@@ -169,7 +159,7 @@
   P.issues = (d) => {
     const fa = (c) => num(c.fatal) || 0, nf = (c) => num(c.nonfatal) || 0, max = Math.max(1, ...d.causes.map((c) => fa(c) + nf(c)));
     return (
-      head("Stage 3 · Issues", "Causes, <em>ranked</em>", "Faults grouped by why they happen.") +
+      head("Issues", "Faults grouped by their cause. The cause behind the most fatal calls comes first.") +
       `<ol class="ranked rv">${d.causes.map((c) => `<li><div><h3>${esc(c.name)}</h3><p class="meta"><span>${esc(c.cause_id)}</span><span>${esc(own(NAMES, c.parameter) || c.parameter)}</span><span>${esc(str(c.type).replace(/_/g, " "))}</span><span>${esc(str(c.status).replace(/_/g, " "))}</span><span>owner ${esc(c.owner || "unassigned")}</span></p></div>` +
         `<div><div class="pair"><span class="a" style="width:${(100 * fa(c)) / max}%"></span><span class="b" style="width:${(100 * nf(c)) / max}%"></span></div><p class="pc"><b>${esc(c.fatal)}</b> fatal · <b>${esc(c.nonfatal)}</b> non-fatal</p></div></li>`).join("")}</ol>`
     );
@@ -177,7 +167,7 @@
   const diff = (p, extra = "") =>
     `<div class="card rv"><h3>${esc(p.cause_id)} <span class="label">attempt ${esc(p.attempt)}</span> ${p.gate_decision ? dchip(p.gate_decision) : ""}</h3><div class="diff"><div class="rm"><span class="label">Removed</span>${esc(p.old_text)}</div><div class="ad"><span class="label">Added</span>${esc(p.new_text)}</div></div><p class="lede">${esc(p.rationale)}</p>${extra}</div>`;
   P.fix = (d) =>
-    head("Stage 4 · Fix", "Prompt <em>patches</em>", "Old text against new text, with the reason.") +
+    head("Fix", "For each cause the prompt can fix: the old text, the new text and the reason for the change.") +
     (d.patches.length ? d.patches.map((p) => diff(p)).join("") : `<p class="note rv"><b>No patches yet.</b> Prompt-side causes get a patch once the fix stage runs.</p>`) +
     (d.tickets.length ? sec("Evidence tickets") + d.tickets.map((t) => (t && typeof t === "object" ? t : { cause_id: t })).map((t) => `<div class="card rv"><h3>${esc(t.cause_id)}</h3><p class="lede">${esc(t.summary || t.name || "")}</p></div>`).join("") : "") +
     (d.history.length ? sec("Earlier attempts") + d.history.map((p) => diff(p)).join("") : "");
@@ -187,8 +177,8 @@
     const shipped = d.gates.filter((g) => g.decision === "ship").length;
     const rate = (l, v, t) => `<div class="rate"><span>${l}</span><span class="tr"><i class="t-${t}" style="width:${Math.max(1, (v || 0) * 100)}%"></i></span><b>${pct(v)}</b></div>`;
     return (
-      head("Stage 5 · Gate", "Did the patch <em>earn</em> it?", "Old prompt against new, replayed on the same calls.") +
-      (shipped ? "" : `<p class="note rv"><b>Nothing shipped.</b> No patch has cleared the gate yet.</p>`) +
+      head("Test", "Each patch is replayed on the same calls as the old prompt. It passes only if it clearly does better.") +
+      (shipped ? "" : `<p class="note"><b>Nothing has passed.</b> No patch has cleared its test yet.</p>`) +
       d.gates.map((g) => { const s = screen(g.cause_id); return `<div class="gate rv"><div class="gate-h"><h3>${esc(g.cause_id)}</h3>${dchip(g.decision)}<span class="label">attempt ${esc(g.attempt)}</span></div><p class="label" style="margin:-10px 0 18px">${esc(name(g.cause_id))}</p>` +
         rate("Old", g.old_fail_rate, "fatal") + rate("New", g.new_fail_rate, "pass") +
         `<div class="gate-f"><span>lift <b>${esc(num(g.lift) == null ? "–" : (g.lift > 0 ? "+" : "") + Math.round(g.lift * 100) + " pts")}</b></span><span>p <b>${esc(g.p_value == null ? "–" : g.p_value)}</b> / α <b>${esc(g.alpha)}</b></span><span>${esc(g.n_calls)} calls × ${esc(g.k_seeds)} seeds</span>` +
@@ -209,7 +199,7 @@
     };
     const opts = (key, list) => `<div class="seg" role="group" aria-label="${esc(key)}">${list.map(([v, l]) => `<button type="button" data-f="${key}" data-v="${esc(v)}" aria-pressed="${f[key] === v}">${esc(l)}</button>`).join("")}</div>`;
     return (
-      head("Stage 6 · Jev review", "Who got it <em>right</em>?", "Fable read each contested label against the call. Control labels are ones both judges agreed on.") +
+      head("Judge accuracy", "Where Jev and Gemini disagreed, a reviewer read the call and marked who was right.") +
       `<div class="cards">${kinds.map(accCard).join("") || '<p class="note">Nothing reviewed yet.</p>'}</div>` + sec("Items") +
       `<div class="filters rv">${opts("kind", [["all", "All kinds"]].concat(kinds.map((k) => [k, own(KINDS, k) || k])))}${opts("verdict", [["all", "Any"], ["jev", "Jev right"], ["gem", "Gemini right"], ["both", "Both right"], ["none", "Both wrong"]])}` +
       `<div class="seg"><button type="button" data-fatal="1" aria-pressed="${f.fatal}">Decides Fatal</button></div></div>` +
@@ -219,45 +209,24 @@
     );
   };
 
-  function countUp(root) {
-    root.querySelectorAll("[data-count]").forEach((el) => {
-      const to = Number(el.dataset.count), dec = Number(el.dataset.dec) || 0;
-      if (reduced.matches || !isFinite(to)) return;
-      const t0 = performance.now();
-      const tick = (t) => {
-        const p = Math.min(1, (t - t0) / 900), e = 1 - Math.pow(1 - p, 3);
-        el.textContent = fmt(to * e, dec);
-        if (p < 1) requestAnimationFrame(tick);
-        else el.textContent = fmt(to, dec);
-      };
-      requestAnimationFrame(tick);
-    });
-  }
-  function stagger(root) {
-    [...root.querySelectorAll(".rv")].forEach((el, i) => el.style.setProperty("--i", Math.min(i, 14)));
-  }
-
   function show() {
-    const it = ITEMS.find((i) => i.id === S.now) || ITEMS[4];
+    const it = ITEMS.find((i) => i.id === S.now) || ITEMS.find((i) => i.id === "ingest");
     S.now = it.id;
-    const main = $("panel");
+    const main = $("panel"), stub = (body) => head(it.name, "") + body; // a loading or failed page keeps its title and tabs
     let html;
     try {
-      if (it.group === "config") html = S.cfg ? P[it.id]() : failed(S.cfgErr || new Error("no config"));
+      if (it.group === "config") html = S.cfg ? P[it.id]() : stub(failed(S.cfgErr || new Error("no config")));
       else if (it.group === "operate") html = P[it.id]();
       else {
         const r = S.stage[it.id];
-        html = !r ? '<p class="empty">Loading.</p>' : r.e ? failed(r.e) : P[it.id](r.v);
-        if (window.VL && window.VL.stageBar) html = window.VL.stageBar(it.id) + html;
+        html = !r ? stub('<p class="empty">Loading.</p>') : r.e ? stub(failed(r.e)) : P[it.id](r.v);
       }
     } catch (err) {
-      html = failed(err);
+      html = stub(failed(err));
     }
     main.innerHTML = html;
-    stagger(main);
-    countUp(main);
     nav();
-    $("menu-now").textContent = it.name;
+    $("menu-now").textContent = `Menu: ${it.name}`;
   }
 
   function go(id, push = true) {
@@ -299,8 +268,7 @@
     if (t.dataset.go) go(t.dataset.go);
     else if (t.dataset.judge) {
       S.judge = t.dataset.judge;
-      judgeToggle();
-      if (await loadAudit()) show();
+      if (await loadAudit()) { show(); const b = document.querySelector(`[data-judge="${S.judge}"]`); if (b) b.focus(); }
     } else if (t.dataset.f) { S.filt[t.dataset.f] = t.dataset.v; keepScroll(); }
     else if (t.dataset.fatal) { S.filt.fatal = !S.filt.fatal; keepScroll(); }
     else if (t.classList.contains("menu")) {
@@ -324,7 +292,8 @@
   matchMedia("(min-width: 861px)").addEventListener("change", (e) => { if (e.matches) closeMenu(); });
   window.addEventListener("hashchange", () => {
     const id = location.hash.replace(/^#\/?/, "");
-    if (ITEMS.some((i) => i.id === id)) go(id, false);
+    if (id === "panel") history.replaceState(null, "", `#/${S.now}`); // the skip link only moves focus
+    else if (ITEMS.some((i) => i.id === id)) go(id, false);
   });
 
   async function boot() {
@@ -338,7 +307,6 @@
     } else S.cfgErr = cfg.e;
     const id = location.hash.replace(/^#\/?/, "");
     if (ITEMS.some((i) => i.id === id)) S.now = id;
-    judgeToggle();
     show();
     if (window.VL && window.VL.enter && window.VL.enter[S.now]) window.VL.enter[S.now]();
   }
@@ -351,6 +319,6 @@
     if (it && it.group === "operate") nav(); else show();
   }
   // The small surface console.js builds on.
-  window.VL = { S, P, ITEMS, esc, str, num, fmt, own, tone, chip, head, sec, get, show, go, nav, refresh, NAMES };
+  window.VL = { S, P, ITEMS, esc, str, num, fmt, own, tone, chip, badge, head, sec, get, show, go, nav, refresh, NAMES };
   boot();
 })();

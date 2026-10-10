@@ -17,9 +17,9 @@ def test_paid_stage_asks_for_confirm_then_posts_with_confirm_and_the_dock_follow
     assert "Estimate $1.50." in d["confirm"]
     assert d["posts"] == [{"stage": "audit", "args": {}}, {"stage": "audit", "args": {}, "confirm": True}]
     assert d["hidden"] is False
-    assert "running" in d["info1"] and "audit" in d["info1"]
+    assert "Running" in d["info1"] and "audit" in d["info1"]
     assert "&#60;img src=x onerror=alert(1)&#62;" in d["log1"] and "<img" not in d["log1"] + d["info1"]
-    assert "done" in d["info2"] and "Cancel" not in d["actions"]
+    assert "Done" in d["info2"] and "Cancel" not in d["actions"]
     assert d["refetched"], "a finished job must refresh the stage data"
 
 
@@ -46,12 +46,14 @@ def test_submit_sends_file_and_id_then_shows_one_row_per_call():
 def test_read_only_leaves_no_enabled_control_in_operate():
     """With read_only true every control in Run, Submit, Rubric, Tune, Tracker and the stage Run bar is disabled.
 
-    If one stayed enabled the frozen demo folder could be written."""
+    Only a tag marked data-view stays on, because it changes the view and writes nothing (the judge toggle).
+    If any other control stayed enabled the frozen demo folder could be written."""
     d = run("con-readonly")
     for view in ("run", "submit", "audit", "rubric", "tune", "tracker"):
         tags = re.findall(r"<(?:button|input|select|textarea)\b[^>]*>", d[view])
         assert tags
-        assert all(" disabled" in t for t in tags if "chk" not in t), (view, [t for t in tags if " disabled" not in t])
+        writers = [t for t in tags if "data-view" not in t]
+        assert all(" disabled" in t for t in writers), (view, [t for t in writers if " disabled" not in t])
     assert "read-only" in d["run"]
 
 
@@ -61,7 +63,7 @@ def test_audit_stage_button_prefills_run_and_chains_judge_and_regrade():
     Without the chain, a fresh audit would leave the judge labels stale."""
     d = run("con-chain")
     assert "Run audit, judge and regrade" in d["bar"]
-    assert "After it ends, the console runs judge, regrade." in d["run"]
+    assert "After it ends, the console runs Label with Jev, then Regrade with Jev labels." in d["run"]
     assert "Estimate not known." in d["estimate"]
     assert [p["stage"] for p in d["posts"]] == ["audit", "audit", "judge", "regrade"]
     assert d["posts"][1]["confirm"] is True and "confirm" not in d["posts"][2]
@@ -85,7 +87,7 @@ def test_log_fetch_errors_back_off_and_keep_polling_until_the_job_ends():
     Before the fix the first 503 left no timer, so the dock froze on a running job for good."""
     d = run("con-backoff")
     assert d["delays"][:6] == [[1000], [2000], [4000], [8000], [8000], [8000]]
-    assert "done" in d["info"]
+    assert "Done" in d["info"]
 
 
 def test_cancel_posts_json_headers_and_an_empty_object():
@@ -155,7 +157,7 @@ def test_tracker_groups_causes_into_columns_and_escapes_hostile_text():
     assert list(cols) == ["Open", "In fix", "Ready to ship", "Shipped", "Tickets", "Watching", "Done or failed"]
     assert "Cause c1" in cols["Open"] and "Cause c2" in cols["In fix"] and "Cause c3" in cols["Ready to ship"]
     assert "Cause c4" in cols["Tickets"] and "Cause c5" in cols["Tickets"] and "Cause c9" in cols["Done or failed"]
-    assert '<span class="chip t-fatal">regressed</span>' in cols["Done or failed"]
+    assert "chip t-fatal" in cols["Done or failed"] and "regressed" in cols["Done or failed"]
     assert "&#60;img src=x onerror=alert(1)&#62;" in d["board"] and "<img" not in d["board"]
     assert "v2" in d["board"] and "current" in d["board"] and "from v1" in d["board"]
 
@@ -170,7 +172,7 @@ def test_tracker_actions_post_the_contract_bodies_and_show_errors():
     for part in ("p value <b>0.01</b>", "lift <b>0.25</b>", "guard <b>pass</b>"):
         assert part in d["confirm"]
     assert "gate no longer ships" in d["conflict"]
-    assert "ship" in d["dock"] and "done" in d["dock"], "the 202 job must reach the dock"
+    assert "ship" in d["dock"] and "Done" in d["dock"], "the 202 job must reach the dock"
     assert d["rereads"] >= 1 and "from v2" in d["after"], "a finished ship must reload the board and prompt versions"
     assert d["posts"] == [
         ["/api/tracker/c4/ticket", {"action": "sent", "ref": "T-1"}],
@@ -180,12 +182,28 @@ def test_tracker_actions_post_the_contract_bodies_and_show_errors():
     ]
 
 
-def test_operate_comes_first_and_tracker_times_read_as_ist():
-    """The Operate group heads the sidebar, and tracker times show as "09:00 10 Oct", not raw ISO.
+def test_sidebar_lists_steps_then_needs_you_then_tools_and_tracker_times_read_as_ist():
+    """The sidebar reads Steps, Needs you, Tools, and Tracker shows "2 waiting" (a ready-to-ship cause plus a ticket).
 
-    Below the fold at a 900 px window, Run and Submit were hard to find. Raw ISO stamps were hard to read."""
+    The count comes from GET /api/tracker at boot, before the Tracker page is opened. Tracker times show as
+    "09:00 10 Oct", not raw ISO. If the order broke, Run and the waiting count would be hard to find."""
     d = run("con-tracker")
     nav = d["nav"]
-    assert nav.index("Operate") < nav.index("Configure") < nav.index("Pipeline")
+    assert nav.index("Steps") < nav.index("Needs you") < nav.index("Tools")
+    assert nav.index("Ingest") < nav.index("Audit") < nav.index("Issues") < nav.index("Fix") < nav.index("Test")
+    assert "2 waiting" in nav and "Run one step" in nav[nav.index("Tools") :]
     assert "since 09:00 10 Oct" in d["board"] and "2026-10-10T" not in d["board"]
     assert "10:00 10 Oct" in d["board"], "a time that is not ISO passes through unchanged"
+
+
+def test_tab_marks_its_page_and_its_step_row():
+    """On #/rubric the page says "Step 2 of 5", the Rubric tab has aria-current page and the Audit row is current.
+
+    Without it a tab page would not show which step it belongs to, and the owner could not find the way back.
+    The Rubric tab is not a sidebar row, so the step rows stay five."""
+    d = run("con-rubric")
+    assert "Step 2 of 5" in d["panel"]
+    assert '<a href="#/rubric" aria-current="page">Rubric</a>' in d["panel"]
+    assert '<a href="#/audit">Results</a>' in d["panel"] and 'aria-current="page">Results' not in d["panel"]
+    assert re.search(r'data-go="audit" aria-current="step"', d["nav"])
+    assert 'data-go="rubric"' not in d["nav"]

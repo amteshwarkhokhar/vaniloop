@@ -19,13 +19,14 @@ def run(scenario: str) -> dict:
 
 
 def test_judge_toggle_ignores_a_stale_response():
-    """Click Gemini then Jev, and Jev's answer lands first. The panel must show Jev's numbers.
+    """Click Gemini then Jev on Audit, and Jev's answer lands first. The panel must show Jev's numbers.
 
-    Without a sequence guard the late Gemini answer overwrote the panel under a Jev toggle."""
+    The toggle sits in the panel (Audit, Results) and must show Jev pressed. Without a sequence guard the late
+    Gemini answer overwrote the panel under a Jev toggle."""
     d = run("race")
-    assert "judged 3 calls" in d["panel"]
-    assert "judged 7 calls" not in d["panel"]
-    assert 'data-judge="jev" aria-pressed="true"' in d["toggle"]
+    assert "Jev graded 3 calls" in d["panel"]
+    assert "graded 7 calls" not in d["panel"]
+    assert 'data-view data-judge="jev" aria-pressed="true"' in d["panel"]
 
 
 def test_malformed_values_do_not_replace_the_panel():
