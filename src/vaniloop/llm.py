@@ -410,3 +410,95 @@ def complete_json(
         _write_cache(key, data)
         return data
     raise RuntimeError(f"model returned unparseable or invalid JSON after {retries + 1} tries: {last_err}")
+
+
+# --- Jev (TypeSafe System One): yes/no judgement questions. Same disk cache, budget guard and cost rows. ---
+
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_RETRIES = 3  # attempts on 429 / 529 / network errors, with exponential backoff
+# USD per token. The Jev price is unknown, so cost rows carry 0.0 and do not count against LLM_BUDGET_USD.
+JEV_PRICE_IN_USD = 0.0
+JEV_PRICE_OUT_USD = 0.0
+
+
+def jev_model() -> str:
+    return os.environ.get("TYPESAFE_MODEL", "jev-latest")
+
+
+def _jev_post(url: str, api_key: str, body: dict) -> dict:
+    """The one network call to Jev. Tests replace this function. Raises on HTTP errors."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body, ensure_ascii=False).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())
+
+
+def _jev_valid(ids: list[str]):
+    def check(d: dict) -> bool:
+        a = d.get("answers")
+        return isinstance(a, dict) and all(
+            isinstance(a.get(i), (int, float)) and not isinstance(a.get(i), bool) for i in ids
+        )
+
+    return check
+
+
+def complete_jev(state, questions: dict[str, dict], cache_tag: str = "") -> dict[str, float]:
+    """Ask Jev yes/no questions in one request. Return {question id: probability of yes, 0..1}.
+
+    One request carries every question. A cache hit makes no request and needs no key.
+    """
+    import time
+    from types import SimpleNamespace
+
+    model = jev_model()
+    base = os.environ.get("TYPESAFE_BASE_URL", "").strip() or JEV_URL
+    ids = list(questions)
+    key = _key(model, [{"state": state, "questions": questions}], base, cache_tag)
+    hit = cached_json(key, _jev_valid(ids))
+    if hit is not None:
+        return {i: float(hit["answers"][i]) for i in ids}
+    api_key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+    if not api_key:
+        raise SystemExit("TYPESAFE_API_KEY must be set in .env (no cached Jev answer for this request)")
+    _budget()
+    body = {"state": state, "model": model, "questions": questions}
+    last_err: Exception | None = None
+    for attempt in range(JEV_RETRIES):
+        reserve_id = _admit(_budget())
+        resp, status, error = None, "ok", None
+        try:
+            out = _jev_post(base, api_key, body)
+            answers = {i: (out.get("answers") or {}).get(i, {}).get("noul") for i in ids}
+            u = out.get("usage") or {}
+            resp = SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=u.get("input_tokens"), completion_tokens=u.get("output_tokens"))
+            )
+            data = {"answers": answers, "usage": u}
+            if not _jev_valid(ids)(data):
+                raise ValueError("Jev response lacks a numeric noul for every question")
+        except Exception as exc:
+            status, error = "error", f"{type(exc).__name__}: {exc}"
+            last_err = exc
+        finally:
+            usage = getattr(resp, "usage", None)
+            cost = None if status == "error" else (
+                (getattr(usage, "prompt_tokens", 0) or 0) * JEV_PRICE_IN_USD
+                + (getattr(usage, "completion_tokens", 0) or 0) * JEV_PRICE_OUT_USD
+            )  # fmt: skip
+            _settle(model, cache_tag, resp, cost, status, error, reserve_id=reserve_id)
+        if status == "ok":
+            _write_cache(key, data)
+            return {i: float(answers[i]) for i in ids}
+        code = getattr(last_err, "code", None)
+        if isinstance(code, int) and code < 500 and code != 429:
+            break  # a 401 or 422 will not change on retry
+        if attempt + 1 < JEV_RETRIES:
+            time.sleep(2**attempt)
+    raise RuntimeError(f"Jev request failed: {last_err}")
