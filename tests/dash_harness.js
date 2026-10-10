@@ -25,9 +25,20 @@ const cfg = {
   audit: {}, fix_loop: { alpha_per_attempt: { value: 0.05 }, last_run: {} }, data: { files: [], folder: { value: "d" } },
 };
 const audit = (judge, total) => ({ judge, total, verdicts: {}, scopes: {}, by_parameter: {}, flags: {} });
+// GET /api/calls rows, in the server's order (most severe first). Synthetic ids; one id carries a script tag.
+const crow = (call_id, verdict, duration_sec, parameter, reason) => ({ call_id, verdict, scope: "bl_collection", duration_sec, first_fault: parameter ? { parameter, status: verdict === "NeedsReview" ? "Unknown" : verdict, reason } : null });
+const CALLS = [crow("call-001", "Fatal", 125, "qty_probing", "BuyerA was never asked the quantity"), crow("<script>alert(1)</script>", "Fatal", 61.4, "qty_probing", "Asked <img src=x onerror=alert(1)>"),
+  crow("call-002", "NonFatal", 30, "looping", "Asked the same spec twice"), crow("call-003", "NeedsReview", null, "qty_probing", "Quantity unclear"),
+  ...Array.from({ length: 31 }, (_, i) => crow(`call-p${String(i).padStart(2, "0")}`, "Pass", 9))];
 const stages = {
+  calls: CALLS,
   ingest: { calls: 1 }, audit: audit("jev", 3),
-  issues: { causes: [{ cause_id: "C-01", name: "Cause one", parameter: "qty_probing", type: "prompt", status: { value: "open" }, fatal: 2, nonfatal: 1 }] },
+  issues: { causes: [{ cause_id: "C-01", name: "Cause one", parameter: "qty_probing", type: "prompt", status: { value: "open" }, fatal: 1, nonfatal: 1 },
+    { cause_id: "C-02", name: "Cause two", parameter: "qty_probing", type: "channel", status: "watch", fatal: 1, nonfatal: 0 }] },
+  // GET /api/causes: each cause's own calls. C-02 is C-01's channel twin on the same check. call-002 is a C-01 call whose
+  // first fault is another check, and the NeedsReview call-003 belongs to no cause.
+  causes: { causes: [{ cause_id: "C-01", parameter: "qty_probing", fatal_calls: ["call-001"], nonfatal_calls: ["call-002", 7] },
+    { cause_id: "C-02", parameter: "qty_probing", fatal_calls: ["<script>alert(1)</script>"], nonfatal_calls: null }] },
   fix: { patches: [], tickets: ["C-07"], history: [] }, gate: { gates: [], screens: [] },
   review: { totals: { spec: { a: 1 } }, accuracy: {}, items: [
     { kind: "spec", call_id: { toString: "x" }, reviewer: "r", reason: "no labels here" },
@@ -298,6 +309,21 @@ const SC = {
     await click({ op: "confirm", stage: "audit" });
     for (let i = 0; i < 4; i++) await fire();
     out.posts = posts();
+    return out;
+  },
+  async "con-calls"() {
+    const out = {};
+    await click({ go: "audit" }); out.fatal = ids.panel.innerHTML;
+    await click({ calls: "Pass" }); out.pass = ids.panel.innerHTML;
+    await click({ more: "calls" }); out.more = ids.panel.innerHTML;
+    await click({ go: "issues" }); out.issues = ids.panel.innerHTML;
+    out.reads = calls.filter((c) => c.p === "/api/calls").length;
+    routes["GET /api/calls"] = [500, { error: "calls file unreadable" }];
+    await sandbox.window.VL.refresh(); out.issuesFail = ids.panel.innerHTML;
+    await click({ go: "audit" }); out.auditFail = ids.panel.innerHTML;
+    delete routes["GET /api/calls"]; routes["GET /api/causes"] = [500, { error: "causes file unreadable" }];
+    await sandbox.window.VL.refresh(); out.auditCausesFail = ids.panel.innerHTML;
+    await click({ go: "issues" }); out.issuesCausesFail = ids.panel.innerHTML;
     return out;
   },
 };

@@ -294,3 +294,66 @@ def test_pipeline_page_shows_every_step_and_one_call_with_its_faults_in_red():
     assert c.count("<mark") == 1, "an overlapping quote or one that only matches inside an entity marks nothing"
     assert "✕ question does not fit" in c and "Wrong spec question" in c and "ask grade" in c
     assert "old prompt failed 3 of 3 · new failed 1 of 3" in c and "c1.mp3" in c and "/x/y" not in c
+
+
+CALL_LINK = re.compile(r'href="/#/call/([^"]+)"')
+SCRIPT_ID = "%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+
+
+def test_audit_calls_list_fatal_first_with_transcript_links_and_filter_without_a_refetch():
+    """The Audit page's Calls section sits after Checks and opens on the Fatal calls in the API's order. Each row links
+    to /#/call/<id> with a Transcript label, names the check and shows the length as m:ss.
+
+    Pass shows 25 of its 31 rows and "Show 6 more", and more shows all 31. Both clicks reuse the one boot read of
+    /api/calls. If this broke, the owner could not reach the transcript behind a grade, or each click refetched."""
+    d = run("con-calls")
+    fatal = d["fatal"]
+    assert fatal.index(">Checks<") < fatal.index(">Calls<") < fatal.index(">Flags<")
+    assert 'data-view data-calls="Fatal" aria-pressed="true">Fatal <span class="n">2</span>' in fatal
+    assert 'Pass <span class="n">31</span>' in fatal and 'All <span class="n">35</span>' in fatal
+    assert CALL_LINK.findall(fatal) == ["call-001", SCRIPT_ID]
+    link = 'href="/#/call/call-001">call-001 <small>Transcript</small></a>'
+    assert link + '<span class="ck">Quantity asked</span>' in fatal
+    assert '<span class="dur">2:05</span>' in fatal and '<span class="dur">1:01</span>' in fatal
+    assert 'data-calls="Pass" aria-pressed="true"' in d["pass"]
+    links = CALL_LINK.findall(d["pass"])
+    assert len(links) == 25 and all(x.startswith("call-p") for x in links)
+    assert 'data-view data-more="calls">Show 6 more</button>' in d["pass"]
+    assert len(CALL_LINK.findall(d["more"])) == 31 and "data-more" not in d["more"]
+    assert d["reads"] == 1, "a filter or more click must redraw from memory, not fetch /api/calls again"
+
+
+def test_audit_calls_show_a_hostile_call_id_and_reason_as_text():
+    """A call id with a script tag and a reason with an img tag reach the Calls rows escaped, and the link is
+    percent-encoded. Unescaped, a call id from the data folder would run as markup on the Audit page."""
+    fatal = run("con-calls")["fatal"]
+    assert "&#60;script&#62;alert(1)&#60;/script&#62; <small>Transcript</small>" in fatal
+    assert 'title="Asked &#60;img src=x onerror=alert(1)&#62;"' in fatal
+    assert "<script" not in fatal and "<img" not in fatal
+
+
+def test_issues_cause_lists_its_own_calls_and_a_failed_read_stays_in_its_section():
+    """Each Issues cause lists its own calls (fatal_calls and nonfatal_calls from GET /api/causes), most severe first.
+
+    C-01 and its channel twin C-02 grade the same check. Matching on the first fault's check put the same calls under
+    both, plus NeedsReview calls that no cause counts. On the real runs data 9 of 12 causes listed calls that were not
+    theirs. C-01 must list call-001 and call-002 (whose first fault is another check), and C-02 only its own call.
+
+    A refresh after a job reads both lists again. A failed /api/calls read shows its error only in the Audit page's
+    Calls section, and a failed /api/causes read only drops the disclosures. Without this a cause showed another
+    cause's calls as its proof, or one failed read blanked a whole page."""
+    d = run("con-calls")
+    boxes = [b.split("</details>")[0] for b in d["issues"].split('<details class="calls-d">')[1:]]
+    assert len(boxes) == 2
+    assert "<summary>Calls with this fault (2)</summary>" in boxes[0]
+    assert CALL_LINK.findall(boxes[0]) == ["call-001", "call-002"]
+    assert "<summary>Calls with this fault (1)</summary>" in boxes[1]
+    assert CALL_LINK.findall(boxes[1]) == [SCRIPT_ID]
+    assert "call-003" not in d["issues"]
+    fail = d["auditFail"]
+    assert fail.count("could not load") == 1 and "calls file unreadable" in fail
+    assert fail.index(">Checks<") < fail.index(">Calls<") < fail.index("could not load") < fail.index(">Flags<")
+    assert "<details" not in d["issuesFail"] and "Cause one" in d["issuesFail"]
+    assert "could not load" not in d["auditCausesFail"] and len(CALL_LINK.findall(d["auditCausesFail"])) == 31
+    assert "<details" not in d["issuesCausesFail"] and "Cause two" in d["issuesCausesFail"]
+    assert "could not load" not in d["issuesCausesFail"]

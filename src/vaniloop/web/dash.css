@@ -173,3 +173,26 @@ td.src{ font-size:13px; color:var(--text-2); }
   .diff{ grid-template-columns:1fr; }
   .items li{ grid-template-columns:1fr; }
 }
+
+/* per-call rows (Audit, Issues): verdict, call link, check, first fault on one line, length */
+.calls-f .seg{ flex-wrap:wrap; } .seg .n{ margin-left:4px; color:var(--text-2); font-family:var(--rounded); font-variant-numeric:tabular-nums; }
+.calls-list{ list-style:none; margin:0; padding:0 18px; background:var(--surface); border-radius:var(--r-group); box-shadow:var(--edge); }
+.calls-list li{ display:grid; grid-template-columns:9em minmax(0,18em) minmax(0,8em) minmax(0,1fr) 3em; gap:4px 12px; align-items:center;
+  min-height:44px; padding:8px 0; border-top:1px solid var(--line); font-size:14px; }
+.calls-list li:first-child{ border-top:0; }
+.calls-list li::before{ content:none; } /* inside .ranked a row must not take the cause number */
+.calls-list .chip{ justify-self:start; }
+.calls-list li.empty{ display:block; padding:14px 0; }
+.calls-list .cid{ font:400 13px/1.4 var(--mono); overflow-wrap:anywhere; }
+.calls-list .cid small{ font:500 12px/1 var(--rounded); color:var(--text-2); }
+.calls-list .rsn{ overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--text-2); }
+.calls-list .dur{ text-align:right; font:500 13px/1 var(--rounded); color:var(--text-2); font-variant-numeric:tabular-nums; }
+.calls-more{ margin-top:12px; }
+.ranked .calls-d{ grid-column:2 / -1; margin-top:2px; font-size:14px; }
+.calls-d summary{ cursor:pointer; padding:6px 0; color:var(--accent-text); font-weight:500; }
+.calls-d .calls-list{ padding:0; box-shadow:none; }
+@media (max-width:860px){
+  .calls-list li{ grid-template-columns:auto minmax(0,1fr) auto; }
+  .calls-list li > .dur{ grid-row:1; grid-column:3; } .calls-list .ck{ grid-column:1; } .calls-list .rsn{ grid-column:2 / -1; }
+  .ranked > li > :nth-child(2){ grid-column:2; }
+}
