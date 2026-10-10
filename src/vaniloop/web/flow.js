@@ -183,8 +183,9 @@
 
   V.ITEMS.push({ id: "flow", group: "operate", name: "Pipeline", side: "top", fam: "flow" });
   V.enter.flow = async () => {
-    const c = await K.call("GET", "/api/calls");
+    const [c, j] = await Promise.all([K.call("GET", "/api/calls"), K.call("GET", "/api/jobs")]);
     if (c.ok && Array.isArray(c.data)) F.calls = c.data;
+    if (j.ok && Array.isArray(j.data.jobs)) K.C.jobs = j.data.jobs; // the waveform shows the last loop run after a reload
     if (S.now === "flow") V.show();
   };
   // Follow the run: redraw only the waveform on each log poll, so the panes keep their scroll.

@@ -284,6 +284,7 @@ def test_pipeline_page_shows_every_step_and_one_call_with_its_faults_in_red():
     d = run("con-flow")
     assert d["all"].count('<section class="pn') == 5 and 'class="wave"' in d["all"]
     assert d["all"].count("<i class=") == 70, "ten waveform bars per loop step"
+    assert "Last run: done at 17:34:52 10 Oct IST" in d["all"] and d["all"].count('class="w-done"') == 70
     assert 'data-pick="c1&#60;b&#62;"' in d["all"] and "<b>c1" not in d["all"]
     c = d["call"]
     heads = [c.index(f"<h2>{n}</h2>") for n in ("Transcript", "Ingest", "Audit", "Judge", "Issues", "Fix", "Test")]
