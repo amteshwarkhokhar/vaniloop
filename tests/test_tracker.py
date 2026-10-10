@@ -177,3 +177,15 @@ def test_prove_records_a_gated_event(tmp_path):
     assert tracker.state(CAUSE, runs) == {"ship": "ready_to_ship", "reject": "rejected"}.get(
         out.result.decision, "gated_inconclusive"
     )
+
+
+def test_ticket_command_uses_the_runs_folder(tmp_path):
+    """`pipeline --runs DIR ticket` writes its event into DIR/tracker.jsonl, not into the repo's runs/.
+
+    A console workspace must own its tracker log; a write into runs/ would mix two datasets.
+    """
+    from vaniloop import pipeline
+
+    tracker.record("ticket_written", "cause_x", runs=tmp_path)
+    pipeline.main(["--runs", str(tmp_path), "ticket", "--cause", "cause_x", "--sent", "TKT-2"])
+    assert tracker.state("cause_x", tmp_path) == "ticket_sent"
