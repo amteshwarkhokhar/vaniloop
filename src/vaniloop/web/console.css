@@ -63,3 +63,5 @@ textarea.inp{ resize:vertical; min-height:60px; }
 .rng{ width:100%; accent-color:var(--champagne); }
 output.mono{ color:var(--champagne); margin-left:8px; }
 @media (max-width:860px){ .savebar{ top:56px; } .prm .addrow .inp{ max-width:none; } }
+.fld .src,.card .why{ font:400 13px/1.5 var(--body); color:var(--ash); margin:0; }
+.card .why b{ color:var(--ivory); font-weight:500; }
