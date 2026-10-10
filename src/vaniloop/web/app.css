@@ -1,13 +1,13 @@
 /* vaniloop design system. Apple HIG reference (docs/ui_design.md): the system font, Apple's 2025 system colours,
-   white grouped surfaces on a light window, capsule buttons. Our touch: systemIndigo as the accent, SF Rounded numbers. */
+   white grouped surfaces on a light window, capsule buttons. Our touch: Apple action blue as the accent, SF Rounded numbers. */
 :root{
   --bg:#F5F5F7; --surface:#FFFFFF; --surface-2:#F2F2F7; --fill:#E9E9EE; --fill-hover:#DEDEE4;
   --line:#E5E5EA; --line-strong:#8E8E93; --text:#1D1D1F; --text-2:#6E6E73;
-  --accent:#6155F5; --accent-hover:#5245E8; --accent-text:#4B3FD9; --accent-soft:#ECEBFE; --on-accent:#FFFFFF;
+  --accent:#0066CC; --accent-hover:#0055B3; --accent-text:#0059B3; --accent-soft:#E8F0FC; --on-accent:#FFFFFF;
   /* tone: graphics, 3:1 or more. ink: text, 4.5:1 or more on white and on its soft fill. */
   --fatal:#E9152D; --fatal-ink:#B42318; --fatal-soft:#FDE8EA;
   --nonfatal:#C55300; --nonfatal-ink:#8A4B00; --nonfatal-soft:#FDEFE3;
-  --review:#007EAE; --review-ink:#00618A; --review-soft:#E3F3FA;
+  --review:#0E8A8F; --review-ink:#0B6B70; --review-soft:#E0F5F5;
   --pass:#008932; --pass-ink:#17663A; --pass-soft:#E3F5E8;
   --disabled-bg:#F2F2F7; --edge:0 0 0 .5px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
   --font:system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -57,7 +57,7 @@ body{ margin:0; background:var(--bg); color:var(--text); font:400 15px/1.47 var(
   -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; overflow-x:hidden; isolation:isolate; }
 /* ambient light: two faint washes behind the page (isolation keeps them above the body fill). The opaque sidebar covers its part. */
 body::before{ content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
-  background:radial-gradient(1200px 600px at 20% -20%, rgba(97,85,245,.045), transparent 60%), radial-gradient(900px 500px at 110% 0, rgba(0,126,174,.025), transparent 60%); }
+  background:radial-gradient(1200px 600px at 20% -20%, rgba(0,102,204,.045), transparent 60%), radial-gradient(900px 500px at 110% 0, rgba(14,138,143,.025), transparent 60%); }
 a{ color:var(--accent-text); text-decoration:none; }
 a:hover{ text-decoration:underline; }
 button{ font:inherit; color:inherit; background:none; border:0; padding:0; cursor:pointer; }
