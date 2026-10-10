@@ -60,7 +60,11 @@ main:focus,h1[tabindex="-1"]:focus{ outline:none; }
 .nav a{ font-size:14px; font-weight:500; color:var(--text); padding:6px 14px; border-radius:999px; }
 .nav a:hover{ background:var(--fill); text-decoration:none; }
 .nav a[aria-current]{ background:var(--accent-soft); color:var(--accent-text); }
-@media (max-width:720px){ .sub{ display:none; } .nav a{ padding:6px 10px; } }
+@media (max-width:720px){
+  .sub{ display:none; } .nav a{ padding:6px 10px; }
+  .top .wrap{ height:auto; min-height:56px; flex-wrap:wrap; gap:4px 16px; padding-top:8px; padding-bottom:8px; } /* the links wrap, none is cut off */
+  .nav{ margin-left:0; flex-wrap:wrap; }
+}
 #view{ padding-top:40px; padding-bottom:96px; }
 .view-title{ margin:0 0 8px; font:700 28px/1.2 var(--font); text-wrap:balance; }
 .view-title em{ font-style:normal; font-weight:600; font-family:var(--rounded); font-variant-numeric:tabular-nums; }
