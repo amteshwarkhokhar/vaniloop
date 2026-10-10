@@ -21,7 +21,7 @@ segmented-controls, progress-indicators, alerts, materials), read on 10 Oct 2026
 
 ## Our touch
 
-- The accent is systemIndigo `#6155F5` (5.09:1 on white). Accent text uses `#4B3FD9`.
+- The accent is Apple action blue `#0066CC` (5.57:1 on white). Accent text uses `#0059B3` (6.82:1 on white). The review tone is teal `#0E8A8F` (ink `#0B6B70`), so a status never reads as a link.
 - Numbers use SF Rounded (`ui-rounded`).
 - The mark is a loop ring with a gap and a voice dot.
 - The live job is a capsule at the top of every page. Its log opens as a sheet below it.
