@@ -179,14 +179,23 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
     pm: bool | None = None
     opts = {b.idx: len(b.options_offered) for b in led.bot_turns}
     named = {b.idx: bool(b.spec_name) for b in led.bot_turns}
+    # A failed request or a missing answer raises: the whole call fails, the judge step logs it and retries it,
+    # and no row with a made-up label is written.
     for kind, idx, state, questions in _requests(call, led):
         ans = complete_jev(state, questions, cache_tag=JEV_VERSION)
         if kind == "spec":
             spec[idx] = _spec_labels(opts[idx], ans, named[idx])
         elif kind == "buyer":
+            if "f" not in ans:
+                raise ValueError(f"jev: no irritation answer for user turn {idx}")
             frustrated[idx] = ans["f"]  # the probability, used directly
         else:
+            if "pm" not in ans:
+                raise ValueError("jev: no product match answer")
             pm = to_bool(ans["pm"])
+    unjudged = [u.idx for u in led.user_turns if u.idx not in frustrated]
+    if unjudged:  # a ledger buyer turn with no transcript turn: never default it to calm
+        raise ValueError(f"jev: user turns {unjudged} have no transcript turn")
     bots = [
         b.model_copy(update={"question_fits_product": spec[b.idx][0], "fits_confirmed_product": spec[b.idx][1]})
         if b.idx in spec
@@ -195,7 +204,7 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
         else b
         for b in led.bot_turns
     ]
-    users = [u.model_copy(update={"frustrated": frustrated.get(u.idx, 0.0)}) for u in led.user_turns]
+    users = [u.model_copy(update={"frustrated": frustrated[u.idx]}) for u in led.user_turns]
     return led.model_copy(update={"bot_turns": bots, "user_turns": users, "product_match": pm})
 
 

@@ -620,3 +620,40 @@ def test_product_match_is_asked_only_with_both_products(transport):
     jev.judge_ledger(_call(), led)
     assert not any("product_the_bot_confirmed" in b["state"] for b in transport["bodies"])
     assert jev.judge_ledger(_call(), led).product_match is None
+
+
+@pytest.mark.parametrize("drop", ["f", "pm"])
+def test_missing_answer_fails_the_call(monkeypatch, drop):
+    """Protects the Unknown rule: a Jev reply without the irritation or product-match answer must fail the whole
+    call, so the judge step retries it. If this fails, a missing answer could be written as calm or as a label."""
+
+    def fake(state, questions, cache_tag=""):
+        return {k: 0.9 for k in questions if k != drop}
+
+    monkeypatch.setattr(jev, "complete_jev", fake)
+    with pytest.raises(ValueError, match="jev: no"):
+        jev.judge_ledger(_call(), _ledger())
+
+
+def test_user_turn_without_transcript_turn_fails_the_call(monkeypatch):
+    """Protects the Unknown rule: a ledger buyer turn that matches no transcript turn gets no request, and must
+    fail the call rather than default to frustrated 0.0. If this fails, an unjudged turn reads as a calm buyer."""
+    monkeypatch.setattr(jev, "complete_jev", lambda state, questions, cache_tag="": {k: 0.9 for k in questions})
+    led = _ledger()
+    led = led.model_copy(update={"user_turns": [*led.user_turns, UserTurnLabel(idx=9, frustrated=0.0)]})
+    with pytest.raises(ValueError, match="no transcript turn"):
+        jev.judge_ledger(_call(), led)
+
+
+def test_failed_request_fails_the_call(monkeypatch):
+    """Protects the retry path: an error from one Jev request must reach the judge step, which logs the call and
+    retries it. If this fails, a call could be written with some labels from a request that never answered."""
+
+    def boom(state, questions, cache_tag=""):
+        if "buyer_reply" in state:
+            raise RuntimeError("jev 503")
+        return {k: 0.9 for k in questions}
+
+    monkeypatch.setattr(jev, "complete_jev", boom)
+    with pytest.raises(RuntimeError):
+        jev.judge_ledger(_call(), _ledger())
