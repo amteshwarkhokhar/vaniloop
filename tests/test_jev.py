@@ -509,3 +509,18 @@ def test_spec_name_answer_counts_only_when_jev_confirms_the_turn_asks_it(transpo
     finally:
         jev.JEV_VERSION = old
     assert b.question_fits_product is True and b.fits_confirmed_product is True
+
+
+def test_spec_name_answer_without_its_check_is_not_used(transport, monkeypatch):
+    """A spec-name answer with no consistency answer at all must stay unjudged, not trusted.
+
+    If this failed, a response that dropped the n<idx> answer would let a mislabelled spec name pass (Codex round 2
+    on #114).
+    """
+    led = _ledger()
+    led = led.model_copy(
+        update={"bot_turns": [b.model_copy(update={"spec_name": "brand"}) if b.idx == 2 else b for b in led.bot_turns]}
+    )
+    monkeypatch.setattr(jev, "complete_jev", lambda state, questions, cache_tag="": {"q2": 0.9, "o2": 0.9})
+    b = next(b for b in jev.judge_ledger(_call(), led).bot_turns if b.idx == 2)
+    assert b.question_fits_product is None and b.fits_confirmed_product is None

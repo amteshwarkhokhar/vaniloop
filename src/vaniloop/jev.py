@@ -117,7 +117,7 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
             bots.append(b)
             continue
         q = ans.get(f"q{b.idx}")
-        if f"n{b.idx}" in ans and to_bool(ans[f"n{b.idx}"]) is not True:
+        if b.spec_name and to_bool(ans.get(f"n{b.idx}", 0.5)) is not True:  # a missing check counts as unsure
             q = None  # Jev does not confirm the spec name is what the turn asks: the spec-name answer is not usable
         o = ans.get(f"o{b.idx}", q)  # no options offered: the question alone is the whole turn
         if q is None or to_bool(q) is None:
