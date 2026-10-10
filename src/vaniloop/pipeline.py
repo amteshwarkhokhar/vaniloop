@@ -37,6 +37,7 @@ from .models import CallRecord, Ledger
 from .prove import describe, run_prove
 from .rootcause import DEFAULT_PROMPT, ROOTCAUSE_PATH, describe_rootcause, run_rootcause
 from .rules import audit_call
+from .tracker import ticket
 from .transcribe import transcribe_call
 
 RUNS = AUDITS_PATH.parent
@@ -533,6 +534,10 @@ def main(argv: list[str] | None = None) -> None:
     pv.add_argument("--attempt", type=int, default=1)
     pv.add_argument("--holdout", action="store_true", help="targets from hold-out calls only")
     pv.add_argument("--screen", action="store_true", help="keep calls OLD fails on 2 of 3 seeds; gate on seeds 3..")
+    tk = sub.add_parser("ticket", help="record that a ticket was sent or resolved")
+    tk.add_argument("--cause", required=True)
+    tk.add_argument("--sent", metavar="REF", default=None, help="the ticket id or link")
+    tk.add_argument("--resolved", metavar="NOTE", default=None)
     rc = sub.add_parser("rootcause")
     rc.add_argument("--cause", required=True)
     rc.add_argument("--prompt", default=str(DEFAULT_PROMPT))
@@ -678,6 +683,8 @@ def main(argv: list[str] | None = None) -> None:
             **({"screen": True} if args.screen else {}),
         )
         print("\n".join(describe(out)))
+    elif args.cmd == "ticket":
+        print(f"{args.cause}: {ticket(args.cause, P['patches'].parent, sent=args.sent, resolved=args.resolved)}")
     elif args.cmd == "rootcause":
         out = run_rootcause(
             args.cause,

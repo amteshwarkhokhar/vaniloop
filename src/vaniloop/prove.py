@@ -17,7 +17,7 @@ from pathlib import Path
 
 from jinja2 import TemplateError
 
-from . import gate, llm, prompt, render, replay
+from . import gate, llm, prompt, render, replay, tracker
 from .fix import (
     AUDIO_PARAMETERS,
     MAX_ATTEMPTS,
@@ -578,6 +578,17 @@ def run_prove(
     gates_path = Path(gates_path)
     gates_path.parent.mkdir(parents=True, exist_ok=True)
     append_jsonl(gates_path, [result.model_dump(mode="json", exclude_none=True)])
+    rd = Path(gates_path).parent
+    if screen:
+        tracker.record("screened", cause_id, {"attempt": attempt, "screened": len(screened_items),
+                       "kept": len(plan.targets), "cost_usd": screen_cost}, runs=rd)  # fmt: skip
+    tracker.record(
+        "gated", cause_id,
+        {"decision": result.decision, "attempt": attempt, "last_attempt": attempt >= MAX_ATTEMPTS,
+         "p": result.p_value if math.isfinite(result.p_value) else None, "lift": result.lift,
+         "old_fail_rate": result.old_fail_rate, "new_fail_rate": result.new_fail_rate, "cost_usd": cost,
+         "reason": result.reason}, runs=rd,
+    )  # fmt: skip
     out = Outcome(plan, result, written, cost)
     if screen:
         out.screened, out.kept = result.screened, result.kept

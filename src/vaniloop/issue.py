@@ -521,4 +521,7 @@ def run_issues(audits_path: Path = AUDITS_PATH, out_path: Path = CAUSES_PATH) ->
     tmp = log.with_name(log.name + f".{os.getpid()}.tmp")
     tmp.write_text("".join(json.dumps(o, ensure_ascii=False) + "\n" for o in outliers), encoding="utf-8")
     os.replace(tmp, log)
+    from . import tracker  # lazy: tracker is a leaf, but fix imports issue
+
+    tracker.sync_causes(doc["causes"], runs)
     return causes
