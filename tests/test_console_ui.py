@@ -290,5 +290,6 @@ def test_pipeline_page_shows_every_step_and_one_call_with_its_faults_in_red():
     assert heads == sorted(heads)
     assert 'id="ft-2" class="tt bot fault t-fatal"' in c and '<mark class="t-fatal">Which colour</mark>' in c
     assert "&#60;img src=x&#62;" in c and "<img" not in c
+    assert c.count("<mark") == 1, "an overlapping quote or one that only matches inside an entity marks nothing"
     assert "✕ question does not fit" in c and "Wrong spec question" in c and "ask grade" in c
     assert "old prompt failed 3 of 3 · new failed 1 of 3" in c and "c1.mp3" in c and "/x/y" not in c

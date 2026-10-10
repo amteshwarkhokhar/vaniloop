@@ -107,10 +107,16 @@
       const bits = [u.declined && "declined", u.frustrated && "frustrated", u.asks_for_human && "asks for a person", u.gave_value_for && `gave ${str(u.gave_value_for)}`].filter(Boolean);
       if (Number.isInteger(u.idx) && bits.length) labels.set(u.idx, (labels.get(u.idx) || []).concat(bits));
     }
+    // Find each quote in the raw text, keep spans that do not overlap, then escape every piece on its own.
     const mark = (text, qs) => {
-      let out = esc(text);
-      for (const { q, t } of qs || []) { const e = esc(q).trim(); if (e.length > 2 && out.includes(e)) out = out.replace(e, `<mark class="t-${t}">${e}</mark>`); }
-      return out;
+      const raw = str(text), spans = [];
+      for (const { q, t } of qs || []) {
+        const needle = str(q).trim(), i = needle.length > 2 ? raw.indexOf(needle) : -1;
+        if (i >= 0 && !spans.some((x) => i < x.e && i + needle.length > x.s)) spans.push({ s: i, e: i + needle.length, t });
+      }
+      let out = "", at = 0;
+      for (const x of spans.sort((a, b) => a.s - b.s)) { out += `${esc(raw.slice(at, x.s))}<mark class="t-${x.t}">${esc(raw.slice(x.s, x.e))}</mark>`; at = x.e; }
+      return out + esc(raw.slice(at));
     };
     return `<ol class="tr">${turns.map((t) => {
       const fs = at.get(t.idx) || [], worst = fs.some((f) => f.status === "Fatal") ? "fatal" : fs.length ? "nonfatal" : (quotes.get(t.idx) || [])[0] ? quotes.get(t.idx)[0].t : "";

@@ -254,7 +254,7 @@ const SC = {
     routes["GET /api/call/c1%3Cb%3E"] = [200, {
       call: { call_id: "c1<b>", duration_sec: 65, language: "hi", audio_path: "/x/y/c1.mp3", silences: [], turns: [turn(0, "bot", "Namaste, BuyerA ji"), turn(1, "user", "I need steel pipe"), turn(2, "bot", "Which colour <img src=x> do you want?")] },
       audit: { verdict: "Fatal", scope: "bl_collection", flags: ["wrong_requirement"], findings: [
-        { parameter: "category_isq", status: "Fatal", reason: "asked colour for a pipe", basis: "spoken_proxy", onset_turn: 2, evidence: [{ turn_idx: 2, quote: "Which colour" }] },
+        { parameter: "category_isq", status: "Fatal", reason: "asked colour for a pipe", basis: "spoken_proxy", onset_turn: 2, evidence: [{ turn_idx: 2, quote: "Which colour" }, { turn_idx: 2, quote: "39;" }, { turn_idx: 2, quote: "colour" }] },
         { parameter: "intent", status: "Pass", reason: "ok", basis: "observed", onset_turn: null, evidence: [] }] },
       ledger: { initial_product: "steel pipe", final_product: "steel pipe", bot_turns: [{ idx: 2, slot: "spec", spec_name: "colour", question_fits_product: false }], user_turns: [] }, ledger_source: "jev",
       causes: [{ cause_id: "C-02", name: "Wrong spec question", type: "prompt", status: "open", role: "fatal" }],
