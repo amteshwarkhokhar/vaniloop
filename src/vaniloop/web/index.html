@@ -7,8 +7,25 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400;0,6..96,500;1,6..96,400&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/views/calls.css">
+<link rel="stylesheet" href="/static/views/call.css">
+<script defer src="/static/app.js"></script>
+<script defer src="/static/views/calls.js"></script>
+<script defer src="/static/views/call.js"></script>
 </head>
 <body>
-<main id="view">vaniloop: the UI is built in the next issue.</main>
+<header class="top">
+  <div class="wrap">
+    <a class="mark" href="#/" aria-label="vaniloop, all calls">vaniloop<i aria-hidden="true"></i></a>
+    <span class="sub">VANI call quality</span>
+    <nav class="nav" aria-label="Views">
+      <a href="#/" data-nav="calls">Calls</a>
+      <a href="#/causes" data-nav="causes">Causes</a>
+      <a href="#/fixes" data-nav="fixes">Fixes</a>
+    </nav>
+  </div>
+</header>
+<main id="view" class="wrap" tabindex="-1"></main>
 </body>
 </html>
