@@ -13,6 +13,7 @@ import os
 import signal
 import statistics
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -241,6 +242,8 @@ def _fix_step(p: dict, prompt: Path, rows: list[dict]) -> tuple[dict, dict[str, 
 def run_loop(runs: Path, prompt_path: Path, top: int = DEFAULT_TOP, n: int = 8, k: int = 3) -> dict:
     """Run the seven steps in order; print LOOP_STEP lines, LOOP_SUMMARY and LOOP_DONE. Ships nothing. A failed step 1
     to 5 prints LOOP_FAILED <step> <reason> and exits non-zero. SIGTERM (the console cancel) stops it the same way."""
+    if threading.current_thread() is not threading.main_thread():  # signal.signal works on the main thread only
+        return _run_loop(Path(runs), Path(prompt_path), top, n, k)
     old = signal.signal(signal.SIGTERM, _cancel)
     try:
         return _run_loop(Path(runs), Path(prompt_path), top, n, k)

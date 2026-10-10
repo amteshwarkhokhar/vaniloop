@@ -280,6 +280,19 @@ def test_a_cancel_stops_the_loop_and_cleans_up(tmp_path, monkeypatch, capsys, wh
     assert signal.getsignal(signal.SIGTERM) is old
 
 
+def test_the_loop_runs_off_the_main_thread(tmp_path, monkeypatch, capsys):
+    """run_loop must also work on a worker thread, where signal.signal raises ValueError. Without the main-thread
+    guard, a caller that runs the loop in a thread would fail before step 1."""
+    w = World(tmp_path, monkeypatch)
+    w.add("cause_a")
+    w.write()
+    out = {}
+    t = threading.Thread(target=lambda: out.update(s=loop.run_loop(w.dir, w.dir / "prompt.md")))
+    t.start()
+    t.join(30)
+    assert "LOOP_DONE" in capsys.readouterr().out and out["s"]["causes"]
+
+
 def snapshot(d):
     return {str(p): (p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(d.rglob("*")) if p.is_file()}
 
