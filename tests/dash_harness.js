@@ -45,7 +45,7 @@ const sandbox = {
     const body = (v, status = 200) => ({ ok: status < 400, status, json: async () => v });
     const method = opts.method || "GET";
     if (consoleOn) {
-      calls.push({ method, p, body: opts.body ? JSON.parse(opts.body) : null });
+      calls.push({ method, p, body: opts.body ? JSON.parse(opts.body) : null, headers: opts.headers || {} });
       let r = routes[`${method} ${p}`];
       if (r && Array.isArray(r[0])) r = r.length > 1 ? r.shift() : r[0];
       if (r) return Promise.resolve(body(r[1], r[0]));
@@ -119,6 +119,26 @@ const SC = {
     for (const g of ["run", "submit", "audit"]) { await click({ go: g }); out[g] = ids.panel.innerHTML; }
     out.dock = ids["dock-actions"].innerHTML;
     return out;
+  },
+  async "con-backoff"() {
+    const out = { delays: [] };
+    await click({ go: "run" });
+    routes["POST /api/jobs"] = [202, { job: job("j1", "audit", "running") }];
+    const bad = [503, { error: "down" }];
+    routes["GET /api/jobs/j1/log?from=0"] = [bad, bad, bad, bad, bad, bad, [200, { job: job("j1", "audit", "done"), lines: ["ok"], next: 1 }]];
+    await click({ op: "run", stage: "judge" });
+    for (let i = 0; i < 7; i++) { out.delays.push(timers.filter(Boolean).map((t) => t.ms)); await fire(); }
+    out.info = ids["dock-info"].innerHTML;
+    return out;
+  },
+  async "con-cancel"() {
+    await click({ go: "run" });
+    routes["POST /api/jobs"] = [202, { job: job("j1", "audit", "running") }];
+    routes["GET /api/jobs/j1/log?from=0"] = [200, { job: job("j1", "audit", "running"), lines: [], next: 0 }];
+    routes["POST /api/jobs/j1/cancel"] = [200, { job: job("j1", "audit", "cancelled") }];
+    await click({ op: "run", stage: "judge" });
+    await click({ op: "cancel" });
+    return calls.filter((c) => c.p.endsWith("/cancel"));
   },
   async "con-chain"() {
     const out = {};

@@ -55,7 +55,7 @@
   }
   function track(job) {
     clearTimeout(D.timer);
-    D.job = job; D.lines = []; D.next = 0; D.err = null;
+    D.job = job; D.lines = []; D.next = 0; D.err = null; D.fails = 0;
     dockDraw(true);
     tick();
   }
@@ -64,8 +64,13 @@
     if (!id) return;
     const r = await call("GET", `/api/jobs/${encodeURIComponent(id)}/log?from=${D.next}`);
     if (!D.job || D.job.id !== id) return;
-    if (!r.ok) { D.err = `log unavailable: ${errText(r)}`; dockDraw(true); return; }
-    D.err = null;
+    if (!r.ok) {
+      D.err = `log unavailable: ${errText(r)}. Retrying.`; dockDraw(true);
+      D.fails = (D.fails || 0) + 1;
+      D.timer = setTimeout(tick, Math.min(8000, POLL_MS * 2 ** (D.fails - 1)));
+      return;
+    }
+    D.err = null; D.fails = 0;
     const was = D.job.status;
     D.job = r.data.job || D.job;
     D.lines = D.lines.concat(Array.isArray(r.data.lines) ? r.data.lines.map(str) : []);
@@ -273,7 +278,7 @@
     else if (op === "confirm") await startJob(stage, argsOf(stage), true);
     else if (op === "unconfirm") { C.confirm = null; redraw(); }
     else if (op === "prefill") { C.pre = { stage, chain: str(t.dataset.chain).split(",").filter(Boolean) }; C.confirm = null; V.go("run"); }
-    else if (op === "cancel" && D.job) { const r = await call("POST", `/api/jobs/${encodeURIComponent(D.job.id)}/cancel`); if (!r.ok) { D.err = errText(r); dockDraw(false); } else { clearTimeout(D.timer); tick(); } }
+    else if (op === "cancel" && D.job) { const r = await call("POST", `/api/jobs/${encodeURIComponent(D.job.id)}/cancel`, {}); if (!r.ok) { D.err = errText(r); dockDraw(false); } else { clearTimeout(D.timer); tick(); } }
     else if (op === "dock-toggle") { D.open = !D.open; dockDraw(true); }
     else if (op === "add-id") { addIds(C.sub.draft); redraw(); }
     else if (op === "rm-f") { C.sub.files.splice(Number(t.dataset.i), 1); redraw(); }

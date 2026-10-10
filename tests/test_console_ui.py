@@ -84,3 +84,19 @@ def test_page_loads_the_console_assets_and_uses_no_inline_handlers():
     html = (web / "dash.html").read_text()
     assert "/static/console.css" in html and "/static/console.js" in html and 'id="dock"' in html
     assert not re.search(r"\son[a-z]+=", html + (web / "console.js").read_text())
+
+
+def test_log_fetch_errors_back_off_and_keep_polling_until_the_job_ends():
+    """Six 503s from the log endpoint retry after 1, 2, 4, 8, 8 and 8 s, then a good answer ends the job.
+
+    Before the fix the first 503 left no timer, so the dock froze on a running job for good."""
+    d = run("con-backoff")
+    assert d["delays"][:6] == [[1000], [2000], [4000], [8000], [8000], [8000]]
+    assert "done" in d["info"]
+
+
+def test_cancel_posts_json_headers_and_an_empty_object():
+    """Cancel must send Content-Type application/json and the body {}. Without it the server answers 415."""
+    (c,) = run("con-cancel")
+    assert c["method"] == "POST" and c["body"] == {}
+    assert c["headers"]["Content-Type"] == "application/json"
