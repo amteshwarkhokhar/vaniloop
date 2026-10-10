@@ -174,10 +174,12 @@ def test_audit_judge_toggle_switches_the_file(server):
     assert gem_view["verdicts"]["Fatal"] == jev_view["verdicts"]["Fatal"] - 1
 
 
-def test_audit_unknown_judge_falls_back_to_active(server):
-    """A junk judge value must not break the audit stage: it falls back to the active judge."""
-    _, got = get_json(server, "/api/stage/audit?judge=nope")
-    assert got["judge"] == "jev" and got["total"] == 14
+def test_audit_unknown_judge_is_400(server):
+    """A junk ?judge= value must be a 400 JSON error, not a silent fallback that shows the wrong judge's data."""
+    status, got = get_json(server, "/api/stage/audit?judge=nope")
+    assert status == 400 and got == {"error": "unknown judge"}
+    status, got = get_json(server, "/api/stage/audit?judge=")
+    assert status == 400
 
 
 def test_audit_gemini_only_folder_serves_audits_for_gemini(tmp_path):
@@ -295,3 +297,84 @@ def test_dash_serves_the_placeholder_page(server):
     """GET /dash must serve web/dash.html as HTML, so issue B can fill the page."""
     status, body = get(server, "/dash")
     assert status == 200 and body.lstrip().lower().startswith(b"<!doctype html>")
+
+
+def _write(folder: Path, name: str, text: str) -> None:
+    (folder / name).write_text(text, encoding="utf-8")
+
+
+def test_wrong_typed_fields_do_not_crash_endpoints(tmp_path):
+    """Protects the endpoints from malformed run files: a null patches list, a numeric flags field and a
+    numeric fatal_calls must each read as empty instead of raising TypeError and giving a 500."""
+    _write(tmp_path, "patches.json", json.dumps({"patches": None}))
+    _write(tmp_path, "audits.jsonl", json.dumps({"call_id": "synthetic", "flags": 1, "verdict": "Pass"}) + "\n")
+    _write(tmp_path, "causes.json", json.dumps({"causes": [{"cause_id": "c1", "fatal_calls": 1}]}))
+    srv, thread = serve(tmp_path)
+    try:
+        status, cfg = get_json(srv, "/api/config")
+        audit_status, audit = get_json(srv, "/api/stage/audit")
+        issues_status, issues = get_json(srv, "/api/stage/issues")
+    finally:
+        stop(srv, thread)
+    assert status == 200 and audit_status == 200 and issues_status == 200
+    assert next(f for f in cfg["data"]["files"] if f["name"] == "patches.json")["rows"] == 0
+    assert audit["flags"] == {}
+    assert issues["causes"][0]["fatal"] == 0
+
+
+def test_huge_duration_becomes_null_not_overflow(tmp_path):
+    """Protects /api/calls and the ingest stage: a duration_sec of 10**400 raises OverflowError in
+    math.isfinite, so it must become null instead of a 500."""
+    row = '{"call_id": "synthetic", "duration_sec": 1' + "0" * 400 + "}\n"
+    _write(tmp_path, "calls.jsonl", row)
+    _write(tmp_path, "audits.jsonl", json.dumps({"call_id": "synthetic", "verdict": "Pass"}) + "\n")
+    srv, thread = serve(tmp_path)
+    try:
+        calls_status, rows = get_json(srv, "/api/calls")
+        ingest_status, ingest = get_json(srv, "/api/stage/ingest")
+    finally:
+        stop(srv, thread)
+    assert calls_status == 200 and rows[0]["duration_sec"] is None
+    assert ingest_status == 200 and ingest["median_sec"] is None
+
+
+def test_review_null_or_missing_truth_is_unscored(tmp_path):
+    """Protects review accuracy: a label with a null or missing truth must be unscored and left out of
+    jev_right, gemini_right and n, not counted as both_wrong."""
+    labels = [
+        {"truth": None, "jev_ok": False, "gemini_ok": False},
+        {"jev_ok": False, "gemini_ok": False},
+        {"truth": True, "jev_ok": True, "gemini_ok": False},
+    ]
+    _write(tmp_path, "jev_review.jsonl", json.dumps({"kind": "spec", "control": False, "labels": labels}) + "\n")
+    srv, thread = serve(tmp_path)
+    try:
+        _, got = get_json(srv, "/api/stage/review")
+    finally:
+        stop(srv, thread)
+    assert got["totals"]["spec"] == {"unscored": 2, "jev_only": 1}
+    assert got["accuracy"]["spec"]["contested"] == {"jev_right": 1, "gemini_right": 0, "n": 1}
+
+
+@pytest.mark.parametrize("var", ["LLM_MODEL", "TYPESAFE_MODEL"])
+def test_config_hides_a_model_value_that_looks_like_a_url(tmp_path, monkeypatch, var):
+    """Protects the secret rule: a model env value holding a URL or token must show as (hidden) in
+    /api/config, while a plain model id is shown as it is."""
+    monkeypatch.setenv(var, "https://synthetic.invalid/?token=synthetic")
+    srv, thread = serve(tmp_path)
+    try:
+        _, hidden = get_json(srv, "/api/config")
+        monkeypatch.setenv(var, "vendor/model-name_1.5:free")
+        _, shown = get_json(srv, "/api/config")
+    finally:
+        stop(srv, thread)
+    key = "structure_model" if var == "LLM_MODEL" else "jev_model"
+    assert hidden["judge"][key]["value"] == "(hidden)"
+    assert "synthetic.invalid" not in json.dumps(hidden)
+    assert shown["judge"][key]["value"] == "vendor/model-name_1.5:free"
+
+
+@pytest.mark.parametrize("name", ["a=b", "user@host", "x?y", "a" * 81, "has space", ""])
+def test_safe_model_hides_unsafe_ids(name):
+    """Protects _safe_model: ids with =, @, ?, spaces, an empty string or over 80 characters must be hidden."""
+    assert web._safe_model(name) == "(hidden)"

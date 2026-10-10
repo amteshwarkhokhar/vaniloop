@@ -13,6 +13,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -66,6 +67,26 @@ def clean(value):
     return value
 
 
+def _finite(value) -> bool:
+    """True for a real, finite int or float. A huge int that cannot become a float (OverflowError) is False."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _count(value) -> int:
+    """len() of a list; a wrong type counts as empty."""
+    return len(value) if isinstance(value, list) else 0
+
+
+def _list(value) -> list:
+    """The value when it is a list; a wrong type is an empty list."""
+    return value if isinstance(value, list) else []
+
+
 def _valid(rows: list[dict]) -> list[dict]:
     """Keep rows a route can use, and make their fields safe: a non-empty string call_id, list-shaped list
     fields, and verdict, scope, duration and finding scalars the routes can hash and compare."""
@@ -85,9 +106,7 @@ def _valid(rows: list[dict]) -> list[dict]:
         if "scope" in row and row["scope"] is not None and not isinstance(row["scope"], str):
             row["scope"] = "unclear"
         duration = row.get("duration_sec")
-        if duration is not None and (
-            isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration)
-        ):
+        if duration is not None and not _finite(duration):
             row["duration_sec"] = None
         for finding in row.get("findings") or []:
             if isinstance(finding, dict):
@@ -116,7 +135,7 @@ def _first_fault(audit: dict) -> dict | None:
 
     def order(f: dict):
         onset = f.get("onset_turn")
-        has_onset = isinstance(onset, (int, float)) and not isinstance(onset, bool) and math.isfinite(onset)
+        has_onset = _finite(onset)
         return (not has_onset, float(onset) if has_onset else 0, SEVERITY.get(f.get("status"), len(SEVERITY)))
 
     pool.sort(key=order)
@@ -157,7 +176,7 @@ def _spend(d: Path) -> float | None:
         cost = row.get("cost_usd")
         if isinstance(cost, bool) or not isinstance(cost, (int, float)):
             continue
-        if math.isfinite(cost) and cost >= 0:
+        if _finite(cost) and cost >= 0:
             total += float(cost)
     return round(total, 6)
 
@@ -182,7 +201,7 @@ def calls(d: Path) -> list[dict]:
 
 def duration_key(value):
     """Sort key for duration_sec: finite numbers descending, anything else unknown and last (it serialises as null)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if not _finite(value):
         return (1, 0)
     return (0, -float(value))
 
@@ -237,6 +256,16 @@ def gates(d: Path) -> list[dict]:
     return read_jsonl(d / "gates.jsonl")
 
 
+_MODEL_ID = re.compile(r"^[A-Za-z0-9._/:-]{1,80}$")
+
+
+def _safe_model(name: str) -> str:
+    """A model id for the config view. Anything that looks like a URL, a token or a credential is hidden."""
+    if _MODEL_ID.match(name) and not any(bad in name for bad in ("://", "?", "=", "@")):
+        return name
+    return "(hidden)"
+
+
 def _leaf(value, source: str) -> dict:
     """One config value with the module and constant (or file) that sets it."""
     return {"value": value, "source": source}
@@ -262,7 +291,7 @@ def _data_files(d: Path) -> list[dict]:
         if path.suffix == ".jsonl":
             rows = len(read_jsonl(path))
         else:
-            rows = len(read_json_doc(path).get(name, []))
+            rows = _count(read_json_doc(path).get(name))
         out.append({"name": path.name, "rows": rows, "updated_ist": _stamp(path)})
     return out
 
@@ -295,9 +324,9 @@ def config(d: Path) -> dict:
         "judge": {
             "active": _leaf(active, "audits_gemini.jsonl present"),
             "available": _leaf(available, "audits.jsonl, audits_gemini.jsonl present"),
-            "jev_model": _leaf(llm.jev_model(), "llm.jev_model"),
+            "jev_model": _leaf(_safe_model(llm.jev_model()), "llm.jev_model"),
             "jev_version": _leaf(jev.JEV_VERSION, "jev.JEV_VERSION"),
-            "structure_model": _leaf(llm.model_name(), "llm.model_name"),
+            "structure_model": _leaf(_safe_model(llm.model_name()), "llm.model_name"),
             "thresholds": {
                 "true_at": _leaf(jev.TRUE_AT, "jev.TRUE_AT"),
                 "false_at": _leaf(jev.FALSE_AT, "jev.FALSE_AT"),
@@ -344,11 +373,7 @@ def _audits_for(d: Path, judge: str | None) -> tuple[str, list[dict]]:
 
 def stage_ingest(d: Path) -> dict:
     rows = list(_calls(d).values())
-    secs = sorted(
-        float(r["duration_sec"])
-        for r in rows
-        if isinstance(r.get("duration_sec"), (int, float)) and not isinstance(r.get("duration_sec"), bool)
-    )
+    secs = sorted(float(r["duration_sec"]) for r in rows if _finite(r.get("duration_sec")))
 
     def pick(q: float) -> float | None:
         return secs[min(len(secs) - 1, math.ceil(q * len(secs)) - 1)] if secs else None
@@ -378,7 +403,7 @@ def stage_audit(d: Path, judge: str | None) -> dict:
             if isinstance(f, dict) and f.get("parameter"):
                 counts = by_parameter.setdefault(f["parameter"], {})
                 counts[f.get("status") or ""] = counts.get(f.get("status") or "", 0) + 1
-        for flag in a.get("flags") or []:
+        for flag in _list(a.get("flags")):
             if isinstance(flag, str):
                 flags[flag] = flags.get(flag, 0) + 1
     return {
@@ -398,9 +423,9 @@ def stage_issues(d: Path) -> dict:
         if not isinstance(c, dict):
             continue
         row = {k: c.get(k) for k in keys}
-        row["fatal"] = len(c.get("fatal_calls") or [])
-        row["nonfatal"] = len(c.get("nonfatal_calls") or [])
-        row["symptoms"] = len(c.get("symptom_calls") or [])
+        row["fatal"] = _count(c.get("fatal_calls"))
+        row["nonfatal"] = _count(c.get("nonfatal_calls"))
+        row["symptoms"] = _count(c.get("symptom_calls"))
         out.append(row)
     return {"causes": out}
 
@@ -444,9 +469,10 @@ def _cut(value):
 
 
 def _outcome(label: dict) -> str:
-    """both_right, jev_only, gemini_only or both_wrong from the label's jev_ok and gemini_ok; else unscored."""
+    """both_right, jev_only, gemini_only or both_wrong from the label's jev_ok and gemini_ok. A label with no
+    boolean truth, jev_ok or gemini_ok is unscored."""
     jev_ok, gemini_ok = label.get("jev_ok"), label.get("gemini_ok")
-    if not isinstance(jev_ok, bool) or not isinstance(gemini_ok, bool):
+    if not isinstance(label.get("truth"), bool) or not isinstance(jev_ok, bool) or not isinstance(gemini_ok, bool):
         return "unscored"
     return {(True, True): "both_right", (True, False): "jev_only", (False, True): "gemini_only"}.get(
         (jev_ok, gemini_ok), "both_wrong"
@@ -557,7 +583,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/config":
             self._json(config(d))
         elif path.startswith("/api/stage/"):
-            judge = parse_qs(parts.query).get("judge", [None])[0]
+            judge = parse_qs(parts.query, keep_blank_values=True).get("judge", [None])[0]
+            if judge is not None and judge not in JUDGES:
+                self._json({"error": "unknown judge"}, 400)
+                return
             result = stage(d, path[len("/api/stage/") :], judge)
             if result is None:
                 self._json({"error": "unknown stage"}, 404)
