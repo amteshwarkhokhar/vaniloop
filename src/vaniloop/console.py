@@ -20,6 +20,7 @@ from pathlib import Path
 from vaniloop import llm
 from vaniloop.jsonl import append_jsonl, read_jsonl
 
+PROMPT_PATH = Path(__file__).resolve().parents[2] / "data" / "reference" / "vani_prompt_sarvam.md"
 IST = timezone(timedelta(hours=5, minutes=30))
 MAX_JOBS_LISTED = 50
 MAX_CALL_IDS = 1000
@@ -154,6 +155,8 @@ def validate(d: Path, stage: object, args: object, confirm: object) -> tuple[dic
             ):
                 raise _bad(name, "unknown submission")
         clean[name] = value
+    if stage in ("fix", "prove") and not PROMPT_PATH.is_file():
+        raise _bad("prompt", "VANI prompt file missing")
     if spec["paid"] and confirm is not True:
         raise ConsoleError(400, {"error": "confirm", "estimate_usd": None})
     return spec, clean
@@ -163,12 +166,14 @@ def build_argv(d: Path, stage: str, args: dict) -> list[str]:
     """The argv list for one job. Called only with values that `validate` returned. Tests may replace it."""
     argv = ["uv", "run", "python", "-m", "vaniloop.pipeline", "--runs", str(d), CLI_STAGE.get(stage, stage)]
     if stage in ("audit", "judge") and args.get("calls"):
-        argv += ["--calls", *args["calls"]]
+        argv += ["--calls", ",".join(args["calls"])]
     if stage == "audit" and "limit" in args:
         argv += ["--limit", str(args["limit"])]
     if stage == "regrade":
         jev = d / "ledgers_jev.jsonl"
         argv += ["--ledgers", str(jev if jev.exists() else d / "ledgers.jsonl")]
+    if stage in ("fix", "prove"):
+        argv += ["--prompt", str(PROMPT_PATH)]
     if stage == "fix":
         argv += ["--top", str(args["top"])]
     if stage == "prove":
@@ -180,7 +185,15 @@ def build_argv(d: Path, stage: str, args: dict) -> list[str]:
             if args.get(flag):
                 argv.append(f"--{flag}")
     if stage == "submit":
-        argv += ["--submission-id", args["submission_id"]]
+        ws = d / "console" / "submissions" / args["submission_id"]
+        argv[argv.index("--runs") + 1] = str(ws)
+        argv += ["--inbox", str(ws / "inbox"), "--from", str(d)]
+        try:
+            ids = json.loads((ws / "meta.json").read_text(encoding="utf-8")).get("call_ids") or []
+        except (OSError, ValueError):
+            ids = []
+        if ids:
+            argv += ["--calls", ",".join(ids)]
     return argv
 
 

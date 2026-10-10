@@ -72,3 +72,5 @@ A paid stage needs `"confirm": true` in the body. Otherwise the server returns 4
 - Stage `agreement` runs the pipeline command `judge-agreement`.
 - `estimate_usd` is always null for now: there is no estimator.
 - A job row also keeps `pid`, `started_utc` and `ended_utc` in jobs.jsonl. The API hides them.
+- `--calls` takes one comma-separated value. Stage `submit` runs with `--runs <data>/console/submissions/<sid>` and `--inbox <sid>/inbox --from <data>`. Its `--calls` come from `meta.json` in the submission folder.
+- `fix` and `prove` pass `--prompt data/reference/vani_prompt_sarvam.md`. When it is missing the job is refused: 400 `{error: "VANI prompt file missing", field: "prompt"}`.

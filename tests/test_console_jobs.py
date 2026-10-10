@@ -37,11 +37,14 @@ def call(srv, method, path, body=None, *, origin="auto", ctype="application/json
 
 
 @pytest.fixture
-def data(tmp_path):
+def data(tmp_path, monkeypatch):
     (tmp_path / "calls.jsonl").write_text(
         "\n".join(json.dumps({"call_id": c}) for c in ("c1", "c2")) + "\n", encoding="utf-8"
     )
     (tmp_path / "causes.json").write_text(json.dumps({"causes": [{"cause_id": "C-01"}]}), encoding="utf-8")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("synthetic prompt")
+    monkeypatch.setattr(console, "PROMPT_PATH", prompt)
     return tmp_path
 
 
@@ -199,7 +202,16 @@ def test_valid_args_reach_argv_builder_clean(srv, data, monkeypatch):
         data, "prove", {"cause": "C-01", "n": 8, "k": 3, "attempt": 1, "holdout": True, "screen": False}
     )
     assert argv[:8] == ["uv", "run", "python", "-m", "vaniloop.pipeline", "--runs", str(data), "prove"]
-    assert argv[8:] == ["--cause", "C-01", "--n", "8", "--k", "3", "--attempt", "1", "--holdout"]
+    assert argv[8:] == ["--prompt", str(console.PROMPT_PATH), "--cause", "C-01", "--n", "8", "--k", "3",
+                        "--attempt", "1", "--holdout"]  # fmt: skip
+    ids = console.build_argv(data, "judge", {"calls": ["c1", "c2"]})
+    assert ids[7:] == ["judge", "--calls", "c1,c2"]
+    ws = data / "console" / "submissions" / "s1"
+    ws.mkdir(parents=True)
+    (ws / "meta.json").write_text(json.dumps({"call_ids": ["c1", "c2"]}))
+    assert console.build_argv(data, "submit", {"submission_id": "s1"})[5:] == [
+        "--runs", str(ws), "submit", "--inbox", str(ws / "inbox"), "--from", str(data), "--calls", "c1,c2",
+    ]  # fmt: skip
     seen: list = []
     use_argv(monkeypatch, "pass", seen)
     call(srv, "POST", "/api/jobs", {"stage": "prove", "args": {"cause": "C-01"}, "confirm": True})
@@ -250,3 +262,12 @@ def test_restart_marks_lost_running_job_failed(data):
     runner = console.JobRunner(data)
     assert runner.list()[0]["status"] == "failed"
     assert runner.get("j000000000001")["status"] == "failed"
+
+
+def test_fix_and_prove_refuse_without_prompt_file(srv, monkeypatch, tmp_path):
+    """Protects fix and prove from starting a paid run with no VANI prompt: a missing prompt file must give
+    400 'VANI prompt file missing' with field prompt, and start no job."""
+    monkeypatch.setattr(console, "PROMPT_PATH", tmp_path / "absent.md")
+    for body in ({"stage": "fix"}, {"stage": "prove", "args": {"cause": "C-01"}}):
+        status, out = call(srv, "POST", "/api/jobs", {**body, "confirm": True})
+        assert (status, out) == (400, {"error": "VANI prompt file missing", "field": "prompt"})
