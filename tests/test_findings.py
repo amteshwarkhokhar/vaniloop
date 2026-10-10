@@ -783,7 +783,7 @@ def test_95_qty_captured_rejects_an_unrecognised_unit_word():
     assert f.status == "Fatal" and f.onset_turn == 2
 
 
-@pytest.mark.parametrize("said", ["10 ka", "10 chahiye", "10 hi"])
+@pytest.mark.parametrize("said", ["10 ka", "10 chahiye", "10 hi", "10 toh chahiye", "10 bhi"])
 def test_95_qty_captured_treats_a_hinglish_filler_as_no_unit(said):
     """A filler word after the number ("10 ka", "10 chahiye") is not a unit, so it matches a captured "10".
 

@@ -249,8 +249,8 @@ def parse_quantity_full(text: str | None) -> tuple[float, float, str | None] | N
 # quantity unit-less. Any other word after the number is an attempted unit the parser does not know ("10 sets",
 # "10 yards"), so it must not match the same number of pieces.
 _QTY_FILLERS = frozenset(
-    "ka ki ke hi hai hain chahiye chaiye tak se to only approx approximately lagbhag karib kareeb sir ji madam "
-    "and or bas please pls".split()
+    "ka ki ke hi hai hain chahiye chaiye chahie tak se to toh tho bhi na naa hi ho hoga honge only approx "
+    "approximately lagbhag karib kareeb takriban sir ji madam and or bas please pls yaar matlab".split()
 )
 
 
