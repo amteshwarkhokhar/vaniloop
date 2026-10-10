@@ -58,7 +58,7 @@
     calls: '<path d="M4 10v4"/><path d="M8 7v10"/><path d="M12 4v16"/><path d="M16 8v8"/><path d="M20 11v2"/>',
   };
   const icon = (id) => `<span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24">${own(ICON, id) || ""}</svg></span>`;
-  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "home", filt: { kind: "all", verdict: "all", fatal: false } };
+  const S = { cfg: null, stage: {}, judge: null, avail: [], now: "home", filt: { kind: "all", verdict: "all", fatal: false }, calls: null, causes: null, cv: { verdict: "Fatal", n: 25 } };
   const famHead = (fam) => ITEMS.find((i) => i.fam === fam && i.side !== "tab");
 
   async function get(path) {
@@ -114,6 +114,36 @@
   };
   const sec = (t) => `<h2 class="sec">${esc(t)}</h2>`;
   const failed = (e) => `<p class="empty">This panel could not load (${esc(e.message)}).</p>`;
+  // Per-call rows from GET /api/calls (the active judge's grades). Each row links to the call's transcript.
+  const PAGE = 25, CV = [["Fatal", "Fatal"], ["NonFatal", "Non-fatal"], ["NeedsReview", "Needs review"], ["Pass", "Pass"], ["all", "All"]];
+  const clock = (s) => { if (num(s) == null || s < 0) return "–"; const r = Math.round(s); return `${Math.floor(r / 60)}:${String(r % 60).padStart(2, "0")}`; };
+  const callList = () => (S.calls && Array.isArray(S.calls.v) ? S.calls.v.filter((c) => c && typeof c === "object" && typeof c.call_id === "string" && c.call_id) : null);
+  const callRow = (c) => {
+    const ff = c.first_fault && typeof c.first_fault === "object" ? c.first_fault : null, why = ff ? str(ff.reason) : "";
+    return `<li>${chip(c.verdict)}<a class="cid" href="/#/call/${esc(encodeURIComponent(c.call_id))}">${esc(c.call_id)} <small>Transcript</small></a>` +
+      `<span class="ck">${ff ? esc(own(NAMES, ff.parameter) || ff.parameter) : ""}</span><span class="rsn"${why ? ` title="${esc(why)}"` : ""}>${ff ? esc(why) : "No fault found"}</span><span class="dur">${esc(clock(c.duration_sec))}</span></li>`;
+  };
+  const callsSec = () => {
+    const r = S.calls;
+    if (!r || r.e) return sec("Calls") + (r ? failed(r.e) : '<p class="empty">Loading.</p>');
+    const all = callList() || [], cv = S.cv, act = S.cfg && leaf(S.cfg.judge.active);
+    const vis = all.filter((c) => cv.verdict === "all" || c.verdict === cv.verdict), rest = vis.length - cv.n;
+    const n = (v) => (v === "all" ? all.length : all.filter((c) => c.verdict === v).length);
+    return sec("Calls") + (act && S.judge !== act ? `<p class="label">These rows show ${esc(cap(act))} grades.</p>` : "") +
+      `<div class="pick calls-f"><span class="label" id="calls-l">Show</span><div class="seg" role="group" aria-labelledby="calls-l">${CV.map(([v, l]) => `<button type="button" data-view data-calls="${esc(v)}" aria-pressed="${cv.verdict === v}">${esc(l)} <span class="n">${esc(fmt(n(v)))}</span></button>`).join("")}</div></div>` +
+      `<ul class="calls-list rv">${vis.slice(0, cv.n).map(callRow).join("") || `<li class="empty">${all.length ? "No calls match." : "No graded calls yet."}</li>`}</ul>` +
+      (rest > 0 ? `<button type="button" class="btn sm calls-more" data-view data-more="calls">Show ${esc(Math.min(PAGE, rest))} more</button>` : "");
+  };
+  // Under a cause: up to 10 of its own calls (fatal_calls and nonfatal_calls in GET /api/causes), most severe first.
+  // Not "first fault is the cause's check": a channel cause shares its check with a prompt cause. Left out until both lists load.
+  const idList = (x) => (Array.isArray(x) ? x.filter((s) => typeof s === "string" && s) : []);
+  const faultCalls = (id) => {
+    const all = callList(), cs = S.causes && S.causes.v && Array.isArray(S.causes.v.causes) ? S.causes.v.causes : null;
+    const c = cs && typeof id === "string" && id ? cs.find((x) => x && typeof x === "object" && x.cause_id === id) : null;
+    if (!all || !c) return "";
+    const mem = new Set([...idList(c.fatal_calls), ...idList(c.nonfatal_calls)]), m = all.filter((r) => mem.has(r.call_id));
+    return m.length ? `<details class="calls-d"><summary>Calls with this fault (${esc(fmt(m.length))})</summary><ul class="calls-list">${m.slice(0, 10).map(callRow).join("")}</ul>${m.length > 10 ? '<p class="label">The first 10 are shown.</p>' : ""}</details>` : "";
+  };
 
   const P = {};
   const LABEL_NAME = { question_fits: "Question fits the product", option_fits: "Each option fits", product_match: "Same product" };
@@ -180,7 +210,7 @@
       sec("Checks") +
       `<div class="tw rv"><table><thead><tr><th>Check</th>${order.concat("Unknown").map((k) => `<th class="r">${esc(word(k))}</th>`).join("")}</tr></thead><tbody>${checks
         .map(([p, c]) => `<tr><td>${esc(own(NAMES, p) || p)}</td>${order.concat("Unknown").map((k) => `<td class="r">${c[k] ? `<span class="cell t-${tone(k)}">${esc(c[k])}</span>` : '<span class="cell z">0</span>'}</td>`).join("")}</tr>`)
-        .join("")}</tbody></table></div>` +
+        .join("")}</tbody></table></div>` + callsSec() +
       sec("Flags") + `<div class="chips rv">${Object.entries(d.flags).map(([k, n]) => `<span class="pill">${esc(k.replace(/_/g, " "))}<b>${esc(n)}</b></span>`).join("") || '<span class="empty">None.</span>'}</div>`
     );
   };
@@ -189,7 +219,7 @@
     return (
       head("Issues", "Faults grouped by their cause. The cause behind the most fatal calls comes first.") +
       `<ol class="ranked rv">${d.causes.map((c) => `<li><div><h3>${esc(c.name)}</h3><p class="meta"><span>${esc(c.cause_id)}</span><span>${esc(own(NAMES, c.parameter) || c.parameter)}</span><span>${esc(str(c.type).replace(/_/g, " "))}</span><span>${esc(str(c.status).replace(/_/g, " "))}</span><span>owner ${esc(c.owner || "unassigned")}</span></p></div>` +
-        `<div><div class="pair"><span class="a" style="width:${(100 * fa(c)) / max}%"></span><span class="b" style="width:${(100 * nf(c)) / max}%"></span></div><p class="pc"><b>${esc(c.fatal)}</b> fatal · <b>${esc(c.nonfatal)}</b> non-fatal</p></div></li>`).join("")}</ol>`
+        `<div><div class="pair"><span class="a" style="width:${(100 * fa(c)) / max}%"></span><span class="b" style="width:${(100 * nf(c)) / max}%"></span></div><p class="pc"><b>${esc(c.fatal)}</b> fatal · <b>${esc(c.nonfatal)}</b> non-fatal</p></div>${faultCalls(c.cause_id)}</li>`).join("")}</ol>`
     );
   };
   const diff = (p, extra = "") =>
@@ -300,6 +330,8 @@
       if (await loadAudit()) { show(); const b = document.querySelector(`[data-judge="${S.judge}"]`); if (b) b.focus(); }
     } else if (t.dataset.f) { S.filt[t.dataset.f] = t.dataset.v; keepScroll(); }
     else if (t.dataset.fatal) { S.filt.fatal = !S.filt.fatal; keepScroll(); }
+    else if (t.dataset.calls) { S.cv = { verdict: t.dataset.calls, n: PAGE }; keepScroll(); refocus(`[data-calls="${S.cv.verdict}"]`); }
+    else if (t.dataset.more) { const k = S.cv.n; S.cv.n += PAGE; keepScroll(); refocus(`.calls-list li:nth-child(${k + 1}) .cid`); }
     else if (t.classList.contains("menu")) {
       setMenu(!isOpen(), true);
     }
@@ -309,6 +341,8 @@
     show();
     window.scrollTo(0, y);
   }
+  // After a redraw, focus the pressed control (as the judge toggle does) or the first row that "more" added.
+  const refocus = (sel) => { const b = document.querySelector(sel); if (b) b.focus({ preventScroll: true }); };
   document.addEventListener("keydown", (e) => {
     if (!isOpen()) return;
     if (e.key === "Escape") { e.preventDefault(); closeMenu(true); return; }
@@ -329,8 +363,9 @@
 
   async function boot() {
     const names = ["ingest", "audit", "issues", "fix", "gate", "review"];
-    const [cfg, ...rest] = await Promise.all([settle(get("/api/config")), ...names.map((n) => settle(get(`/api/stage/${n}`)))]);
+    const [cfg, calls, causes, ...rest] = await Promise.all([settle(get("/api/config")), settle(get("/api/calls")), settle(get("/api/causes")), ...names.map((n) => settle(get(`/api/stage/${n}`)))]);
     names.forEach((n, i) => (S.stage[n] = rest[i]));
+    S.calls = calls; S.causes = causes;
     if (cfg.v) {
       S.cfg = cfg.v;
       S.avail = leaf(cfg.v.judge.available) || [];
@@ -343,8 +378,9 @@
   }
   // Reload the stage data after a job ends. An Operate panel keeps its own state, so only the sidebar is redrawn there.
   async function refresh() {
-    const rs = await Promise.all(["ingest", "issues", "fix", "gate", "review"].map((n) => settle(get(`/api/stage/${n}`))));
+    const [calls, causes, ...rs] = await Promise.all([settle(get("/api/calls")), settle(get("/api/causes")), ...["ingest", "issues", "fix", "gate", "review"].map((n) => settle(get(`/api/stage/${n}`)))]);
     ["ingest", "issues", "fix", "gate", "review"].forEach((n, i) => (S.stage[n] = rs[i]));
+    S.calls = calls; S.causes = causes;
     await loadAudit();
     const it = ITEMS.find((i) => i.id === S.now);
     if (it && it.group === "operate") nav(); else show();
