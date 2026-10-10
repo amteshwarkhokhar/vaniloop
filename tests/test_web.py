@@ -356,7 +356,10 @@ def test_call_detail_adds_each_step_output_for_the_call(server):
     assert [(c["cause_id"], c["role"]) for c in body["causes"]] == [("C-01", "fatal"), ("C-03", "nonfatal")]
     assert body["patches"] == [], "no patch exists for C-01 or C-03 in the fixture"
     assert [(g["cause_id"], g["attempt"], g["old_fails"], g["new_fails"]) for g in body["gates"]] == [
-        ("C-01", 1, 3, 3), ("C-01", 2, 3, 1), ("C-03", 1, 1, 0)]
+        ("C-01", 1, 3, 3),
+        ("C-01", 2, 3, 1),
+        ("C-03", 1, 1, 0),
+    ]
     status, other = get_json(server, "/api/call/web_08")
     assert {p["cause_id"] for p in other["patches"]} == {"C-02"} and other["ledger"] is None
 

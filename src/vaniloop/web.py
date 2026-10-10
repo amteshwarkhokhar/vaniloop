@@ -299,10 +299,18 @@ def _call_steps(d: Path, call_id: str) -> dict:
     mine_rows = [p for p in rows if isinstance(p, dict) and p.get("cause_id") in ids]
     patches = [{k: p.get(k) for k in _PATCH_KEYS if k in p} for p in mine_rows]
     replays = [
-        {"cause_id": g.get("cause_id"), "attempt": g.get("attempt"), "decision": g.get("decision"), "k": pc.get("k"),
-         "old_fails": pc.get("old_fails"), "new_fails": pc.get("new_fails")}
-        for g in gates(d) if isinstance(g, dict)
-        for pc in _list(g.get("per_call")) if isinstance(pc, dict) and pc.get("call_id") == call_id
+        {
+            "cause_id": g.get("cause_id"),
+            "attempt": g.get("attempt"),
+            "decision": g.get("decision"),
+            "k": pc.get("k"),
+            "old_fails": pc.get("old_fails"),
+            "new_fails": pc.get("new_fails"),
+        }
+        for g in gates(d)
+        if isinstance(g, dict)
+        for pc in _list(g.get("per_call"))
+        if isinstance(pc, dict) and pc.get("call_id") == call_id
     ]
     return {"causes": mine, "patches": patches, "gates": replays}
 
