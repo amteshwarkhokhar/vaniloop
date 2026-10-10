@@ -52,7 +52,8 @@ def test_submit_mp3_json_existing_call_and_a_bad_file(tmp_path, monkeypatch, cap
     monkeypatch.setattr(pipeline, "transcribe_call", fake_transcribe)
     monkeypatch.setattr(pipeline, "detect_silences", lambda p: [])
     monkeypatch.setattr(ledger, "complete_json", lambda *a, **k: dict(FAKE))
-    monkeypatch.setattr(pipeline, "judge_ledger", lambda call, led: led)
+    monkeypatch.setattr(pipeline, "ask", lambda call, led: [])  # Jev mocked: no raw answers, labels unchanged
+    monkeypatch.setattr(pipeline, "labels", lambda raw, led: led)
     pipeline.main(["--runs", str(ws), "submit", "--inbox", str(inbox), "--calls", "syn_001", "--from", str(src)])
     out = capsys.readouterr().out
     assert sorted(a["call_id"] for a in rows(ws / "audits.jsonl")) == ["syn_001", "up_json", "up_mp3"]
@@ -68,7 +69,8 @@ def setup_submit(tmp_path, monkeypatch, judge=lambda call, led: led):
     inbox.mkdir(parents=True)
     (inbox / "up_json.json").write_text(json.dumps(transcript("up_json")))
     monkeypatch.setattr(ledger, "complete_json", lambda *a, **k: dict(FAKE))
-    monkeypatch.setattr(pipeline, "judge_ledger", judge)
+    monkeypatch.setattr(pipeline, "ask", lambda call, led: judge(call, led) and [])  # judge may raise
+    monkeypatch.setattr(pipeline, "labels", lambda raw, led: led)
     return ws, inbox
 
 
@@ -151,7 +153,7 @@ def test_submit_ignores_a_stale_jev_ledger(tmp_path, monkeypatch, capsys):
     def boom(call, led):
         raise RuntimeError("jev down")
 
-    monkeypatch.setattr(pipeline, "judge_ledger", boom)
+    monkeypatch.setattr(pipeline, "ask", boom)
     monkeypatch.setenv("VANILOOP_CACHE", "refresh")
     monkeypatch.setattr(pipeline, "fingerprint", lambda call, led: "changed")  # the ledger the refresh would judge
     pipeline.main(["--runs", str(ws), "submit", "--inbox", str(inbox)])

@@ -117,42 +117,89 @@ def build_questions(call: CallRecord, led: Ledger) -> list[tuple[dict, dict[str,
     return [(state, questions) for _, _, state, questions in _requests(call, led)]
 
 
-def _spec_labels(options: int, ans: dict[str, float], named: bool) -> tuple[bool | None, bool | None]:
-    """(question_fits_product, fits_confirmed_product) from the answers of one spec turn."""
-    q = None if "q" not in ans else to_bool(ans["q"], Q_TRUE_AT, Q_FALSE_AT)
-    if named and ans.get("n", 0.0) <= N_DROP_AT:  # a missing check counts as a failed one
+def thresholds() -> dict[str, float]:
+    """The thresholds now in force, by module name. A rubric override shows here."""
+    return {
+        "Q_TRUE_AT": Q_TRUE_AT,
+        "Q_FALSE_AT": Q_FALSE_AT,
+        "OPT_TRUE_AT": OPT_TRUE_AT,
+        "OPT_FALSE_AT": OPT_FALSE_AT,
+        "PM_TRUE_AT": PM_TRUE_AT,
+        "PM_FALSE_AT": PM_FALSE_AT,
+        "N_DROP_AT": N_DROP_AT,
+        "FRUSTRATED_P": rules.FRUSTRATED_P,
+    }
+
+
+def _spec_labels(
+    options: int, ans: dict[str, float], named: bool, th: dict[str, float] | None = None
+) -> tuple[bool | None, bool | None]:
+    """(question_fits_product, fits_confirmed_product) from the answers of one spec turn. th: see thresholds()."""
+    t = th or thresholds()
+    q = None if "q" not in ans else to_bool(ans["q"], t["Q_TRUE_AT"], t["Q_FALSE_AT"])
+    if named and ans.get("n", 0.0) <= t["N_DROP_AT"]:  # a missing check counts as a failed one
         q = None
     if q is None:
         return None, None
     opts = [
-        None if f"opt{i}" not in ans else to_bool(ans[f"opt{i}"], OPT_TRUE_AT, OPT_FALSE_AT) for i in range(options)
+        None if f"opt{i}" not in ans else to_bool(ans[f"opt{i}"], t["OPT_TRUE_AT"], t["OPT_FALSE_AT"])
+        for i in range(options)
     ]
     if q is False or False in opts:
         return q, False
     return q, True if all(o is True for o in opts) else None
 
 
-def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
-    """Return a copy of led with Jev's labels in place of Gemini's. Every other field is unchanged."""
+def ask(call: CallRecord, led: Ledger) -> list[dict]:
+    """Every Jev request of the call and its raw answers: [{kind, idx, options, named, answers: {qid: probability}}].
+
+    No threshold is applied here, so the answers stay valid when a threshold changes. A failed request or a missing
+    answer raises: the whole call fails, the judge step logs it and retries it, and no row is written.
+    """
+    opts = {b.idx: len(b.options_offered) for b in led.bot_turns}
+    named = {b.idx: bool(b.spec_name) for b in led.bot_turns}
+    raw = []
+    for kind, idx, state, questions in _requests(call, led):
+        ans = complete_jev(state, questions, cache_tag=JEV_VERSION)
+        if kind == "buyer" and "f" not in ans:
+            raise ValueError(f"jev: no irritation answer for user turn {idx}")
+        if kind == "pm" and "pm" not in ans:
+            raise ValueError("jev: no product match answer")
+        raw.append(
+            {
+                "kind": kind,
+                "idx": idx,
+                "options": opts[idx] if kind == "spec" else 0,
+                "named": named[idx] if kind == "spec" else False,
+                "answers": dict(ans),
+            }
+        )
+    return raw
+
+
+def decide(
+    requests: list[dict], th: dict[str, float] | None = None
+) -> tuple[dict[int, tuple[bool | None, bool | None]], dict[int, float], bool | None]:
+    """Combine raw answers into labels: ({spec idx: (question fits, fits confirmed)}, {buyer idx: irritation
+    probability}, product match). The one combination code of the judge step and of the console's tuning."""
+    t = th or thresholds()
     spec: dict[int, tuple[bool | None, bool | None]] = {}
     frustrated: dict[int, float] = {}
     pm: bool | None = None
-    opts = {b.idx: len(b.options_offered) for b in led.bot_turns}
-    named = {b.idx: bool(b.spec_name) for b in led.bot_turns}
-    # A failed request or a missing answer raises: the whole call fails, the judge step logs it and retries it,
-    # and no row with a made-up label is written.
-    for kind, idx, state, questions in _requests(call, led):
-        ans = complete_jev(state, questions, cache_tag=JEV_VERSION)
-        if kind == "spec":
-            spec[idx] = _spec_labels(opts[idx], ans, named[idx])
-        elif kind == "buyer":
-            if "f" not in ans:
-                raise ValueError(f"jev: no irritation answer for user turn {idx}")
-            frustrated[idx] = ans["f"]  # the probability, used directly
+    for r in requests:
+        ans = r["answers"]
+        if r["kind"] == "spec":
+            spec[r["idx"]] = _spec_labels(r["options"], ans, r["named"], t)
+        elif r["kind"] == "buyer":
+            frustrated[r["idx"]] = ans["f"]  # the probability, used directly
         else:
-            if "pm" not in ans:
-                raise ValueError("jev: no product match answer")
-            pm = to_bool(ans["pm"])
+            pm = to_bool(ans["pm"], t["PM_TRUE_AT"], t["PM_FALSE_AT"])
+    return spec, frustrated, pm
+
+
+def labels(raw: list[dict], led: Ledger) -> Ledger:
+    """Return a copy of led with Jev's labels from raw answers, at the thresholds now in force."""
+    spec, frustrated, pm = decide(raw)
     unjudged = [u.idx for u in led.user_turns if u.idx not in frustrated]
     if unjudged:  # a ledger buyer turn with no transcript turn: never default it to calm
         raise ValueError(f"jev: user turns {unjudged} have no transcript turn")
@@ -166,6 +213,11 @@ def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
     ]
     users = [u.model_copy(update={"frustrated": frustrated[u.idx]}) for u in led.user_turns]
     return led.model_copy(update={"bot_turns": bots, "user_turns": users, "product_match": pm})
+
+
+def judge_ledger(call: CallRecord, led: Ledger) -> Ledger:
+    """Return a copy of led with Jev's labels in place of Gemini's. Every other field is unchanged."""
+    return labels(ask(call, led), led)
 
 
 def fingerprint(call: CallRecord, led: Ledger) -> str:

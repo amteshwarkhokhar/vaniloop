@@ -34,7 +34,8 @@ def workspace(tmp_path, monkeypatch, n=3):
     gemini = []
     monkeypatch.setattr(ledger, "complete_json", lambda *a, **k: gemini.append(1) or dict(FAKE))
     judged = []
-    monkeypatch.setattr(pipeline, "judge_ledger", lambda call, led: judged.append(call.call_id) or led)
+    monkeypatch.setattr(pipeline, "ask", lambda call, led: judged.append(call.call_id) or [])
+    monkeypatch.setattr(pipeline, "labels", lambda raw, led: led)
     return ws, gemini, judged
 
 
