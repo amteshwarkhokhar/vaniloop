@@ -13,7 +13,7 @@ APP = Path(__file__).resolve().parents[1] / "src" / "vaniloop" / "dashboard.py"
 
 
 def _app(tmp_path, monkeypatch) -> tuple[AppTest, list[str]]:
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         shutil.copy(f, tmp_path / f.name)
     ids = [json.loads(line)["call_id"] for line in (FIX / "synthetic_audits.jsonl").read_text().splitlines()][:3]
     (tmp_path / "grade_sample.json").write_text(json.dumps(ids))
@@ -57,7 +57,7 @@ def test_a_call_link_opens_that_call_in_the_audit_view(tmp_path, monkeypatch):
 
     If this breaks, a link sent for review opens the wrong call or the first call in the list.
     """
-    for f in FIX.iterdir():
+    for f in (p for p in FIX.iterdir() if p.is_file()):
         shutil.copy(f, tmp_path / f.name)
     monkeypatch.setenv("VANILOOP_DATA", str(tmp_path))
     ids = [json.loads(line)["call_id"] for line in (FIX / "synthetic_audits.jsonl").read_text().splitlines()]
